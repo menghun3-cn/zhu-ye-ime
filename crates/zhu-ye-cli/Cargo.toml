@@ -1,0 +1,10 @@
+[package]
+name = "zhu-ye-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "竹叶输入法自检、演示与基准 CLI"
+
+[dependencies]
+zhu-ye-core = { path = "../zhu-ye-core" }

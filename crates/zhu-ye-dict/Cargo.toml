@@ -1,0 +1,10 @@
+[package]
+name = "zhu-ye-dict"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "竹叶输入法词典数据管线构建器"
+
+[dependencies]
+zhu-ye-core = { path = "../zhu-ye-core" }

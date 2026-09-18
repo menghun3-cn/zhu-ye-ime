@@ -1,0 +1,658 @@
+//! TSF COM 服务与最小输入处理器。
+//!
+//! 本模块负责输入法 DLL 的 COM 生命周期、类工厂、文本服务实例，以及 M1 的
+//! 按键 → 组合 → 上屏最小闭环：
+//! - `ITfKeyEventSink` 接收键盘事件并决定是否吃键；
+//! - `ITfEditSession` 在 TSF 编辑会话内写入组合文本或提交文本；
+//! - `ITfCompositionSink` 在宿主终止组合时同步清理输入引擎状态。
+//!
+//! TSF 注册表写入与清理由 `scripts/` 下的安装/卸载脚本完成，本模块不直接改注册表。
+
+use std::ffi::c_void;
+use std::ptr;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+use windows::Win32::Foundation::{
+    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_POINTER, LPARAM, S_FALSE, S_OK, WPARAM,
+};
+use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
+use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_Z,
+};
+use windows::Win32::UI::TextServices::{
+    ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
+    ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfKeyEventSink,
+    ITfKeyEventSink_Impl, ITfSource, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
+    ITfTextInputProcessor_Impl, ITfThreadMgr, TF_ES_READWRITE, TF_ES_SYNC, TF_IAS_NOQUERY,
+};
+use windows_core::{
+    implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
+};
+use zhu_ye_core::core_version;
+
+use crate::input::{InputEngine, InputMode};
+
+/// 输入法 TIP 的 CLSID，与 `scripts/ime-identity.ps1` 中的 `TipClsid` 保持一致。
+pub const CLSID_ZHU_YE_TIP: windows::core::GUID =
+    windows::core::GUID::from_u128(0xE54D6682_8650_40E7_A9EE_6FD1137849AE);
+
+/// 简体中文（zh-CN，LCID 0x0804）下的语言配置文件 GUID，
+/// 与 `scripts/ime-identity.ps1` 中的 `ProfileGuid` 保持一致。
+pub const PROFILE_GUID_ZHU_YE: windows::core::GUID =
+    windows::core::GUID::from_u128(0x6315FE74_92C3_439B_8CDF_FDB6E43EDAF1);
+
+/// 当前由 DLL 创建且尚未释放的 COM 对象数（含类工厂与文本服务）。
+static ACTIVE_OBJECTS: AtomicUsize = AtomicUsize::new(0);
+
+/// `IClassFactory::LockServer` 锁定的层数。
+static SERVER_LOCKS: AtomicUsize = AtomicUsize::new(0);
+
+/// TSF 键盘事件对应的输入动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyAction {
+    /// 小写英文字母进入组合。
+    Letter(char),
+    /// 退格删除组合末尾字母。
+    Backspace,
+    /// 空格提交第一候选或拼音原文。
+    Space,
+    /// 回车提交拼音原文。
+    Enter,
+    /// Esc 取消当前组合。
+    Escape,
+    /// 数字选择候选，index 从 0 开始。
+    Select(usize),
+}
+
+/// 文本服务的共享状态。COM 回调可能由宿主在任意时刻进入，
+/// 因此引擎、线程管理器引用与组合状态统一放在互斥锁内。
+struct EngineState {
+    engine: InputEngine,
+    tid: u32,
+    thread_mgr: Option<ITfThreadMgr>,
+    key_sink_cookie: Option<u32>,
+    composition: Option<ITfComposition>,
+}
+
+impl EngineState {
+    fn new() -> Self {
+        Self {
+            engine: InputEngine::with_m1_seed(),
+            tid: 0,
+            thread_mgr: None,
+            key_sink_cookie: None,
+            composition: None,
+        }
+    }
+}
+
+#[implement(IClassFactory)]
+struct ClassFactory;
+
+impl Drop for ClassFactory {
+    fn drop(&mut self) {
+        object_released();
+    }
+}
+
+impl IClassFactory_Impl for ClassFactory_Impl {
+    fn CreateInstance(
+        &self,
+        punkouter: Ref<'_, IUnknown>,
+        riid: *const windows::core::GUID,
+        ppvobject: *mut *mut c_void,
+    ) -> Result<()> {
+        if riid.is_null() || ppvobject.is_null() {
+            return Err(E_POINTER.into());
+        }
+        if !punkouter.is_null() {
+            return Err(CLASS_E_NOAGGREGATION.into());
+        }
+
+        let service = create_text_service();
+        let hr = unsafe { service.query(riid, ppvobject) };
+        hr.ok()
+    }
+
+    fn LockServer(&self, flock: BOOL) -> Result<()> {
+        if !flock.as_bool() {
+            SERVER_LOCKS.fetch_sub(1, Ordering::Relaxed);
+        } else {
+            SERVER_LOCKS.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+#[implement(ITfTextInputProcessorEx, ITfKeyEventSink, ITfCompositionSink)]
+struct TextService {
+    state: Rc<Mutex<EngineState>>,
+}
+
+impl TextService {
+    fn state(&self) -> &Rc<Mutex<EngineState>> {
+        &self.state
+    }
+}
+
+impl Drop for TextService {
+    fn drop(&mut self) {
+        object_released();
+    }
+}
+
+impl ITfTextInputProcessor_Impl for TextService_Impl {
+    fn Activate(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32) -> Result<()> {
+        // 自检等场景允许空线程管理器；此时不注册按键事件，其余状态照常可用。
+        let Some(thread_mgr) = ptim.cloned() else {
+            return Ok(());
+        };
+
+        let source = thread_mgr.cast::<ITfSource>()?;
+        let key_sink = self.to_object().to_interface::<ITfKeyEventSink>();
+        let cookie = unsafe { source.AdviseSink(&ITfKeyEventSink::IID, &key_sink) }?;
+
+        let mut state = state_lock(self);
+        state.tid = tid;
+        state.thread_mgr = Some(thread_mgr);
+        state.key_sink_cookie = Some(cookie);
+        Ok(())
+    }
+
+    fn Deactivate(&self) -> Result<()> {
+        let mut state = state_lock(self);
+        state.composition = None;
+        state.engine.cancel_input();
+
+        if let Some(thread_mgr) = state.thread_mgr.take() {
+            if let Some(cookie) = state.key_sink_cookie.take() {
+                if let Ok(source) = thread_mgr.cast::<ITfSource>() {
+                    let _ = unsafe { source.UnadviseSink(cookie) };
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ITfTextInputProcessorEx_Impl for TextService_Impl {
+    fn ActivateEx(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32, _dwflags: u32) -> Result<()> {
+        ITfTextInputProcessor_Impl::Activate(self, ptim, tid)
+    }
+}
+
+impl ITfKeyEventSink_Impl for TextService_Impl {
+    fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
+        Ok(())
+    }
+
+    fn OnTestKeyDown(
+        &self,
+        _pic: Ref<'_, ITfContext>,
+        wparam: WPARAM,
+        _lparam: LPARAM,
+    ) -> Result<BOOL> {
+        Ok(BOOL(plan_action(wparam, self.state()).is_some() as i32))
+    }
+
+    fn OnTestKeyUp(
+        &self,
+        _pic: Ref<'_, ITfContext>,
+        _wparam: WPARAM,
+        _lparam: LPARAM,
+    ) -> Result<BOOL> {
+        Ok(BOOL(0))
+    }
+
+    fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+        let Some(action) = plan_action(wparam, self.state()) else {
+            return Ok(BOOL(0));
+        };
+
+        let Some(context) = pic.cloned() else {
+            return Ok(BOOL(0));
+        };
+
+        debug_log(&format!("zhu-ye: key 0x{:X} action {:?}", wparam.0, action));
+
+        let tid = state_lock(self).tid;
+        let sink = self.to_object().to_interface::<ITfCompositionSink>();
+        let state = Rc::clone(self.state());
+        let session_context = context.clone();
+        let session: ITfEditSession = EditSession {
+            callback: Mutex::new(Some(Box::new(move |ec| {
+                apply_action(&state, &session_context, &sink, ec, action)
+            }))),
+        }
+        .into();
+
+        let session_hr =
+            unsafe { context.RequestEditSession(tid, &session, TF_ES_SYNC | TF_ES_READWRITE) };
+        let session_failed = match session_hr {
+            Ok(hr) => hr.is_err(),
+            Err(_) => true,
+        };
+        // 编辑会话失败时仍同步引擎，避免后续按键基于漂移状态继续输入。
+        if session_failed {
+            sync_engine(self.state(), action);
+        }
+        Ok(BOOL(1))
+    }
+
+    fn OnKeyUp(&self, _pic: Ref<'_, ITfContext>, _wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+        Ok(BOOL(0))
+    }
+
+    fn OnPreservedKey(
+        &self,
+        _pic: Ref<'_, ITfContext>,
+        _rguid: *const windows::core::GUID,
+    ) -> Result<BOOL> {
+        Ok(BOOL(0))
+    }
+}
+
+impl ITfCompositionSink_Impl for TextService_Impl {
+    fn OnCompositionTerminated(
+        &self,
+        _ecwrite: u32,
+        _pcomposition: Ref<'_, ITfComposition>,
+    ) -> Result<()> {
+        let mut state = state_lock(self);
+        state.composition = None;
+        state.engine.cancel_input();
+        Ok(())
+    }
+}
+
+/// 一次编辑会话回调。TSF 会以同步方式调用 `DoEditSession`，
+/// 因此只需保存一个闭包并在首次调用时执行。
+type EditSessionCallback = Box<dyn FnOnce(u32) -> Result<()>>;
+
+#[implement(ITfEditSession)]
+struct EditSession {
+    callback: Mutex<Option<EditSessionCallback>>,
+}
+
+impl ITfEditSession_Impl for EditSession_Impl {
+    fn DoEditSession(&self, ec: u32) -> Result<()> {
+        if let Some(callback) = self.callback.lock().unwrap().take() {
+            callback(ec)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// 将虚拟键码归类为输入动作；与本输入法无关的键返回 `None`。
+fn classify_key(wparam: WPARAM) -> Option<KeyAction> {
+    let code = VIRTUAL_KEY(wparam.0 as u16).0;
+    match code {
+        code if (VK_A.0..=VK_Z.0).contains(&code) => {
+            let letter = u16::from(b'a') + (code - VK_A.0);
+            Some(KeyAction::Letter(
+                char::from_u32(u32::from(letter)).unwrap(),
+            ))
+        }
+        code if code == VK_BACK.0 => Some(KeyAction::Backspace),
+        code if code == VK_SPACE.0 => Some(KeyAction::Space),
+        code if code == VK_RETURN.0 => Some(KeyAction::Enter),
+        code if code == VK_ESCAPE.0 => Some(KeyAction::Escape),
+        code if (VK_1.0..=VK_9.0).contains(&code) => {
+            Some(KeyAction::Select(usize::from(code - VK_1.0)))
+        }
+        _ => None,
+    }
+}
+
+/// 决定是否吃下按键。字母仅在中文模式下进入组合；
+/// 功能键只在已有组合时处理，避免键盘事件被无谓吞掉。
+fn plan_action(wparam: WPARAM, state: &Rc<Mutex<EngineState>>) -> Option<KeyAction> {
+    let action = classify_key(wparam)?;
+    let engine = &state.lock().unwrap().engine;
+    match action {
+        KeyAction::Letter(_) => (engine.mode() == InputMode::Chinese).then_some(action),
+        _ if engine.is_active() => Some(action),
+        _ => None,
+    }
+}
+
+/// 应用一次输入动作：先写 TSF 组合/提交文本，再同步引擎状态。
+fn apply_action(
+    state: &Rc<Mutex<EngineState>>,
+    context: &ITfContext,
+    sink: &ITfCompositionSink,
+    ec: u32,
+    action: KeyAction,
+) -> Result<()> {
+    match action {
+        KeyAction::Letter(_) | KeyAction::Backspace => {
+            let text = compose_text(state, action);
+            update_composition(state, context, sink, ec, &text)?;
+        }
+        KeyAction::Space | KeyAction::Enter | KeyAction::Escape | KeyAction::Select(_) => {
+            let text = commit_text(state, action);
+            finish_composition(state, context, ec, &text)?;
+        }
+    }
+    sync_engine(state, action);
+    Ok(())
+}
+
+/// 计算下一次组合串文本；不修改引擎，真实状态在 TSF 写入完成后同步。
+fn compose_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
+    let engine = &mut state.lock().unwrap().engine;
+    match action {
+        KeyAction::Letter(c) => format!("{}{}", engine.composing(), c),
+        KeyAction::Backspace => engine.preview_after_backspace().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// 计算本次提交文本；清空引擎状态交给 TSF 写入完成后的 `sync_engine`。
+fn commit_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
+    let engine = &mut state.lock().unwrap().engine;
+    match action {
+        KeyAction::Space => engine.preview_space().unwrap_or_default(),
+        KeyAction::Enter => engine.preview_enter().unwrap_or_default(),
+        KeyAction::Escape => String::new(),
+        KeyAction::Select(index) => engine.preview_selection(index).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// 将引擎状态推进到动作后的实际状态。
+fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
+    let engine = &mut state.lock().unwrap().engine;
+    match action {
+        KeyAction::Letter(c) => {
+            let _ = engine.handle_letter(c);
+        }
+        KeyAction::Backspace => {
+            let _ = engine.handle_backspace();
+        }
+        KeyAction::Space => {
+            let _ = engine.handle_space();
+        }
+        KeyAction::Enter => {
+            let _ = engine.handle_enter();
+        }
+        KeyAction::Escape => {
+            let _ = engine.handle_escape();
+        }
+        KeyAction::Select(index) => {
+            let _ = engine.select_index(index);
+        }
+    }
+}
+
+/// 更新组合文本：已有组合直接替换，否则插入文本并启动新组合。
+fn update_composition(
+    state: &Rc<Mutex<EngineState>>,
+    context: &ITfContext,
+    sink: &ITfCompositionSink,
+    ec: u32,
+    text: &str,
+) -> Result<()> {
+    let wide = to_wide(text);
+    let existing = state.lock().unwrap().composition.clone();
+    match existing {
+        Some(composition) => {
+            let range = unsafe { composition.GetRange() }?;
+            unsafe { range.SetText(ec, 0, &wide) }?;
+        }
+        None => {
+            let insert = context.cast::<ITfInsertAtSelection>()?;
+            let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &wide) }?;
+            let composition_services = context.cast::<ITfContextComposition>()?;
+            let composition = unsafe { composition_services.StartComposition(ec, &range, sink) }?;
+            state.lock().unwrap().composition = Some(composition);
+        }
+    }
+    Ok(())
+}
+
+/// 结束组合并提交文本；空文本按取消处理，若原本没有组合则直接插入提交文本。
+fn finish_composition(
+    state: &Rc<Mutex<EngineState>>,
+    context: &ITfContext,
+    ec: u32,
+    text: &str,
+) -> Result<()> {
+    let composition = state.lock().unwrap().composition.take();
+    match composition {
+        Some(composition) => {
+            let wide: Vec<u16> = if text.is_empty() {
+                Vec::new()
+            } else {
+                to_wide(text)
+            };
+            let range = unsafe { composition.GetRange() }?;
+            unsafe { range.SetText(ec, 0, &wide) }?;
+            unsafe { composition.EndComposition(ec) }?;
+        }
+        None if !text.is_empty() => {
+            let insert = context.cast::<ITfInsertAtSelection>()?;
+            let wide = to_wide(text);
+            unsafe { insert.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &wide) }?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// 将 UTF-8 文本转为以空字符结尾的 UTF-16 序列。
+fn to_wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 输出调试日志到调试器输出通道，便于在虚拟机中观察按键流程。
+fn debug_log(message: &str) {
+    let wide = to_wide(message);
+    unsafe { OutputDebugStringW(PCWSTR(wide.as_ptr())) };
+}
+
+fn state_lock(service: &TextService_Impl) -> impl std::ops::DerefMut<Target = EngineState> + '_ {
+    service.state().lock().unwrap()
+}
+
+/// 活动对象计数加一；创建成功后必须由对应对象的 `Drop` 减一。
+fn object_created() {
+    ACTIVE_OBJECTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 活动对象计数减一；只在对象 `Drop` 时调用。
+fn object_released() {
+    ACTIVE_OBJECTS.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// 创建类工厂并计入活动对象数；失败路径由 `Drop` 回滚计数。
+fn create_class_factory() -> IClassFactory {
+    object_created();
+    ClassFactory.into()
+}
+
+/// 创建文本服务并计入活动对象数；失败路径由 `Drop` 回滚计数。
+fn create_text_service() -> IUnknown {
+    object_created();
+    TextService {
+        state: Rc::new(Mutex::new(EngineState::new())),
+    }
+    .into()
+}
+
+/// DLL 标准导出：按 CLSID 返回类工厂对象。
+///
+/// # Safety
+/// 参数由 TSF 宿主按 COM 规范传入：非空指针写出接口指针。
+#[no_mangle]
+pub unsafe extern "system" fn DllGetClassObject(
+    rclsid: *const windows::core::GUID,
+    riid: *const windows::core::GUID,
+    ppv: *mut *mut c_void,
+) -> HRESULT {
+    if rclsid.is_null() || riid.is_null() || ppv.is_null() {
+        return E_POINTER;
+    }
+    unsafe {
+        *ppv = ptr::null_mut();
+    }
+    if unsafe { *rclsid } != CLSID_ZHU_YE_TIP {
+        return CLASS_E_CLASSNOTAVAILABLE;
+    }
+
+    let factory: IUnknown = create_class_factory().into();
+    unsafe { factory.query(riid, ppv) }
+}
+
+/// DLL 标准导出：无活动对象且未被 LockServer 时允许卸载。
+#[no_mangle]
+pub extern "system" fn DllCanUnloadNow() -> HRESULT {
+    if ACTIVE_OBJECTS.load(Ordering::Relaxed) == 0 && SERVER_LOCKS.load(Ordering::Relaxed) == 0 {
+        S_OK
+    } else {
+        S_FALSE
+    }
+}
+
+/// 加载探针：宿主进程可通过导出符号确认 DLL 已加载。
+#[must_use]
+#[no_mangle]
+pub extern "system" fn dll_probe() -> u32 {
+    0x5A48_4559
+}
+
+/// 返回适配层依赖的核心库版本，供自检输出。
+#[must_use]
+pub fn paired_core_version() -> &'static str {
+    core_version()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_0;
+    use windows::Win32::UI::TextServices::{ITfTextInputProcessor, ITfThreadMgr};
+
+    /// 生命周期计数是全局状态；测试并行运行时互斥，避免相互干扰。
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn 类工厂可创建文本服务() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let factory = create_class_factory();
+        let service: ITfTextInputProcessorEx =
+            unsafe { factory.CreateInstance(Option::<&IUnknown>::None) }.unwrap();
+        let activated = unsafe { service.ActivateEx(Option::<&ITfThreadMgr>::None, 0, 0) };
+        assert!(activated.is_ok());
+    }
+
+    #[test]
+    fn 拒绝聚合创建() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let factory = create_class_factory();
+        let aggregate = factory.cast::<IUnknown>().unwrap();
+        let result: windows::core::Result<ITfTextInputProcessor> =
+            unsafe { factory.CreateInstance(Some(&aggregate)) };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn 探针与版本可工作() {
+        assert_eq!(dll_probe(), 0x5A48_4559);
+        assert!(!paired_core_version().is_empty());
+    }
+
+    #[test]
+    fn 活动对象为零时可卸载() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        assert_eq!(DllCanUnloadNow(), S_OK);
+        let factory = create_class_factory();
+        assert_eq!(DllCanUnloadNow(), S_FALSE);
+        drop(factory);
+        assert_eq!(DllCanUnloadNow(), S_OK);
+    }
+
+    #[test]
+    fn 键分类覆盖字母与功能键() {
+        assert_eq!(
+            classify_key(WPARAM(VK_A.0 as usize)),
+            Some(KeyAction::Letter('a'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_Z.0 as usize)),
+            Some(KeyAction::Letter('z'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_BACK.0 as usize)),
+            Some(KeyAction::Backspace)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_SPACE.0 as usize)),
+            Some(KeyAction::Space)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_RETURN.0 as usize)),
+            Some(KeyAction::Enter)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_ESCAPE.0 as usize)),
+            Some(KeyAction::Escape)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_1.0 as usize)),
+            Some(KeyAction::Select(0))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_9.0 as usize)),
+            Some(KeyAction::Select(8))
+        );
+        assert_eq!(classify_key(WPARAM(VK_0.0 as usize)), None);
+        assert_eq!(classify_key(WPARAM(0x00A0)), None);
+    }
+
+    #[test]
+    fn 未激活组合时功能键放行字母进入引擎() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        assert_eq!(
+            plan_action(WPARAM(VK_A.0 as usize), &state),
+            Some(KeyAction::Letter('a'))
+        );
+        assert_eq!(plan_action(WPARAM(VK_SPACE.0 as usize), &state), None);
+        assert_eq!(plan_action(WPARAM(VK_RETURN.0 as usize), &state), None);
+        assert_eq!(plan_action(WPARAM(VK_ESCAPE.0 as usize), &state), None);
+
+        state.lock().unwrap().engine.handle_letter('a');
+        assert_eq!(
+            plan_action(WPARAM(VK_SPACE.0 as usize), &state),
+            Some(KeyAction::Space)
+        );
+        assert_eq!(
+            plan_action(WPARAM(VK_1.0 as usize), &state),
+            Some(KeyAction::Select(0))
+        );
+    }
+
+    #[test]
+    fn 宽字符转换以空字符结尾() {
+        let wide = to_wide("你好");
+        assert_eq!(wide, vec![0x4F60, 0x597D, 0]);
+        assert_eq!(to_wide(""), vec![0]);
+    }
+
+    #[test]
+    fn 引擎推进与组合文本预览一致() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        assert_eq!(compose_text(&state, KeyAction::Letter('n')), "n");
+        sync_engine(&state, KeyAction::Letter('n'));
+        assert_eq!(compose_text(&state, KeyAction::Letter('i')), "ni");
+        sync_engine(&state, KeyAction::Letter('i'));
+        assert_eq!(commit_text(&state, KeyAction::Space), "你");
+        sync_engine(&state, KeyAction::Space);
+        assert!(!state.lock().unwrap().engine.is_active());
+    }
+}

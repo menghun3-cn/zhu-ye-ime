@@ -1,0 +1,9 @@
+[package]
+name = "zhu-ye-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "竹叶输入法核心算法库：拼音、词典、排序、翻译、用户词与 AI 接口"
+
+[dependencies]
