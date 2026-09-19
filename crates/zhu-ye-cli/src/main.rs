@@ -4,8 +4,11 @@
 
 use std::time::Instant;
 
+use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::{
     core_version, Candidate, CandidateSorter, Dictionary, DictionaryEntry, InMemoryDictionary,
     OfflineAiService, SyllableTable, Translator,
@@ -19,6 +22,7 @@ fn main() {
         Some("self-check") => self_check(),
         Some("bench") => bench(),
         Some("user") => user_command(args),
+        Some("dict") => dict_command(args),
         _ => print_usage(),
     }
 }
@@ -31,6 +35,7 @@ fn print_usage() {
     println!("  user [list]        查看用户词库");
     println!("  user delete W P    删除用户词（词与拼音）");
     println!("  user reset         清空用户词库");
+    println!("  dict <文件> [拼]   加载 v1 词典并查询词条");
 }
 
 fn demo(pinyin: &str) {
@@ -42,7 +47,8 @@ fn demo(pinyin: &str) {
         println!("  {}: {}", index + 1, segment.join("-"));
     }
 
-    let dictionary = demo_dictionary();
+    let dictionary: Arc<dyn Dictionary> = load_dictionary();
+    println!("词典: {}", dictionary_source_label());
     let mut candidates = Vec::new();
     let mut seen_pinyin = std::collections::HashSet::new();
     for segment in &segments {
@@ -88,6 +94,7 @@ fn self_check() {
         "音节表大小: {} (标准全拼表)",
         table.complete_syllables_with_prefix("").len()
     );
+    println!("词典: {}", dictionary_source_label());
     println!("AI 服务: OfflineAiService (零网络)");
     println!(
         "翻译器: {}",
@@ -136,6 +143,76 @@ fn bench() {
     println!("累积命中切分: {hits}");
 }
 
+/// 加载 v1 词典文件；文件缺失或损坏时回退内置演示词典。
+fn load_dictionary() -> Arc<dyn Dictionary> {
+    let path = dict_file_path();
+    match DictionaryFile::open(&path) {
+        Ok(file) => Arc::new(file),
+        Err(_) => Arc::new(demo_dictionary()),
+    }
+}
+
+/// 返回词典来源说明，供演示与自检输出。
+fn dictionary_source_label() -> String {
+    let path = dict_file_path();
+    match DictionaryFile::open(&path) {
+        Ok(file) => {
+            let header = file.header();
+            format!(
+                "{} (mmap v1，{} 词条，{} bigram)",
+                path.display(),
+                header.entry_count,
+                header.bigram_count
+            )
+        }
+        Err(_) => format!("内置演示词典（未找到 {}）", path.display()),
+    }
+}
+
+/// 词典文件路径：`ZYDT_DICT` 环境变量优先，默认为工作目录下数据产物。
+fn dict_file_path() -> PathBuf {
+    std::env::var_os("ZYDT_DICT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("data/artifacts/seed.zyct"))
+}
+
+/// `dict` 子命令：加载 v1 词典并查询指定拼音。
+fn dict_command(args: Vec<String>) {
+    let Some(path) = args.get(2) else {
+        println!("用法: zhu-ye-cli dict <词典文件> [拼音]");
+        return;
+    };
+    let pinyin = args.get(3).map(String::as_str).unwrap_or("nihao");
+    match DictionaryFile::open(Path::new(path)) {
+        Ok(file) => {
+            let header = file.header();
+            println!("词典文件: {path}");
+            println!(
+                "格式 v1：词条 {}，拼音索引 {}，bigram {}，文件大小 {} 字节",
+                header.entry_count,
+                header.pinyin_index_count,
+                header.bigram_count,
+                file.file_size()
+            );
+            let found = file.lookup(pinyin);
+            if found.is_empty() {
+                println!("拼音 {pinyin} 无词条");
+                return;
+            }
+            println!("查询 {pinyin}:");
+            for entry in &found {
+                match &entry.translation {
+                    Some(translation) => println!(
+                        "  {} [{}] 词频 {}",
+                        entry.word, translation, entry.frequency
+                    ),
+                    None => println!("  {} 词频 {}", entry.word, entry.frequency),
+                }
+            }
+        }
+        Err(error) => println!("加载失败: {error}"),
+    }
+}
 /// 用户词库路径：Windows 使用 `%APPDATA%`，其他环境回退到工作目录。
 fn user_words_path() -> PathBuf {
     std::env::var_os("APPDATA")

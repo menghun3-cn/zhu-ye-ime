@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::{
@@ -32,8 +33,7 @@ use windows::Win32::UI::TextServices::{
 use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
 };
-use zhu_ye_core::core_version;
-use zhu_ye_core::UserDictStore;
+use zhu_ye_core::{core_version, BigramModel, Dictionary, DictionaryFile, UserDictStore};
 
 use crate::input::{m1_seed_dictionary, InputEngine, InputMode};
 
@@ -82,7 +82,7 @@ struct EngineState {
 impl EngineState {
     fn new() -> Self {
         Self {
-            engine: InputEngine::with_m1_seed(),
+            engine: create_engine(None),
             tid: 0,
             thread_mgr: None,
             key_sink_cookie: None,
@@ -92,8 +92,11 @@ impl EngineState {
 
     fn with_user_store(store: UserDictStore) -> Self {
         Self {
-            engine: InputEngine::with_user_store(m1_seed_dictionary(), store),
-            ..Self::new()
+            engine: create_engine(Some(store)),
+            tid: 0,
+            thread_mgr: None,
+            key_sink_cookie: None,
+            composition: None,
         }
     }
 }
@@ -464,6 +467,33 @@ fn to_wide(text: &str) -> Vec<u16> {
 fn debug_log(message: &str) {
     let wide = to_wide(message);
     unsafe { OutputDebugStringW(PCWSTR(wide.as_ptr())) };
+}
+
+/// 创建输入引擎：优先加载 `%APPDATA%\ai-zhu-ye-ime\seed.zyct`，
+/// 缺失或损坏时回退 M1 内置演示词典，保证输入法始终可启动。
+fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
+    match DictionaryFile::open(&dictionary_path()) {
+        Ok(file) => {
+            let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
+            let bigram: Arc<dyn BigramModel> = Arc::new(file);
+            match user_store {
+                Some(store) => InputEngine::with_user_store_and_bigram(dictionary, store, bigram),
+                None => InputEngine::with_bigram(dictionary, bigram),
+            }
+        }
+        Err(_) => match user_store {
+            Some(store) => InputEngine::with_user_store(m1_seed_dictionary(), store),
+            None => InputEngine::with_m1_seed(),
+        },
+    }
+}
+
+/// 词典运行时路径：安装脚本把构建产物放到数据目录后，DLL 从这里加载。
+fn dictionary_path() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join("ai-zhu-ye-ime").join("seed.zyct"))
+        .unwrap_or_else(|| PathBuf::from("seed.zyct"))
 }
 
 /// 用户词库 JSON 路径：`%APPDATA%\ai-zhu-ye-ime\user_words.json`。

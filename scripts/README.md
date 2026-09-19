@@ -12,6 +12,16 @@
 ## 常用命令
 
 ```powershell
+# 构建 v1 词典数据包（默认 data/artifacts/seed.zyct）
+cargo run -p zhu-ye-dict -- build
+
+# 检查与完整性校验
+cargo run -p zhu-ye-dict -- inspect data/artifacts/seed.zyct
+cargo run -p zhu-ye-dict -- verify data/artifacts/seed.zyct
+
+```
+
+```powershell
 # Agent Notes 全量校验
 .\scripts\verify-agent-notes.ps1
 

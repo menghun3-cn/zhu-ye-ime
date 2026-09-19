@@ -6,13 +6,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use std::path::Path;
+
 use zhu_ye_core::bigram::BigramModel;
 use zhu_ye_core::candidate::{
     Candidate, CandidateSorter, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
 };
 use zhu_ye_core::dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 use zhu_ye_core::pinyin::{segment_all, SyllableTable};
-use zhu_ye_core::{unix_now, Result, UserDictStore, UserDictionary};
+use zhu_ye_core::{unix_now, DictionaryFile, Result, UserDictStore, UserDictionary};
 
 /// 输入模式。T-013 接入 Shift 切换；这里先提供状态与切换方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,43 +27,11 @@ pub enum InputMode {
 
 /// M1 内置演示词表，供 T-011 上屏闭环使用。
 ///
-/// 这些词条属于脚手架，正式词典由 T-006 数据管线接管；词条格式与
-/// `zhu-ye-core::dict::DictionaryEntry` 保持一致，因此后续替换时引擎无需改动。
-const M1_SEED_WORDS: &[(&str, &str, u64, Option<&str>)] = &[
-    ("你好", "nihao", 100, Some("hello")),
-    ("尼好", "nihao", 1, None),
-    ("世界", "shijie", 90, Some("world")),
-    ("中国", "zhongguo", 95, Some("China")),
-    ("先", "xian", 70, Some("first")),
-    ("西安", "xian", 60, Some("Xi'an")),
-    ("西", "xi", 55, Some("west")),
-    ("安", "an", 45, Some("safe")),
-    ("我", "wo", 80, Some("I")),
-    ("你", "ni", 65, Some("you")),
-    ("好", "hao", 58, Some("good")),
-    ("的", "de", 100, Some("of")),
-    ("得", "de", 55, Some("get")),
-    ("地", "de", 40, Some("land")),
-    ("爱", "ai", 70, Some("love")),
-    ("输入", "shuru", 55, Some("input")),
-    ("打字", "dazi", 50, Some("type")),
-    ("谢谢", "xiexie", 65, Some("thank you")),
-    ("再见", "zaijian", 50, Some("goodbye")),
-    ("早上好", "zaoshanghao", 42, Some("good morning")),
-];
-
-/// 构建 M1 演示词典。
+/// 数据与 T-006 词典管线共用 core 的种子词表；当磁盘上的 v1 词典文件
+/// 缺失或损坏时，用这份内存词表保持输入法可运行。
 #[must_use]
 pub fn m1_seed_dictionary() -> Arc<dyn Dictionary> {
-    let mut dictionary = InMemoryDictionary::default();
-    for &(word, pinyin, frequency, translation) in M1_SEED_WORDS {
-        let mut entry = DictionaryEntry::new(word, pinyin, frequency);
-        if let Some(translation) = translation {
-            entry = entry.with_translation(translation);
-        }
-        dictionary.push(entry);
-    }
-    Arc::new(dictionary)
+    Arc::new(InMemoryDictionary::from_entries(zhu_ye_core::seed_entries()))
 }
 
 /// 输入状态机。
@@ -126,6 +96,38 @@ impl InputEngine {
     #[must_use]
     pub fn with_m1_seed() -> Self {
         Self::new(m1_seed_dictionary())
+    }
+
+    /// 从 v1 词典文件创建引擎；词典与 bigram 共用同一份 mmap 数据。
+    pub fn with_dictionary_file(path: &Path) -> Result<Self> {
+        let file = DictionaryFile::open(path)?;
+        let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
+        let bigram: Arc<dyn BigramModel> = Arc::new(file);
+        Ok(Self::with_bigram(dictionary, bigram))
+    }
+
+    /// 从 v1 词典文件创建引擎，并接入用户词持久化。
+    pub fn with_dictionary_file_and_user_store(path: &Path, store: UserDictStore) -> Result<Self> {
+        let file = DictionaryFile::open(path)?;
+        let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
+        let bigram: Arc<dyn BigramModel> = Arc::new(file);
+        Ok(Self::with_user_store_and_bigram(dictionary, store, bigram))
+    }
+
+    /// 使用指定词典、bigram 与用户词持久化创建引擎。
+    #[must_use]
+    pub fn with_user_store_and_bigram(
+        dictionary: Arc<dyn Dictionary>,
+        store: UserDictStore,
+        bigram: Arc<dyn BigramModel>,
+    ) -> Self {
+        let user_dictionary = store.load().unwrap_or_default();
+        let ranking = Arc::new(StaticRankingModel::new(RankingConfig::default(), bigram));
+        Self {
+            user_dictionary,
+            user_store: Some(store),
+            ..Self::with_ranking(dictionary, ranking)
+        }
     }
 
     /// 当前输入模式。
@@ -418,6 +420,7 @@ mod tests {
     use zhu_ye_core::bigram::InMemoryBigramModel;
     use zhu_ye_core::pinyin::SyllableTable;
     use zhu_ye_core::UserDictStore;
+    use zhu_ye_core::{build_v1, seed_bigrams, seed_entries};
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let now = std::time::SystemTime::now()
@@ -641,6 +644,22 @@ mod tests {
         engine.select_index(1);
         engine.reset_user_words().unwrap();
         assert!(store.load().unwrap().is_empty());
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v1词典文件驱动候选生成() {
+        let dir = temp_dir("dict-file");
+        let path = dir.join("seed.zyct");
+        let bytes = build_v1(&seed_entries(), &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        type_text(&mut engine, "nihao");
+        assert_eq!(engine.candidates()[0].text, "你好");
+        assert_eq!(engine.candidates()[0].translation.as_deref(), Some("hello"));
+
         drop(engine);
         std::fs::remove_dir_all(dir).unwrap();
     }

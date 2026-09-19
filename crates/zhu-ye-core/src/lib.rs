@@ -6,7 +6,11 @@
 pub mod ai;
 pub mod bigram;
 pub mod candidate;
+pub mod demo;
 pub mod dict;
+pub mod dict_builder;
+pub mod dict_format;
+pub mod dict_loader;
 pub mod error;
 pub mod pinyin;
 pub mod translate;
@@ -24,6 +28,10 @@ pub use pinyin::{segment_all, valid_prefix, FullPinyinScheme, PinyinScheme, Syll
 pub use translate::{InMemoryTranslator, Translator};
 pub use user_dict::UserDictionary;
 pub use user_store::{unix_now, UserDictStore};
+
+pub use demo::{seed_bigrams, seed_entries};
+pub use dict_builder::build_v1;
+pub use dict_loader::DictionaryFile;
 
 /// 返回核心库版本标识，用于自检输出。
 #[must_use]

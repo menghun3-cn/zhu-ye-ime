@@ -17,9 +17,9 @@
 | T-003 | 已完成 | 产出验收标准.md | FR-001 至 FR-014 | M0-文档 | 功能与性能验收 |
 | T-004 | 已完成 | 产出架构文档 architecture.md | FR-011、FR-014 | M0-文档 | 模块与数据架构 |
 | T-005 | 已完成 | 搭建 Rust workspace 与 crate 骨架 | FR-011、FR-014 | M0-脚手架 | build/test/clippy 全部通过 |
-| T-006 | 待办 | 词典数据管线与二进制格式 | FR-002、FR-007 | M2 | 数据来源与许可证记录 |
-| T-007 | 进行中 | 全拼音节切分核心 | FR-001 | M2 | 标准全拼表/动态规划切分/双拼接口已实现；待 T-006 数据管线校验音节表完整性；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-full-pinyin-segmentation-core.md) |
-| T-008 | 进行中 | 候选排序静态模型（unigram+bigram） | FR-002 | M2 | RankingModel/StaticRankingModel/内存 bigram 与排序接入已完成；待 T-006 真实 bigram 数据；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-ranking-static-model.md) |
+| T-006 | 进行中 | 词典数据管线与二进制格式 | FR-002、FR-007 | M2 | v1 二进制格式（ZYDT/96 字节头部/拼音索引/bigram/文本池/SHA-256）、自建演示种子、mmap 加载器与 build/inspect/verify CLI 已完成并验证；待引入真实数据源并做音节表校验；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-19-dictionary-binary-format-v1.md) |
+| T-007 | 进行中 | 全拼音节切分核心 | FR-001 | M2 | 标准全拼表/动态规划切分/双拼接口已实现；T-006 v1 词典已能按拼音前缀加载查询，音节表完整性校验待真实数据管线；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-full-pinyin-segmentation-core.md) |
+| T-008 | 进行中 | 候选排序静态模型（unigram+bigram） | FR-002 | M2 | RankingModel/StaticRankingModel/内存 bigram 与排序接入已完成；T-006 mmap bigram 模型已可用，待真实统计语料；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-ranking-static-model.md) |
 | T-009 | 进行中 | 用户词学习与持久化 | FR-003 | M3 | UserDictStore 版本化 JSON/原子写/损坏备份恢复、选择即记忆、删除与重置、TSF 接入真实路径已完成；待 VM 端到端复核；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-user-dict-persistence.md) |
 | T-010 | 进行中 | TSF 服务注册与卸载闭环 | FR-010、FR-013 | M1 | DLL 导出/COM 生命周期/安装卸载脚本/便携测试包已完成；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-18-tsf-registration-and-lifetime.md)；待其他机器安装验收 |
 | T-011 | 进行中 | TSF 上屏闭环 | FR-001、FR-004 | M1 | 按键/组合/上屏已实现（20 项单测、clippy、DLL 导出校验通过）；待 VM 安装后记事本验收；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-18-tsf-composition-and-key-events.md) |
