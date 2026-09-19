@@ -70,6 +70,18 @@ impl UserDictionary {
             .map_or(0, |entry| entry.frequency)
     }
 
+    /// 查询按文本汇总的词频（同一文本跨拼音求和）；未记录返回 0。
+    ///
+    /// 当前用户词条量较小，直接线性汇总即可满足排序查询；
+    /// T-009 引入持久化与词条规模增长后，再按文本建索引。
+    #[must_use]
+    pub fn frequency_by_word(&self, word: &str) -> u64 {
+        self.entries
+            .iter()
+            .filter_map(|((text, _), entry)| (text == word).then_some(entry.frequency))
+            .sum()
+    }
+
     /// 返回全部用户词条（按词频降序）。
     #[must_use]
     pub fn words_sorted(&self) -> Vec<UserWord> {
@@ -102,6 +114,16 @@ mod tests {
         u.record_selection("竹叶", "zhuye", 2);
         assert_eq!(u.frequency("竹叶", "zhuye"), 2);
         assert_eq!(u.words_sorted()[0].last_used, 2);
+    }
+
+    #[test]
+    fn 按文本汇总跨拼音词频() {
+        let mut u = UserDictionary::new();
+        u.record_selection("竹叶", "zhuye", 1);
+        u.record_selection("竹叶", "zhuye", 2);
+        u.record_selection("竹叶", "zhuye_ye", 3);
+        assert_eq!(u.frequency_by_word("竹叶"), 3);
+        assert_eq!(u.frequency_by_word("竹"), 0);
     }
 
     #[test]

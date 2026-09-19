@@ -4,6 +4,7 @@
 //! 后续输入法 DLL/CLI 全部通过这里的纯数据接口取结果。
 
 pub mod ai;
+pub mod bigram;
 pub mod candidate;
 pub mod dict;
 pub mod error;
@@ -12,7 +13,10 @@ pub mod translate;
 pub mod user_dict;
 
 pub use ai::{AiService, OfflineAiService};
-pub use candidate::{Candidate, CandidateSorter};
+pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
+pub use candidate::{
+    Candidate, CandidateSorter, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+};
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 pub use error::{Error, Result};
 pub use pinyin::{segment_all, valid_prefix, FullPinyinScheme, PinyinScheme, SyllableTable};

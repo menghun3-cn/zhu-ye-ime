@@ -94,6 +94,13 @@ fn self_check() {
         "演示输入: nihao -> 切分 {} 种",
         zhu_ye_core::segment_all(&table, "nihao").len()
     );
+
+    let ranking = zhu_ye_core::StaticRankingModel::default();
+    let config = ranking.config();
+    println!(
+        "候选排序: StaticRankingModel (unigram={} bigram={} user={})",
+        config.unigram_weight, config.bigram_weight, config.user_weight
+    );
     let _ = service;
 }
 

@@ -148,13 +148,22 @@ ITfKeyEventSink 收到按键 -> KeyAction 分类
 
 ## 7. 候选排序模型
 
+排序职责由 `zhu-ye-core::candidate::RankingModel` 承担；当前实现为
+`StaticRankingModel`，权重通过 `RankingConfig` 配置，全部使用整数饱和运算，
+跨平台结果确定。
+
 ```text
-score = s_unigram(word)
-      + s_bigram(prev_word, word)      // 上下文加分
-      + s_user(word)                    // 用户词学习加权
+score = static_score(word) × unigram_weight
+      + min(bigram_freq(prev_word, word), bigram_cap) × bigram_weight
+      + min(user_freq(word), user_cap) × user_weight
 ```
 
-静态模型由开放语料离线统计生成；用户模型仅存本机；所有输入处理确定性可测。
+默认权重：`unigram_weight=1`、`bigram_weight=16`、`bigram_frequency_cap=100_000`、`user_weight=48`、`user_frequency_cap=10_000`。
+
+- 输入引擎维护 `previous_word`：空格/数字提交后更新，回车清空，Esc 不变
+- 用户词命中时把候选 `source` 标记为 `User`；词频按文本跨拼音汇总
+- bigram 通过 `BigramModel` trait 注入；T-006 提供 mmap/压缩实现时只替换数据源，不改排序逻辑
+- 静态分仍可作为确定性基础排序，最终排序以 `RankingConfig` 加权结果为准
 
 ## 8. 进程与线程模型
 

@@ -6,9 +6,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zhu_ye_core::candidate::{Candidate, CandidateSorter};
+use zhu_ye_core::bigram::BigramModel;
+use zhu_ye_core::candidate::{
+    Candidate, CandidateSorter, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+};
 use zhu_ye_core::dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 use zhu_ye_core::pinyin::{segment_all, SyllableTable};
+use zhu_ye_core::UserDictionary;
 
 /// 输入模式。T-013 接入 Shift 切换；这里先提供状态与切换方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +71,9 @@ pub struct InputEngine {
     composing: String,
     candidates: Vec<Candidate>,
     mode: InputMode,
+    previous_word: Option<String>,
+    user_dictionary: UserDictionary,
+    ranking: Arc<dyn RankingModel>,
 }
 
 impl InputEngine {
@@ -79,7 +86,26 @@ impl InputEngine {
             composing: String::new(),
             candidates: Vec::new(),
             mode: InputMode::Chinese,
+            previous_word: None,
+            user_dictionary: UserDictionary::new(),
+            ranking: Arc::new(StaticRankingModel::default()),
         }
+    }
+
+    /// 使用指定词典与排序模型创建引擎；测试可注入自定义排序。
+    #[must_use]
+    pub fn with_ranking(dictionary: Arc<dyn Dictionary>, ranking: Arc<dyn RankingModel>) -> Self {
+        Self {
+            ranking,
+            ..Self::new(dictionary)
+        }
+    }
+
+    /// 使用指定词典与 bigram 数据创建引擎。
+    #[must_use]
+    pub fn with_bigram(dictionary: Arc<dyn Dictionary>, bigram: Arc<dyn BigramModel>) -> Self {
+        let ranking = Arc::new(StaticRankingModel::new(RankingConfig::default(), bigram));
+        Self::with_ranking(dictionary, ranking)
     }
 
     /// 使用 M1 内置演示词表创建引擎。
@@ -112,6 +138,12 @@ impl InputEngine {
     #[must_use]
     pub fn composing(&self) -> &str {
         &self.composing
+    }
+
+    /// 参与上下文排序的前词；由最近一次成功提交维护。
+    #[must_use]
+    pub fn previous_word(&self) -> Option<&str> {
+        self.previous_word.as_deref()
     }
 
     /// 当前候选列表；候选窗渲染与选择都从这里取数。
@@ -150,8 +182,7 @@ impl InputEngine {
             .first()
             .map(|c| c.text.clone())
             .unwrap_or_else(|| self.composing.clone());
-        self.clear_composition();
-        Some(text)
+        self.commit_text(text)
     }
 
     /// Enter 上屏拼音原文。
@@ -161,6 +192,7 @@ impl InputEngine {
         }
         let text = self.composing.clone();
         self.clear_composition();
+        self.previous_word = None;
         Some(text)
     }
 
@@ -183,8 +215,7 @@ impl InputEngine {
             .get(index)
             .map(|c| c.text.clone())
             .unwrap_or_else(|| self.composing.clone());
-        self.clear_composition();
-        Some(text)
+        self.commit_text(text)
     }
 
     /// 组合被 TSF 宿主终止时清空内部分组状态。
@@ -227,14 +258,22 @@ impl InputEngine {
         self.is_active().then(|| self.composing.clone())
     }
 
+    fn commit_text(&mut self, text: String) -> Option<String> {
+        self.clear_composition();
+        self.previous_word = Some(text.clone());
+        Some(text)
+    }
+
     fn clear_composition(&mut self) {
         self.composing.clear();
         self.candidates.clear();
     }
 
     fn refresh_candidates(&mut self) {
-        self.candidates =
+        let candidates =
             generate_candidates(&self.table, self.dictionary.as_ref(), &self.composing);
+        let context = RankingContext::new(self.previous_word.as_deref(), &self.user_dictionary);
+        self.candidates = self.ranking.rank(candidates, &context);
     }
 }
 
@@ -313,7 +352,10 @@ fn deduplicate_and_sort(candidates: Vec<Candidate>) -> Vec<Candidate> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{generate_candidates, m1_seed_dictionary, InputEngine, InputMode};
+    use zhu_ye_core::bigram::InMemoryBigramModel;
     use zhu_ye_core::pinyin::SyllableTable;
 
     fn engine() -> InputEngine {
@@ -354,19 +396,21 @@ mod tests {
     }
 
     #[test]
-    fn 空格上屏第一候选并清空() {
+    fn 空格上屏第一候选并更新前词() {
         let mut engine = engine();
         type_text(&mut engine, "nihao");
         assert_eq!(engine.handle_space().as_deref(), Some("你好"));
+        assert_eq!(engine.previous_word(), Some("你好"));
         assert!(!engine.is_active());
         assert!(engine.candidates().is_empty());
     }
 
     #[test]
-    fn 回车上屏拼音原文() {
+    fn 回车上屏拼音原文并清空前词() {
         let mut engine = engine();
         type_text(&mut engine, "nihao");
         assert_eq!(engine.handle_enter().as_deref(), Some("nihao"));
+        assert_eq!(engine.previous_word(), None);
         assert!(!engine.is_active());
     }
 
@@ -388,12 +432,13 @@ mod tests {
     }
 
     #[test]
-    fn 数字选择第二候选() {
+    fn 数字选择第二候选取并更新前词() {
         let mut engine = engine();
-        type_text(&mut engine, "de");
+        type_text(&mut engine, "nihao");
         let second = engine.candidates().get(1).map(|c| c.text.clone());
         let selected = engine.select_index(1);
         assert_eq!(selected, second);
+        assert_eq!(engine.previous_word(), second.as_deref());
         assert!(!engine.is_active());
     }
 
@@ -437,5 +482,21 @@ mod tests {
         type_text(&mut engine, "zzzz");
         assert!(engine.candidates().is_empty());
         assert_eq!(engine.handle_space().as_deref(), Some("zzzz"));
+    }
+
+    #[test]
+    fn 提交后前词参与bigram排序() {
+        let mut bigram = InMemoryBigramModel::new();
+        bigram.insert("你好", "得", 100_000);
+        let mut engine = InputEngine::with_bigram(m1_seed_dictionary(), Arc::new(bigram));
+
+        type_text(&mut engine, "de");
+        assert_eq!(engine.candidates()[0].text, "的");
+        engine.handle_escape();
+
+        type_text(&mut engine, "nihao");
+        assert_eq!(engine.handle_space().as_deref(), Some("你好"));
+        type_text(&mut engine, "de");
+        assert_eq!(engine.candidates()[0].text, "得");
     }
 }
