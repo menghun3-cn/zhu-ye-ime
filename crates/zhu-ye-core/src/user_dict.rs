@@ -1,11 +1,14 @@
 //! 用户词学习（内存模型）。
 //!
-//! M3 里程碑增加本地 JSON 持久化、损坏自动恢复与配置接口。
+//! 选择即记忆，删除/重置接口先行到位；持久化由 `UserDictStore` 负责，
+//! 本模块只维护内存状态与条目的合法性校验。
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 /// 用户词条。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserWord {
     /// 词文本。
     pub word: String,
@@ -28,6 +31,20 @@ impl UserDictionary {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 从条目集合重建词库；空文本、空拼音或零词频的非法条目会被丢弃。
+    #[must_use]
+    pub fn from_entries(entries: impl IntoIterator<Item = UserWord>) -> Self {
+        let mut dictionary = Self::new();
+        for entry in entries {
+            if entry.word.is_empty() || entry.pinyin.is_empty() || entry.frequency == 0 {
+                continue;
+            }
+            let key = (entry.word.clone(), entry.pinyin.clone());
+            dictionary.entries.insert(key, entry);
+        }
+        dictionary
     }
 
     /// 记录一次选择，词频加一。
@@ -73,7 +90,7 @@ impl UserDictionary {
     /// 查询按文本汇总的词频（同一文本跨拼音求和）；未记录返回 0。
     ///
     /// 当前用户词条量较小，直接线性汇总即可满足排序查询；
-    /// T-009 引入持久化与词条规模增长后，再按文本建索引。
+    /// 词条规模增长后，再按文本建索引。
     #[must_use]
     pub fn frequency_by_word(&self, word: &str) -> u64 {
         self.entries
@@ -82,11 +99,16 @@ impl UserDictionary {
             .sum()
     }
 
-    /// 返回全部用户词条（按词频降序）。
+    /// 返回全部用户词条（按词频降序，同频按词与拼音稳定定序）。
     #[must_use]
     pub fn words_sorted(&self) -> Vec<UserWord> {
         let mut words: Vec<UserWord> = self.entries.values().cloned().collect();
-        words.sort_by_key(|entry| std::cmp::Reverse(entry.frequency));
+        words.sort_by(|a, b| {
+            b.frequency
+                .cmp(&a.frequency)
+                .then_with(|| a.word.cmp(&b.word))
+                .then_with(|| a.pinyin.cmp(&b.pinyin))
+        });
         words
     }
 
@@ -105,7 +127,7 @@ impl UserDictionary {
 
 #[cfg(test)]
 mod tests {
-    use super::UserDictionary;
+    use super::{UserDictionary, UserWord};
 
     #[test]
     fn 记录选择后词频可见() {
@@ -135,5 +157,51 @@ mod tests {
         u.record_selection("竹叶", "zhuye", 1);
         u.reset();
         assert!(u.is_empty());
+    }
+
+    #[test]
+    fn 重建词库过滤非法条目() {
+        let u = UserDictionary::from_entries(vec![
+            UserWord {
+                word: "竹叶".into(),
+                pinyin: "zhuye".into(),
+                frequency: 3,
+                last_used: 1,
+            },
+            UserWord {
+                word: String::new(),
+                pinyin: "kong".into(),
+                frequency: 1,
+                last_used: 1,
+            },
+            UserWord {
+                word: "无拼音".into(),
+                pinyin: String::new(),
+                frequency: 1,
+                last_used: 1,
+            },
+            UserWord {
+                word: "零词频".into(),
+                pinyin: "ling".into(),
+                frequency: 0,
+                last_used: 1,
+            },
+        ]);
+        assert_eq!(u.len(), 1);
+        assert_eq!(u.frequency("竹叶", "zhuye"), 3);
+    }
+
+    #[test]
+    fn 排序结果确定性稳定() {
+        let mut u = UserDictionary::new();
+        u.record_selection("竹叶", "zhuye", 1);
+        u.record_selection("竹", "zhu", 2);
+        u.record_selection("叶子", "yezi", 2);
+        let first = u.words_sorted();
+        let second = u.words_sorted();
+        assert_eq!(first, second);
+        assert_eq!(first[0].word, "叶子");
+        assert_eq!(first[1].word, "竹");
+        assert_eq!(first[2].word, "竹叶");
     }
 }

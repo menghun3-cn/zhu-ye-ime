@@ -9,6 +9,7 @@
 //! TSF 注册表写入与清理由 `scripts/` 下的安装/卸载脚本完成，本模块不直接改注册表。
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,8 +33,9 @@ use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
 };
 use zhu_ye_core::core_version;
+use zhu_ye_core::UserDictStore;
 
-use crate::input::{InputEngine, InputMode};
+use crate::input::{m1_seed_dictionary, InputEngine, InputMode};
 
 /// 输入法 TIP 的 CLSID，与 `scripts/ime-identity.ps1` 中的 `TipClsid` 保持一致。
 pub const CLSID_ZHU_YE_TIP: windows::core::GUID =
@@ -87,10 +89,19 @@ impl EngineState {
             composition: None,
         }
     }
+
+    fn with_user_store(store: UserDictStore) -> Self {
+        Self {
+            engine: InputEngine::with_user_store(m1_seed_dictionary(), store),
+            ..Self::new()
+        }
+    }
 }
 
 #[implement(IClassFactory)]
-struct ClassFactory;
+struct ClassFactory {
+    user_store: Option<UserDictStore>,
+}
 
 impl Drop for ClassFactory {
     fn drop(&mut self) {
@@ -112,7 +123,7 @@ impl IClassFactory_Impl for ClassFactory_Impl {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
 
-        let service = create_text_service();
+        let service = create_text_service(self.user_store.clone());
         let hr = unsafe { service.query(riid, ppvobject) };
         hr.ok()
     }
@@ -455,6 +466,14 @@ fn debug_log(message: &str) {
     unsafe { OutputDebugStringW(PCWSTR(wide.as_ptr())) };
 }
 
+/// 用户词库 JSON 路径：`%APPDATA%\ai-zhu-ye-ime\user_words.json`。
+fn user_words_path() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join("ai-zhu-ye-ime").join("user_words.json"))
+        .unwrap_or_else(|| PathBuf::from("user_words.json"))
+}
+
 fn state_lock(service: &TextService_Impl) -> impl std::ops::DerefMut<Target = EngineState> + '_ {
     service.state().lock().unwrap()
 }
@@ -470,16 +489,19 @@ fn object_released() {
 }
 
 /// 创建类工厂并计入活动对象数；失败路径由 `Drop` 回滚计数。
-fn create_class_factory() -> IClassFactory {
+fn create_class_factory(user_store: Option<UserDictStore>) -> IClassFactory {
     object_created();
-    ClassFactory.into()
+    ClassFactory { user_store }.into()
 }
 
 /// 创建文本服务并计入活动对象数；失败路径由 `Drop` 回滚计数。
-fn create_text_service() -> IUnknown {
+fn create_text_service(user_store: Option<UserDictStore>) -> IUnknown {
     object_created();
     TextService {
-        state: Rc::new(Mutex::new(EngineState::new())),
+        state: Rc::new(Mutex::new(match user_store {
+            Some(store) => EngineState::with_user_store(store),
+            None => EngineState::new(),
+        })),
     }
     .into()
 }
@@ -504,7 +526,8 @@ pub unsafe extern "system" fn DllGetClassObject(
         return CLASS_E_CLASSNOTAVAILABLE;
     }
 
-    let factory: IUnknown = create_class_factory().into();
+    let factory: IUnknown =
+        create_class_factory(Some(UserDictStore::new(user_words_path()))).into();
     unsafe { factory.query(riid, ppv) }
 }
 
@@ -544,7 +567,7 @@ mod tests {
     #[test]
     fn 类工厂可创建文本服务() {
         let _guard = TEST_LOCK.lock().unwrap();
-        let factory = create_class_factory();
+        let factory = create_class_factory(None);
         let service: ITfTextInputProcessorEx =
             unsafe { factory.CreateInstance(Option::<&IUnknown>::None) }.unwrap();
         let activated = unsafe { service.ActivateEx(Option::<&ITfThreadMgr>::None, 0, 0) };
@@ -554,7 +577,7 @@ mod tests {
     #[test]
     fn 拒绝聚合创建() {
         let _guard = TEST_LOCK.lock().unwrap();
-        let factory = create_class_factory();
+        let factory = create_class_factory(None);
         let aggregate = factory.cast::<IUnknown>().unwrap();
         let result: windows::core::Result<ITfTextInputProcessor> =
             unsafe { factory.CreateInstance(Some(&aggregate)) };
@@ -571,7 +594,7 @@ mod tests {
     fn 活动对象为零时可卸载() {
         let _guard = TEST_LOCK.lock().unwrap();
         assert_eq!(DllCanUnloadNow(), S_OK);
-        let factory = create_class_factory();
+        let factory = create_class_factory(None);
         assert_eq!(DllCanUnloadNow(), S_FALSE);
         drop(factory);
         assert_eq!(DllCanUnloadNow(), S_OK);

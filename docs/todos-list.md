@@ -20,7 +20,7 @@
 | T-006 | 待办 | 词典数据管线与二进制格式 | FR-002、FR-007 | M2 | 数据来源与许可证记录 |
 | T-007 | 进行中 | 全拼音节切分核心 | FR-001 | M2 | 标准全拼表/动态规划切分/双拼接口已实现；待 T-006 数据管线校验音节表完整性；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-full-pinyin-segmentation-core.md) |
 | T-008 | 进行中 | 候选排序静态模型（unigram+bigram） | FR-002 | M2 | RankingModel/StaticRankingModel/内存 bigram 与排序接入已完成；待 T-006 真实 bigram 数据；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-ranking-static-model.md) |
-| T-009 | 待办 | 用户词学习与持久化 | FR-003 | M3 | 损坏自动恢复 |
+| T-009 | 进行中 | 用户词学习与持久化 | FR-003 | M3 | UserDictStore 版本化 JSON/原子写/损坏备份恢复、选择即记忆、删除与重置、TSF 接入真实路径已完成；待 VM 端到端复核；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-user-dict-persistence.md) |
 | T-010 | 进行中 | TSF 服务注册与卸载闭环 | FR-010、FR-013 | M1 | DLL 导出/COM 生命周期/安装卸载脚本/便携测试包已完成；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-18-tsf-registration-and-lifetime.md)；待其他机器安装验收 |
 | T-011 | 进行中 | TSF 上屏闭环 | FR-001、FR-004 | M1 | 按键/组合/上屏已实现（20 项单测、clippy、DLL 导出校验通过）；待 VM 安装后记事本验收；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-18-tsf-composition-and-key-events.md) |
 | T-012 | 待办 | 候选窗渲染（主题/DPI/高对比度） | FR-009、FR-011 | M3 | Win32 自绘 |

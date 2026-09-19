@@ -165,6 +165,15 @@ score = static_score(word) × unigram_weight
 - bigram 通过 `BigramModel` trait 注入；T-006 提供 mmap/压缩实现时只替换数据源，不改排序逻辑
 - 静态分仍可作为确定性基础排序，最终排序以 `RankingConfig` 加权结果为准
 
+### 用户词持久化（T-009）
+
+- 选择即记忆：`InputEngine` 在空格/数字选择真实候选时记录词与拼音并同步落盘；回车与拼音原文回退不学习
+- 存储：IME 使用 `%APPDATA%\ai-zhu-ye-ime\user_words.json`；CLI 与测试注入独立路径，核心库不依赖 Windows API
+- 文件格式：版本化 JSON `{ "version": 1, "entries": [...] }`，条目含词、拼音、词频与最近选择时间；`words_sorted` 确定性排序保证写入稳定
+- 写入：`UserDictStore::save` 先写同目录临时文件并 `sync_all`，再原子替换目标；失败时清理临时文件、不破坏原文件
+- 损坏恢复：`load` 遇到解析失败或低版本时先备份为 `.bak` 再重建空库；高于当前版本时拒绝打开并保留原文件，避免软件降级破坏用户数据
+- 删除/重置：`InputEngine::delete_user_word`、`reset_user_words` 与 CLI `user` 子命令同步更新内存与磁盘
+
 ## 8. 进程与线程模型
 
 - 输入法作为 DLL 加载到宿主进程（TSF 协议要求）

@@ -11,6 +11,7 @@ pub mod error;
 pub mod pinyin;
 pub mod translate;
 pub mod user_dict;
+pub mod user_store;
 
 pub use ai::{AiService, OfflineAiService};
 pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
@@ -22,6 +23,7 @@ pub use error::{Error, Result};
 pub use pinyin::{segment_all, valid_prefix, FullPinyinScheme, PinyinScheme, SyllableTable};
 pub use translate::{InMemoryTranslator, Translator};
 pub use user_dict::UserDictionary;
+pub use user_store::{unix_now, UserDictStore};
 
 /// 返回核心库版本标识，用于自检输出。
 #[must_use]

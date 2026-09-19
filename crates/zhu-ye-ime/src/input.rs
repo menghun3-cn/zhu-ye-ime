@@ -12,7 +12,7 @@ use zhu_ye_core::candidate::{
 };
 use zhu_ye_core::dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 use zhu_ye_core::pinyin::{segment_all, SyllableTable};
-use zhu_ye_core::UserDictionary;
+use zhu_ye_core::{unix_now, Result, UserDictStore, UserDictionary};
 
 /// 输入模式。T-013 接入 Shift 切换；这里先提供状态与切换方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +73,7 @@ pub struct InputEngine {
     mode: InputMode,
     previous_word: Option<String>,
     user_dictionary: UserDictionary,
+    user_store: Option<UserDictStore>,
     ranking: Arc<dyn RankingModel>,
 }
 
@@ -88,6 +89,7 @@ impl InputEngine {
             mode: InputMode::Chinese,
             previous_word: None,
             user_dictionary: UserDictionary::new(),
+            user_store: None,
             ranking: Arc::new(StaticRankingModel::default()),
         }
     }
@@ -106,6 +108,18 @@ impl InputEngine {
     pub fn with_bigram(dictionary: Arc<dyn Dictionary>, bigram: Arc<dyn BigramModel>) -> Self {
         let ranking = Arc::new(StaticRankingModel::new(RankingConfig::default(), bigram));
         Self::with_ranking(dictionary, ranking)
+    }
+
+    /// 使用指定词典与用户词持久化创建引擎；启动时加载，提交时自动记录并落盘。
+    #[must_use]
+    pub fn with_user_store(dictionary: Arc<dyn Dictionary>, store: UserDictStore) -> Self {
+        // 加载失败时回退空库，不让持久化故障阻塞输入法启动。
+        let user_dictionary = store.load().unwrap_or_default();
+        Self {
+            user_dictionary,
+            user_store: Some(store),
+            ..Self::with_ranking(dictionary, Arc::new(StaticRankingModel::default()))
+        }
     }
 
     /// 使用 M1 内置演示词表创建引擎。
@@ -177,12 +191,14 @@ impl InputEngine {
         if !self.is_active() {
             return None;
         }
-        let text = self
-            .candidates
-            .first()
-            .map(|c| c.text.clone())
-            .unwrap_or_else(|| self.composing.clone());
-        self.commit_text(text)
+        match self.candidates.first() {
+            Some(candidate) => {
+                let text = candidate.text.clone();
+                let pinyin = candidate.pinyin.clone();
+                self.commit_text(text, pinyin)
+            }
+            None => self.commit_text(self.composing.clone(), None),
+        }
     }
 
     /// Enter 上屏拼音原文。
@@ -210,12 +226,14 @@ impl InputEngine {
         if !self.is_active() {
             return None;
         }
-        let text = self
-            .candidates
-            .get(index)
-            .map(|c| c.text.clone())
-            .unwrap_or_else(|| self.composing.clone());
-        self.commit_text(text)
+        match self.candidates.get(index) {
+            Some(candidate) => {
+                let text = candidate.text.clone();
+                let pinyin = candidate.pinyin.clone();
+                self.commit_text(text, pinyin)
+            }
+            None => self.commit_text(self.composing.clone(), None),
+        }
     }
 
     /// 组合被 TSF 宿主终止时清空内部分组状态。
@@ -258,10 +276,46 @@ impl InputEngine {
         self.is_active().then(|| self.composing.clone())
     }
 
-    fn commit_text(&mut self, text: String) -> Option<String> {
+    fn commit_text(&mut self, text: String, pinyin: Option<String>) -> Option<String> {
+        if let Some(pinyin) = pinyin {
+            if !text.is_empty() {
+                self.user_dictionary
+                    .record_selection(&text, pinyin, unix_now());
+                if let Some(store) = &self.user_store {
+                    // 保存失败不打断输入；词条仍保留在内存中供本次会话排序。
+                    let _ = store.save(&self.user_dictionary);
+                }
+            }
+        }
         self.clear_composition();
         self.previous_word = Some(text.clone());
         Some(text)
+    }
+
+    /// 删除一个用户词；删除成功时同步落盘，落盘失败返回错误。
+    pub fn delete_user_word(&mut self, word: &str, pinyin: &str) -> Result<bool> {
+        if !self.user_dictionary.delete(word, pinyin) {
+            return Ok(false);
+        }
+        if let Some(store) = &self.user_store {
+            store.save(&self.user_dictionary)?;
+        }
+        Ok(true)
+    }
+
+    /// 重置全部用户词；内存与磁盘同步清空。
+    pub fn reset_user_words(&mut self) -> Result<()> {
+        self.user_dictionary.reset();
+        if let Some(store) = &self.user_store {
+            store.save(&self.user_dictionary)?;
+        }
+        Ok(())
+    }
+
+    /// 当前用户词库引用，供排序与状态展示。
+    #[must_use]
+    pub fn user_dictionary(&self) -> &UserDictionary {
+        &self.user_dictionary
     }
 
     fn clear_composition(&mut self) {
@@ -297,12 +351,14 @@ fn generate_candidates(
             continue;
         }
         let mut combined = String::new();
+        let mut combined_pinyin = String::new();
         let mut total = 0i64;
         let mut complete = true;
         for syllable in &segments {
             match dictionary.lookup(syllable).first() {
                 Some(entry) => {
                     combined.push_str(&entry.word);
+                    combined_pinyin.push_str(syllable);
                     total += i64::try_from(entry.frequency).unwrap_or(i64::MAX);
                 }
                 None => {
@@ -312,7 +368,7 @@ fn generate_candidates(
             }
         }
         if complete {
-            collected.push(Candidate::new(combined, total));
+            collected.push(Candidate::new(combined, total).with_pinyin(combined_pinyin));
         }
     }
 
@@ -324,6 +380,7 @@ fn candidate_from_entry(entry: &DictionaryEntry) -> Candidate {
         entry.word.clone(),
         i64::try_from(entry.frequency).unwrap_or(i64::MAX),
     );
+    candidate = candidate.with_pinyin(entry.pinyin.clone());
     if let Some(translation) = &entry.translation {
         candidate = candidate.with_translation(translation.clone());
     }
@@ -341,6 +398,9 @@ fn deduplicate_and_sort(candidates: Vec<Candidate>) -> Vec<Candidate> {
                 if existing.translation.is_none() {
                     existing.translation = candidate.translation.clone();
                 }
+                if existing.pinyin.is_none() {
+                    existing.pinyin = candidate.pinyin.clone();
+                }
             }
             None => {
                 by_text.insert(candidate.text.clone(), candidate);
@@ -357,6 +417,18 @@ mod tests {
     use super::{generate_candidates, m1_seed_dictionary, InputEngine, InputMode};
     use zhu_ye_core::bigram::InMemoryBigramModel;
     use zhu_ye_core::pinyin::SyllableTable;
+    use zhu_ye_core::UserDictStore;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zhu-ye-input-{name}-{}-{now}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     fn engine() -> InputEngine {
         InputEngine::with_m1_seed()
@@ -498,5 +570,78 @@ mod tests {
         assert_eq!(engine.handle_space().as_deref(), Some("你好"));
         type_text(&mut engine, "de");
         assert_eq!(engine.candidates()[0].text, "得");
+    }
+
+    #[test]
+    fn 选择候选后写入用户词库并可重新加载() {
+        let dir = temp_dir("select-persist");
+        let store = UserDictStore::new(dir.join("user_words.json"));
+        let mut engine = InputEngine::with_user_store(m1_seed_dictionary(), store.clone());
+        type_text(&mut engine, "nihao");
+        engine.select_index(1);
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.frequency("尼好", "nihao"), 1);
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 回车与无候选回退不写入用户词() {
+        let dir = temp_dir("enter-no-record");
+        let store = UserDictStore::new(dir.join("user_words.json"));
+        let mut engine = InputEngine::with_user_store(m1_seed_dictionary(), store.clone());
+        type_text(&mut engine, "nihao");
+        engine.handle_enter();
+        assert!(store.load().unwrap().is_empty());
+
+        type_text(&mut engine, "zzzz");
+        engine.handle_space();
+        assert!(store.load().unwrap().is_empty());
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 用户词选择多次后提升候选排序() {
+        let dir = temp_dir("user-promote");
+        let store = UserDictStore::new(dir.join("user_words.json"));
+        let mut engine = InputEngine::with_user_store(m1_seed_dictionary(), store.clone());
+
+        type_text(&mut engine, "nihao");
+        assert_eq!(engine.candidates()[0].text, "你好");
+        engine.select_index(1);
+        type_text(&mut engine, "nihao");
+        engine.select_index(1);
+        type_text(&mut engine, "nihao");
+        engine.select_index(1);
+        type_text(&mut engine, "nihao");
+        assert_eq!(engine.candidates()[0].text, "尼好");
+        assert_eq!(
+            engine.candidates()[0].source,
+            zhu_ye_core::candidate::CandidateSource::User
+        );
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 删除与重置用户词同步落盘() {
+        let dir = temp_dir("delete-reset");
+        let store = UserDictStore::new(dir.join("user_words.json"));
+        let mut engine = InputEngine::with_user_store(m1_seed_dictionary(), store.clone());
+        type_text(&mut engine, "nihao");
+        engine.select_index(1);
+
+        assert!(engine.delete_user_word("尼好", "nihao").unwrap());
+        assert!(!engine.delete_user_word("尼好", "nihao").unwrap());
+        assert!(store.load().unwrap().is_empty());
+
+        type_text(&mut engine, "nihao");
+        engine.select_index(1);
+        engine.reset_user_words().unwrap();
+        assert!(store.load().unwrap().is_empty());
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

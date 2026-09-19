@@ -25,6 +25,8 @@ pub struct Candidate {
     pub text: String,
     /// 对应译文（若有）。
     pub translation: Option<String>,
+    /// 上屏文本对应的拼音串（用户词学习使用；AI 候选可能为空）。
+    pub pinyin: Option<String>,
     /// 排序权重分，越大越优先。
     pub score: i64,
     /// 来源。
@@ -38,6 +40,7 @@ impl Candidate {
         Self {
             text: text.into(),
             translation: None,
+            pinyin: None,
             score,
             source: CandidateSource::Static,
         }
@@ -54,6 +57,13 @@ impl Candidate {
     #[must_use]
     pub fn with_source(mut self, source: CandidateSource) -> Self {
         self.source = source;
+        self
+    }
+
+    /// 设置拼音串后返回自身（便于链式构建）。
+    #[must_use]
+    pub fn with_pinyin(mut self, pinyin: impl Into<String>) -> Self {
+        self.pinyin = Some(pinyin.into());
         self
     }
 }

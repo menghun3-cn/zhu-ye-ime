@@ -4,10 +4,13 @@
 
 use std::time::Instant;
 
+use std::path::PathBuf;
+
 use zhu_ye_core::{
     core_version, Candidate, CandidateSorter, Dictionary, DictionaryEntry, InMemoryDictionary,
     OfflineAiService, SyllableTable, Translator,
 };
+use zhu_ye_core::{UserDictStore, UserDictionary};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -15,6 +18,7 @@ fn main() {
         Some("demo") => demo(args.get(2).map(String::as_str).unwrap_or("nihao")),
         Some("self-check") => self_check(),
         Some("bench") => bench(),
+        Some("user") => user_command(args),
         _ => print_usage(),
     }
 }
@@ -24,6 +28,9 @@ fn print_usage() {
     println!("  demo [pinyin]      演示拼音切分与候选");
     println!("  self-check         环境与模块自检");
     println!("  bench              基础性能基准");
+    println!("  user [list]        查看用户词库");
+    println!("  user delete W P    删除用户词（词与拼音）");
+    println!("  user reset         清空用户词库");
 }
 
 fn demo(pinyin: &str) {
@@ -101,6 +108,15 @@ fn self_check() {
         "候选排序: StaticRankingModel (unigram={} bigram={} user={})",
         config.unigram_weight, config.bigram_weight, config.user_weight
     );
+    let store = UserDictStore::new(user_words_path());
+    match store.load() {
+        Ok(user_dict) => println!(
+            "用户词库: {} ({} 条)",
+            store.path().display(),
+            user_dict.len()
+        ),
+        Err(error) => println!("用户词库: {} 读取失败: {error}", store.path().display()),
+    }
     let _ = service;
 }
 
@@ -118,4 +134,56 @@ fn bench() {
         elapsed / runs
     );
     println!("累积命中切分: {hits}");
+}
+
+/// 用户词库路径：Windows 使用 `%APPDATA%`，其他环境回退到工作目录。
+fn user_words_path() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join("ai-zhu-ye-ime").join("user_words.json"))
+        .unwrap_or_else(|| PathBuf::from("user_words.json"))
+}
+
+fn user_command(args: Vec<String>) {
+    let store = UserDictStore::new(user_words_path());
+    match args.get(2).map(String::as_str).unwrap_or("list") {
+        "list" => {
+            let user_dict = store.load().unwrap_or_default();
+            println!(
+                "用户词库: {} ({} 条)",
+                store.path().display(),
+                user_dict.len()
+            );
+            for entry in user_dict.words_sorted() {
+                println!(
+                    "  {} [{}] 选择 {} 次, 最近 {}",
+                    entry.word, entry.pinyin, entry.frequency, entry.last_used
+                );
+            }
+        }
+        "delete" => {
+            let Some(word) = args.get(3) else {
+                println!("用法: zhu-ye-cli user delete <词> <拼音>");
+                return;
+            };
+            let Some(pinyin) = args.get(4) else {
+                println!("用法: zhu-ye-cli user delete <词> <拼音>");
+                return;
+            };
+            let mut user_dict = store.load().unwrap_or_default();
+            match store.delete_word(&mut user_dict, word, pinyin) {
+                Ok(true) => println!("已删除 {word} [{pinyin}]"),
+                Ok(false) => println!("未找到 {word} [{pinyin}]"),
+                Err(error) => println!("删除失败: {error}"),
+            }
+        }
+        "reset" => {
+            let mut user_dict = UserDictionary::new();
+            match store.reset(&mut user_dict) {
+                Ok(()) => println!("用户词库已清空: {}", store.path().display()),
+                Err(error) => println!("清空失败: {error}"),
+            }
+        }
+        _ => println!("user 子命令: list / delete <词> <拼音> / reset"),
+    }
 }
