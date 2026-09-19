@@ -27,7 +27,7 @@ fn print_usage() {
 }
 
 fn demo(pinyin: &str) {
-    let table = SyllableTable::basic();
+    let table = SyllableTable::standard();
     let segments = zhu_ye_core::segment_all(&table, pinyin);
     println!("输入: {pinyin}");
     println!("切分方案: {}", segments.len());
@@ -73,12 +73,12 @@ fn demo_dictionary() -> InMemoryDictionary {
 }
 
 fn self_check() {
-    let table = SyllableTable::basic();
+    let table = SyllableTable::standard();
     let service = OfflineAiService;
     let translator = zhu_ye_core::InMemoryTranslator::new();
     println!("核心库版本: {}", core_version());
     println!(
-        "音节表大小: {} (基础占位)",
+        "音节表大小: {} (标准全拼表)",
         table.complete_syllables_with_prefix("").len()
     );
     println!("AI 服务: OfflineAiService (零网络)");
@@ -98,7 +98,7 @@ fn self_check() {
 }
 
 fn bench() {
-    let table = SyllableTable::basic();
+    let table = SyllableTable::standard();
     let runs = 50_000;
     let start = Instant::now();
     let mut hits = 0usize;

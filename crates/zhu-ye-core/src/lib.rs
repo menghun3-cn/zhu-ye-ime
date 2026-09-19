@@ -15,7 +15,7 @@ pub use ai::{AiService, OfflineAiService};
 pub use candidate::{Candidate, CandidateSorter};
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 pub use error::{Error, Result};
-pub use pinyin::{segment_all, valid_prefix, SyllableTable};
+pub use pinyin::{segment_all, valid_prefix, FullPinyinScheme, PinyinScheme, SyllableTable};
 pub use translate::{InMemoryTranslator, Translator};
 pub use user_dict::UserDictionary;
 

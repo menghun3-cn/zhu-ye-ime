@@ -141,10 +141,10 @@ ITfKeyEventSink 收到按键 -> KeyAction 分类
 
 ## 6. 拼音切分设计
 
-- 音节表：权威公开数据生成，常量导入
-- 匹配：输入串前缀遍历，构建切分 DAG
-- 排序：对每条切分路径评估词典命中，动态规划保留最优候选集合
-- 双拼：双拼码表作为独立配置模块，第一版不激活
+- 音节表：`STANDARD_SYLLABLES` 收录 410 个标准无调全拼音节（T-007）；T-006 数据管线改为公开权威数据生成并校验唯一性
+- 匹配：排序数组二分前缀查询 + 自底向上动态规划，输出全部可行切分；顺序确定、非 ASCII 输入返回空
+- 输入方案：`PinyinScheme` 接口预留双拼接入，当前 `FullPinyinScheme` 只做小写归一化
+- 切分算法决策见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-full-pinyin-segmentation-core.md)（T-007）
 
 ## 7. 候选排序模型
 

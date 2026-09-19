@@ -74,7 +74,7 @@ impl InputEngine {
     #[must_use]
     pub fn new(dictionary: Arc<dyn Dictionary>) -> Self {
         Self {
-            table: SyllableTable::basic(),
+            table: SyllableTable::standard(),
             dictionary,
             composing: String::new(),
             candidates: Vec::new(),
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn 候选生成确定且整词与切分合并去重() {
-        let table = SyllableTable::basic();
+        let table = SyllableTable::standard();
         let dictionary = m1_seed_dictionary();
         let first = generate_candidates(&table, dictionary.as_ref(), "xian");
         let second = generate_candidates(&table, dictionary.as_ref(), "xian");
