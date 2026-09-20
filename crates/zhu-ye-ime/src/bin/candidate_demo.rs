@@ -2,6 +2,10 @@
 //!
 //! 用法示例：
 //! candidate-demo --theme dark --dpi 192 --seconds 2 --shot target/candidate-dark.bmp
+//!
+//! 本二进制通过 `#[path]` 独立编译候选窗模块；TSF 受控窗口只属于库目标，
+//! 因此在演示拷贝里允许 dead_code，避免重复编译产生无关告警。
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 

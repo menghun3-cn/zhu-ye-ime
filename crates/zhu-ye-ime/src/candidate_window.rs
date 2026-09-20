@@ -1,8 +1,7 @@
 //! 候选窗 Win32 GDI 自绘实现。
 //!
-//! 本模块只负责把 `candidate_ui` 计算出的快照画出来：主题、DPI 与行布局
-//! 全部来自纯 Rust 视图层，后续 TSF 联动（窗口定位、选区绑定、输入法
-//! 消息接管）放到 T-013 的 TSF 接入任务中实现。
+//! 本模块负责把 `candidate_ui` 计算出的快照画出来，并提供 TSF 驱动的
+//! 受控窗口入口：同线程创建/更新/隐藏/销毁，不占用独立消息循环。
 
 use std::mem;
 use std::path::PathBuf;
@@ -11,7 +10,7 @@ use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    COLORREF, ERROR_SUCCESS, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    COLORREF, ERROR_SUCCESS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW, CreatePen,
@@ -38,11 +37,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongPtrW, PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, GWLP_USERDATA, HWND_TOP, MSG, SPI_GETHIGHCONTRAST, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE, WM_SYSKEYDOWN,
-    WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    CS_VREDRAW, GWLP_USERDATA, HWND_TOP, MSG, SPI_GETHIGHCONTRAST, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE,
+    WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::candidate_ui::{
@@ -71,6 +70,193 @@ pub struct CandidateWindowOptions {
     pub shot_path: Option<PathBuf>,
 }
 
+/// 候选窗放置点：`anchor` 为组成区屏幕坐标左边界/底部，窗口显示在其下方。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CandidateWindowPlacement {
+    pub anchor: POINT,
+}
+
+/// TSF 生命周期内的候选窗控制器。
+///
+/// 不启动消息循环，所有创建/更新/隐藏都发生在调用线程（TSF 宿主 UI
+/// 线程）上。`Drop` 销毁窗口并释放窗口状态。
+pub struct CandidateWindow {
+    hwnd: HWND,
+    state_ptr: *mut CandidateWindowState,
+}
+
+impl CandidateWindow {
+    /// 创建候选窗控制器；视图在首次 `update` 时落盘，此处只预留空状态。
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            hwnd: HWND::default(),
+            state_ptr: std::ptr::null_mut(),
+        }
+    }
+
+    /// 更新候选视图；无候选时隐藏窗口，有候选且窗口未创建时创建并显示。
+    pub fn update(&mut self, view: CandidateUiView, placement: Option<CandidateWindowPlacement>) {
+        if view.visible_items().is_empty() {
+            self.hide();
+            return;
+        }
+        if self.hwnd.is_invalid() {
+            self.create_window(&view);
+        }
+        if self.hwnd.is_invalid() {
+            return;
+        }
+        unsafe {
+            if let Some(state) = state_mut(self.hwnd) {
+                state.view = view;
+                let rows = state.view.panel_rows();
+                let (width, height) = state.metrics.panel_size(rows);
+                let width = width.max(1);
+                let height = height.max(1);
+                if let Some(placement) = placement {
+                    place_at(self.hwnd, placement.anchor, width, height);
+                } else {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        Some(HWND_TOP),
+                        0,
+                        0,
+                        width,
+                        height,
+                        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER,
+                    );
+                }
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                invalidate(self.hwnd);
+            }
+        }
+    }
+
+    /// 隐藏候选窗，保留窗口与状态供下一次组合复用。
+    pub fn hide(&mut self) {
+        if self.hwnd.is_invalid() {
+            return;
+        }
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
+    }
+
+    fn create_window(&mut self, view: &CandidateUiView) {
+        unsafe {
+            let Ok(module) = GetModuleHandleW(PCWSTR::null()) else {
+                return;
+            };
+            let instance = HINSTANCE(module.0);
+            if register_window_class(instance).is_err() {
+                return;
+            }
+            let initial_dpi = GetDpiForSystem().max(BASE_DPI);
+            let options = CandidateWindowOptions {
+                theme: ThemePreference::Auto,
+                dpi: None,
+                seconds: None,
+                shot_path: None,
+            };
+            let state = Box::new(CandidateWindowState::new_with_quit(
+                view.clone(),
+                &options,
+                initial_dpi,
+                false,
+            ));
+            if state.view.visible_items().is_empty() {
+                return;
+            }
+            let (width, height) = state.metrics.panel_size(state.view.panel_rows());
+            let state_ptr = Box::into_raw(state);
+            let Ok(hwnd) = CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                PCWSTR(window_class_name().as_ptr()),
+                PCWSTR::null(),
+                WS_POPUP,
+                0,
+                0,
+                width.max(1),
+                height.max(1),
+                None,
+                None,
+                Some(instance),
+                Some(state_ptr.cast()),
+            ) else {
+                drop(Box::from_raw(state_ptr));
+                return;
+            };
+            self.hwnd = hwnd;
+            self.state_ptr = state_ptr;
+        }
+    }
+}
+
+impl Default for CandidateWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for CandidateWindow {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.hwnd.is_invalid() {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        }
+        self.hwnd = HWND::default();
+        self.state_ptr = std::ptr::null_mut();
+    }
+}
+
+/// 把候选窗放到组合区下方并限制在显示器工作区内。
+fn place_at(hwnd: HWND, anchor: POINT, width: i32, height: i32) {
+    unsafe {
+        let rect = RECT {
+            left: anchor.x,
+            top: anchor.y,
+            right: anchor.x + width,
+            bottom: anchor.y + height,
+        };
+        // 超出显示器工作区时回到右下角，避免候选窗不可见。
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return;
+        }
+        let work = info.rcWork;
+        let gap = 4i32;
+        let mut left = rect.left;
+        let mut top = rect.top + gap;
+        if left < work.left {
+            left = work.left;
+        }
+        if left + width > work.right {
+            left = (work.right - width).max(work.left);
+        }
+        if top < work.top {
+            top = work.top;
+        }
+        if top + height > work.bottom {
+            top = (work.bottom - height).max(work.top);
+        }
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOP),
+            left,
+            top,
+            width,
+            height,
+            SWP_NOACTIVATE,
+        );
+    }
+}
+
 struct CandidateWindowState {
     view: CandidateUiView,
     metrics: CandidateMetrics,
@@ -79,10 +265,21 @@ struct CandidateWindowState {
     font_is_stock: bool,
     theme_pref: ThemePreference,
     forced_dpi: Option<u32>,
+    quit_on_destroy: bool,
 }
 
 impl CandidateWindowState {
     fn new(view: CandidateUiView, options: &CandidateWindowOptions, initial_dpi: u32) -> Self {
+        Self::new_with_quit(view, options, initial_dpi, true)
+    }
+
+    /// 内部构造：`quit_on_destroy` 为 `false` 时不退出宿主消息循环。
+    fn new_with_quit(
+        view: CandidateUiView,
+        options: &CandidateWindowOptions,
+        initial_dpi: u32,
+        quit_on_destroy: bool,
+    ) -> Self {
         let metrics = CandidateMetrics::new(initial_dpi.max(BASE_DPI));
         let (font, font_is_stock) = create_font(metrics.font_height);
         Self {
@@ -93,6 +290,7 @@ impl CandidateWindowState {
             font_is_stock,
             theme_pref: options.theme,
             forced_dpi: options.dpi,
+            quit_on_destroy,
         }
     }
 
@@ -368,10 +566,15 @@ unsafe extern "system" fn wnd_proc(
         WM_DESTROY => {
             unsafe {
                 if let Some(state) = state_mut(hwnd) {
+                    let quit = state.quit_on_destroy;
                     drop(Box::from_raw(state as *mut CandidateWindowState));
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    if quit {
+                        PostQuitMessage(0);
+                    }
+                } else {
+                    PostQuitMessage(0);
                 }
-                PostQuitMessage(0);
             }
             LRESULT(0)
         }

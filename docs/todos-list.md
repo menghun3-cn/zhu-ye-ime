@@ -24,7 +24,7 @@
 | T-010 | 进行中 | TSF 服务注册与卸载闭环 | FR-010、FR-013 | M1 | DLL 导出/COM 生命周期/安装卸载脚本/便携测试包已完成；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-18-tsf-registration-and-lifetime.md)；待其他机器安装验收 |
 | T-011 | 进行中 | TSF 上屏闭环 | FR-001、FR-004 | M1 | 按键/组合/上屏已实现（20 项单测、clippy、DLL 导出校验通过）；待 VM 安装后记事本验收；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-18-tsf-composition-and-key-events.md) |
 | T-012 | 进行中 | 候选窗渲染（主题/DPI/高对比度） | FR-009、FR-011 | M3 | 独立 GDI 双缓冲自绘、主题跟随系统深浅色/高对比度、DPI 适配与演示截图已验证；TSF 联动与 VM 验收待 T-013；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-window-gdi-rendering.md) |
-| T-013 | 待办 | 键位交互（Shift/Tab/翻页/选择） | FR-004、FR-006、FR-013 | M3 | 与 T-011 联动 |
+| T-013 | 进行中 | 键位交互（Shift/Tab/翻页/选择） | FR-004、FR-006、FR-013 | M3 | 引擎分页/译文层、Shift 中英切换、Tab/逗号/句号与数字键接入、TSF 候选窗生命周期与定位已完成（49 项 lib 单测、clippy 通过）；待 VM 记事本验收；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-20-candidate-window-tsf-integration.md) |
 | T-014 | 待办 | 双语翻译层与译文切换 | FR-005、FR-006、FR-007 | M4 | 本地词典译文物化 |
 | T-015 | 待办 | 性能基准与验收脚本 | FR-011、FR-014 | M4 | bench/self-check |
 | T-016 | 待办 | README、安装文档、许可证清单 | FR-010、FR-012 | M5 | 发布就绪 |

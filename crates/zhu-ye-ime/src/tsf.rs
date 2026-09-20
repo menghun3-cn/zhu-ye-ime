@@ -17,12 +17,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::{
-    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_POINTER, LPARAM, S_FALSE, S_OK, WPARAM,
+    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_POINTER, LPARAM, POINT, RECT, S_FALSE,
+    S_OK, WPARAM,
 };
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_Z,
+    VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_ESCAPE, VK_OEM_COMMA, VK_OEM_PERIOD, VK_RETURN,
+    VK_SHIFT, VK_SPACE, VK_TAB, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
@@ -35,6 +37,7 @@ use windows_core::{
 };
 use zhu_ye_core::{core_version, BigramModel, Dictionary, DictionaryFile, UserDictStore};
 
+use crate::candidate_window::{CandidateWindow, CandidateWindowPlacement};
 use crate::input::{m1_seed_dictionary, InputEngine, InputMode};
 
 /// 输入法 TIP 的 CLSID，与 `scripts/ime-identity.ps1` 中的 `TipClsid` 保持一致。
@@ -67,6 +70,29 @@ enum KeyAction {
     Escape,
     /// 数字选择候选，index 从 0 开始。
     Select(usize),
+    /// Shift 单击切换中英模式。
+    ToggleMode,
+    /// Tab 在中文候选层与译文层之间切换。
+    ToggleLayer,
+    /// 逗号上翻页。
+    PageUp,
+    /// 句号下翻页。
+    PageDown,
+}
+
+impl KeyAction {
+    /// 是否需要 TSF 编辑会话；纯状态动作（Shift/Tab/翻页）在会话外执行。
+    fn needs_edit_session(self) -> bool {
+        matches!(
+            self,
+            KeyAction::Letter(_)
+                | KeyAction::Backspace
+                | KeyAction::Space
+                | KeyAction::Enter
+                | KeyAction::Escape
+                | KeyAction::Select(_)
+        )
+    }
 }
 
 /// 文本服务的共享状态。COM 回调可能由宿主在任意时刻进入，
@@ -77,6 +103,7 @@ struct EngineState {
     thread_mgr: Option<ITfThreadMgr>,
     key_sink_cookie: Option<u32>,
     composition: Option<ITfComposition>,
+    candidate_window: CandidateWindow,
 }
 
 impl EngineState {
@@ -87,6 +114,7 @@ impl EngineState {
             thread_mgr: None,
             key_sink_cookie: None,
             composition: None,
+            candidate_window: CandidateWindow::new(),
         }
     }
 
@@ -97,6 +125,7 @@ impl EngineState {
             thread_mgr: None,
             key_sink_cookie: None,
             composition: None,
+            candidate_window: CandidateWindow::new(),
         }
     }
 }
@@ -180,6 +209,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         let mut state = state_lock(self);
         state.composition = None;
         state.engine.cancel_input();
+        state.candidate_window.hide();
 
         if let Some(thread_mgr) = state.thread_mgr.take() {
             if let Some(cookie) = state.key_sink_cookie.take() {
@@ -207,9 +237,11 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         &self,
         _pic: Ref<'_, ITfContext>,
         wparam: WPARAM,
-        _lparam: LPARAM,
+        lparam: LPARAM,
     ) -> Result<BOOL> {
-        Ok(BOOL(plan_action(wparam, self.state()).is_some() as i32))
+        Ok(BOOL(
+            plan_action(wparam, lparam, self.state()).is_some() as i32
+        ))
     }
 
     fn OnTestKeyUp(
@@ -221,10 +253,21 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         Ok(BOOL(0))
     }
 
-    fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
-        let Some(action) = plan_action(wparam, self.state()) else {
+    fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
+        let Some(action) = plan_action(wparam, lparam, self.state()) else {
             return Ok(BOOL(0));
         };
+
+        // 只改引擎/候选窗状态、不写文档文本的动作不需要编辑会话。
+        if !action.needs_edit_session() {
+            sync_engine(self.state(), action);
+            refresh_candidate_window(self.state(), None);
+            debug_log(&format!(
+                "zhu-ye: key 0x{:X} state action {:?}",
+                wparam.0, action
+            ));
+            return Ok(BOOL(1));
+        }
 
         let Some(context) = pic.cloned() else {
             return Ok(BOOL(0));
@@ -252,10 +295,10 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         // 编辑会话失败时仍同步引擎，避免后续按键基于漂移状态继续输入。
         if session_failed {
             sync_engine(self.state(), action);
+            refresh_candidate_window(self.state(), None);
         }
         Ok(BOOL(1))
     }
-
     fn OnKeyUp(&self, _pic: Ref<'_, ITfContext>, _wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
         Ok(BOOL(0))
     }
@@ -278,6 +321,7 @@ impl ITfCompositionSink_Impl for TextService_Impl {
         let mut state = state_lock(self);
         state.composition = None;
         state.engine.cancel_input();
+        state.candidate_window.hide();
         Ok(())
     }
 }
@@ -301,8 +345,13 @@ impl ITfEditSession_Impl for EditSession_Impl {
     }
 }
 
+/// 判断按键是否为长按重复事件（lparam 第 30 位）。
+fn is_repeat(lparam: LPARAM) -> bool {
+    (lparam.0 as u32) & 0x4000_0000 != 0
+}
+
 /// 将虚拟键码归类为输入动作；与本输入法无关的键返回 `None`。
-fn classify_key(wparam: WPARAM) -> Option<KeyAction> {
+fn classify_key(wparam: WPARAM, lparam: LPARAM) -> Option<KeyAction> {
     let code = VIRTUAL_KEY(wparam.0 as u16).0;
     match code {
         code if (VK_A.0..=VK_Z.0).contains(&code) => {
@@ -318,17 +367,26 @@ fn classify_key(wparam: WPARAM) -> Option<KeyAction> {
         code if (VK_1.0..=VK_9.0).contains(&code) => {
             Some(KeyAction::Select(usize::from(code - VK_1.0)))
         }
+        code if code == VK_SHIFT.0 && !is_repeat(lparam) => Some(KeyAction::ToggleMode),
+        code if code == VK_TAB.0 => Some(KeyAction::ToggleLayer),
+        code if code == VK_OEM_COMMA.0 => Some(KeyAction::PageUp),
+        code if code == VK_OEM_PERIOD.0 => Some(KeyAction::PageDown),
         _ => None,
     }
 }
 
 /// 决定是否吃下按键。字母仅在中文模式下进入组合；
 /// 功能键只在已有组合时处理，避免键盘事件被无谓吞掉。
-fn plan_action(wparam: WPARAM, state: &Rc<Mutex<EngineState>>) -> Option<KeyAction> {
-    let action = classify_key(wparam)?;
+fn plan_action(
+    wparam: WPARAM,
+    lparam: LPARAM,
+    state: &Rc<Mutex<EngineState>>,
+) -> Option<KeyAction> {
+    let action = classify_key(wparam, lparam)?;
     let engine = &state.lock().unwrap().engine;
     match action {
         KeyAction::Letter(_) => (engine.mode() == InputMode::Chinese).then_some(action),
+        KeyAction::ToggleMode => Some(action),
         _ if engine.is_active() => Some(action),
         _ => None,
     }
@@ -351,8 +409,17 @@ fn apply_action(
             let text = commit_text(state, action);
             finish_composition(state, context, ec, &text)?;
         }
+        KeyAction::ToggleMode
+        | KeyAction::ToggleLayer
+        | KeyAction::PageUp
+        | KeyAction::PageDown => {
+            sync_engine(state, action);
+            refresh_candidate_window(state, Some((context, ec)));
+            return Ok(());
+        }
     }
     sync_engine(state, action);
+    refresh_candidate_window(state, Some((context, ec)));
     Ok(())
 }
 
@@ -400,7 +467,56 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
         KeyAction::Select(index) => {
             let _ = engine.select_index(index);
         }
+        KeyAction::ToggleMode => {
+            engine.toggle_mode();
+        }
+        KeyAction::ToggleLayer => {
+            let _ = engine.toggle_translation_layer();
+        }
+        KeyAction::PageUp => {
+            engine.previous_page();
+        }
+        KeyAction::PageDown => {
+            engine.next_page();
+        }
     }
+}
+
+/// 用引擎最新状态刷新候选窗。`edit` 提供编辑会话内的上下文以计算组合区坐标。
+fn refresh_candidate_window(state: &Rc<Mutex<EngineState>>, edit: Option<(&ITfContext, u32)>) {
+    let view = state.lock().unwrap().engine.candidate_ui_view();
+    if view.visible_items().is_empty() {
+        state.lock().unwrap().candidate_window.hide();
+        return;
+    }
+    let placement = edit.and_then(|(context, ec)| composition_placement(state, context, ec));
+    state
+        .lock()
+        .unwrap()
+        .candidate_window
+        .update(view, placement);
+}
+
+/// 编辑会话内取组合范围在屏幕上的底部坐标，用于候选窗定位。
+fn composition_placement(
+    state: &Rc<Mutex<EngineState>>,
+    context: &ITfContext,
+    ec: u32,
+) -> Option<CandidateWindowPlacement> {
+    let composition = state.lock().unwrap().composition.clone()?;
+    let view = unsafe { context.GetActiveView() }.ok()?;
+    let range = unsafe { composition.GetRange() }.ok()?;
+    let mut rect = RECT::default();
+    let mut clipped = BOOL(0);
+    unsafe {
+        view.GetTextExt(ec, &range, &mut rect, &mut clipped).ok()?;
+    }
+    Some(CandidateWindowPlacement {
+        anchor: POINT {
+            x: rect.left,
+            y: rect.bottom,
+        },
+    })
 }
 
 /// 更新组合文本：已有组合直接替换，否则插入文本并启动新组合。
@@ -633,59 +749,68 @@ mod tests {
     #[test]
     fn 键分类覆盖字母与功能键() {
         assert_eq!(
-            classify_key(WPARAM(VK_A.0 as usize)),
+            classify_key(WPARAM(VK_A.0 as usize), LPARAM(0)),
             Some(KeyAction::Letter('a'))
         );
         assert_eq!(
-            classify_key(WPARAM(VK_Z.0 as usize)),
+            classify_key(WPARAM(VK_Z.0 as usize), LPARAM(0)),
             Some(KeyAction::Letter('z'))
         );
         assert_eq!(
-            classify_key(WPARAM(VK_BACK.0 as usize)),
+            classify_key(WPARAM(VK_BACK.0 as usize), LPARAM(0)),
             Some(KeyAction::Backspace)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_SPACE.0 as usize)),
+            classify_key(WPARAM(VK_SPACE.0 as usize), LPARAM(0)),
             Some(KeyAction::Space)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_RETURN.0 as usize)),
+            classify_key(WPARAM(VK_RETURN.0 as usize), LPARAM(0)),
             Some(KeyAction::Enter)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_ESCAPE.0 as usize)),
+            classify_key(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0)),
             Some(KeyAction::Escape)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_1.0 as usize)),
+            classify_key(WPARAM(VK_1.0 as usize), LPARAM(0)),
             Some(KeyAction::Select(0))
         );
         assert_eq!(
-            classify_key(WPARAM(VK_9.0 as usize)),
+            classify_key(WPARAM(VK_9.0 as usize), LPARAM(0)),
             Some(KeyAction::Select(8))
         );
-        assert_eq!(classify_key(WPARAM(VK_0.0 as usize)), None);
-        assert_eq!(classify_key(WPARAM(0x00A0)), None);
+        assert_eq!(classify_key(WPARAM(VK_0.0 as usize), LPARAM(0)), None);
+        assert_eq!(classify_key(WPARAM(0x00A0), LPARAM(0)), None);
     }
 
     #[test]
     fn 未激活组合时功能键放行字母进入引擎() {
         let state = Rc::new(Mutex::new(EngineState::new()));
         assert_eq!(
-            plan_action(WPARAM(VK_A.0 as usize), &state),
+            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), &state),
             Some(KeyAction::Letter('a'))
         );
-        assert_eq!(plan_action(WPARAM(VK_SPACE.0 as usize), &state), None);
-        assert_eq!(plan_action(WPARAM(VK_RETURN.0 as usize), &state), None);
-        assert_eq!(plan_action(WPARAM(VK_ESCAPE.0 as usize), &state), None);
+        assert_eq!(
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), &state),
+            None
+        );
+        assert_eq!(
+            plan_action(WPARAM(VK_RETURN.0 as usize), LPARAM(0), &state),
+            None
+        );
+        assert_eq!(
+            plan_action(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), &state),
+            None
+        );
 
         state.lock().unwrap().engine.handle_letter('a');
         assert_eq!(
-            plan_action(WPARAM(VK_SPACE.0 as usize), &state),
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), &state),
             Some(KeyAction::Space)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), &state),
             Some(KeyAction::Select(0))
         );
     }
@@ -707,5 +832,95 @@ mod tests {
         assert_eq!(commit_text(&state, KeyAction::Space), "你");
         sync_engine(&state, KeyAction::Space);
         assert!(!state.lock().unwrap().engine.is_active());
+    }
+
+    #[test]
+    fn 键分类覆盖shift_tab与翻页键() {
+        assert_eq!(
+            classify_key(WPARAM(VK_SHIFT.0 as usize), LPARAM(0)),
+            Some(KeyAction::ToggleMode)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_TAB.0 as usize), LPARAM(0)),
+            Some(KeyAction::ToggleLayer)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0)),
+            Some(KeyAction::PageUp)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0)),
+            Some(KeyAction::PageDown)
+        );
+    }
+
+    #[test]
+    fn shift长按重复事件不重复切换() {
+        assert_eq!(
+            classify_key(WPARAM(VK_SHIFT.0 as usize), LPARAM(0)),
+            Some(KeyAction::ToggleMode)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_SHIFT.0 as usize), LPARAM(0x4000_0000)),
+            None
+        );
+        assert!(is_repeat(LPARAM(0x4000_0000)));
+        assert!(!is_repeat(LPARAM(0)));
+    }
+
+    #[test]
+    fn shift与组合内功能键放行策略正确() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        assert_eq!(
+            plan_action(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), &state),
+            Some(KeyAction::ToggleMode)
+        );
+        assert_eq!(
+            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), &state),
+            None
+        );
+
+        state.lock().unwrap().engine.handle_letter('n');
+        assert_eq!(
+            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), &state),
+            Some(KeyAction::ToggleLayer)
+        );
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), &state),
+            Some(KeyAction::PageDown)
+        );
+    }
+
+    #[test]
+    fn 状态动作推进图层与页码() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        sync_engine(&state, KeyAction::Letter('n'));
+        sync_engine(&state, KeyAction::Letter('i'));
+        sync_engine(&state, KeyAction::ToggleLayer);
+        assert_eq!(
+            state.lock().unwrap().engine.layer(),
+            crate::input::CandidateLayer::Translation
+        );
+        let before = state.lock().unwrap().engine.page();
+        sync_engine(&state, KeyAction::PageDown);
+        assert_eq!(state.lock().unwrap().engine.page(), before);
+        sync_engine(&state, KeyAction::ToggleMode);
+        assert_eq!(state.lock().unwrap().engine.mode(), InputMode::English);
+    }
+
+    #[test]
+    fn 英文模式放行制表与翻页键给宿主() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        sync_engine(&state, KeyAction::Letter('n'));
+        sync_engine(&state, KeyAction::ToggleMode);
+        assert_eq!(state.lock().unwrap().engine.mode(), InputMode::English);
+        assert_eq!(
+            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), &state),
+            None
+        );
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), &state),
+            None
+        );
     }
 }
