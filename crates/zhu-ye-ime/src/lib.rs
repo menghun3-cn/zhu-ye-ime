@@ -6,6 +6,8 @@
 
 #![allow(linker_messages)] // MSVC 创建 DLL 导入库时的正常输出，不视为警告
 
+pub mod candidate_ui;
+pub mod candidate_window;
 pub mod input;
 pub mod tsf;
 
