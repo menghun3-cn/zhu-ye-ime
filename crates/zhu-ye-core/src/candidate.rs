@@ -76,7 +76,7 @@ impl Candidate {
 #[derive(Debug, Clone, Default)]
 pub struct CandidateSorter;
 
-/// 根据拼音串生成候选：整词优先，再按音节切分组合，最后合并去重并确定性排序。
+/// 根据拼音串生成候选：整词优先，无整词时按音节切分组合，最后合并去重并确定性排序。
 pub fn generate_candidates(
     table: &SyllableTable,
     dictionary: &dyn Dictionary,
@@ -87,36 +87,38 @@ pub fn generate_candidates(
     }
 
     let mut collected: Vec<Candidate> = Vec::new();
-    for entry in dictionary.lookup(pinyin) {
-        collected.push(candidate_from_entry(&entry));
+    let direct_entries = dictionary.lookup(pinyin);
+    for entry in &direct_entries {
+        collected.push(candidate_from_entry(entry));
     }
 
-    for segments in segment_all(table, pinyin) {
-        if segments.len() < 2 {
-            continue;
-        }
-        let mut combined = String::new();
-        let mut combined_pinyin = String::new();
-        let mut total = 0i64;
-        let mut complete = true;
-        for syllable in &segments {
-            match dictionary.lookup(syllable).first() {
-                Some(entry) => {
-                    combined.push_str(&entry.word);
-                    combined_pinyin.push_str(syllable);
-                    total += i64::try_from(entry.frequency).unwrap_or(i64::MAX);
-                }
-                None => {
-                    complete = false;
-                    break;
+    if direct_entries.is_empty() {
+        for segments in segment_all(table, pinyin) {
+            if segments.len() < 2 {
+                continue;
+            }
+            let mut combined = String::new();
+            let mut combined_pinyin = String::new();
+            let mut total = 0i64;
+            let mut complete = true;
+            for syllable in &segments {
+                match dictionary.lookup(syllable).first() {
+                    Some(entry) => {
+                        combined.push_str(&entry.word);
+                        combined_pinyin.push_str(syllable);
+                        total += i64::try_from(entry.frequency).unwrap_or(i64::MAX);
+                    }
+                    None => {
+                        complete = false;
+                        break;
+                    }
                 }
             }
-        }
-        if complete {
-            collected.push(Candidate::new(combined, total).with_pinyin(combined_pinyin));
+            if complete {
+                collected.push(Candidate::new(combined, total).with_pinyin(combined_pinyin));
+            }
         }
     }
-
     deduplicate_and_sort(collected)
 }
 
@@ -415,5 +417,39 @@ mod tests {
         assert_eq!(first, second);
         let texts: Vec<&str> = first.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts.iter().filter(|t| **t == "西安").count(), 1);
+    }
+
+    #[test]
+    fn 整词存在时不生成音节切分噪声() {
+        use crate::demo::seed_entries;
+        use crate::dict::{DictionaryEntry, InMemoryDictionary};
+        use crate::pinyin::SyllableTable;
+
+        let table = SyllableTable::standard();
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("给", "ji", 1000));
+        entries.push(DictionaryEntry::new("啊", "a", 1000));
+        entries.push(DictionaryEntry::new("哦", "o", 1000));
+        entries.push(DictionaryEntry::new("叫", "jiao", 100));
+        let dictionary = InMemoryDictionary::from_entries(entries);
+        let candidates = generate_candidates(&table, &dictionary, "jiao");
+        let texts: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
+        assert!(texts.contains(&"叫"));
+        assert!(!texts.contains(&"给啊哦"));
+    }
+
+    #[test]
+    fn 无整词时按音节组合保留回退候选() {
+        use crate::dict::{DictionaryEntry, InMemoryDictionary};
+        use crate::pinyin::SyllableTable;
+
+        let table = SyllableTable::standard();
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你", "ni", 100),
+            DictionaryEntry::new("好", "hao", 90),
+        ]);
+        let candidates = generate_candidates(&table, &dictionary, "nihao");
+        let texts: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["你好"]);
     }
 }

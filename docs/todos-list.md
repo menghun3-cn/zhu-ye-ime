@@ -32,7 +32,7 @@
 | T-018 | 已完成 | 适配 Agent Notes 与开发/提交/推送流程 | FR-014 | M0-流程 | 规则写入 AGENTS.md；见 [Agent Note](../../.agents/notes/implemented/process/2026-09-18-project-ai-workflow-adaptation.md) |
 | T-019 | 已完成 | 确定 git-publish 分支模型并回写配置 | FR-014 | M0-流程 | develop 集成 / main 生产 / release/vX.Y.Z / tag vX.Y.Z；已回写 AGENTS.md 与 git-publish 配置 |
 | T-020 | 已完成 | 技能与脚本适配 Rust/Cargo/PowerShell 工作流 | FR-014 | M0-流程 | 移除 pnpm/Vitest/Node 依赖；新增两个 PowerShell 门禁脚本，见 [Agent Note](../../.agents/notes/implemented/process/2026-09-18-project-ai-workflow-adaptation.md) |
-| T-021 | 待办 | 清洗多音节切分噪声候选 | FR-001、FR-002 | M2 | 真实字典排序验证时发现噪声候选（如 给哦/夹哦/生和哦/发站）会挤占真实候选；需在切分或候选生成阶段收紧多音节词边界后复验；关联 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-ranking-static-model.md) |
+| T-021 | 已完成 | 清洗多音节切分噪声候选 | FR-001、FR-002 | M2 | 整词拼音存在直接词典条目时不再追加音节切分组合，无整词时保留回退；真实词典复验：`rank jiao` 叫 92,723 居首、`rank xian` 洗按消失、`rank fazhan` 发展 3,680 居首且无发站、`rank geio` 给哦 保留；新增 2 项 core 单测；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-ranking-static-model.md) |
 
 ## 周期任务登记
 

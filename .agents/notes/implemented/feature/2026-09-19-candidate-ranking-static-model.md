@@ -76,8 +76,13 @@ same generation and ranking path against a real v2 dictionary. Validation on
 `rank de 我们` keeps `的` first at 3,979,557 while `得` rises to 158,049; two
 identical runs produced identical output. T-008 is complete.
 
-Known follow-up: multi-syllable segmentation can emit noisy fake candidates
-such as `给哦`, `夹哦`, `生和哦`, and `发站` that crowd out real entries.
-T-021 tracks tightening segmentation or the candidate filter before M2
-signoff. AI-ranked output can later be a new `RankingModel` implementation
-instead of extra fields on `Candidate`.
+Multi-syllable noise cleanup is implemented (T-021): when the full pinyin has
+direct dictionary entries, `generate_candidates` no longer appends
+syllable-combination candidates, so `jiao` no longer emits `给哦`, `xian` no
+longer emits `洗按`, and `fazhan` no longer emits `发站`; fallback
+combinations remain when there are no direct entries, such as `geio` →
+`给哦`. Real-dictionary validation: `rank jiao` puts `叫` first with 92,723,
+`rank xian` has no `洗按`, `rank fazhan` puts `发展` first with 3,680, and
+`rank geio` keeps `给哦`. An explicit `xi an` separator remains a possible
+future enhancement and does not block M2. AI-ranked output can later be a
+new `RankingModel` implementation instead of extra fields on `Candidate`.
