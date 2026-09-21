@@ -2,7 +2,7 @@
 
 一款轻量的 Windows 中文输入法：全拼输入，候选区直接显示中英译文，按 `Tab` 即可上屏译文。目标是干净、快速、无广告，核心算法自研，本地优先，并为 AI 翻译/润色/联想/预判/建议预留可插拔接口。
 
-当前状态：M1 开发中；TSF 注册与卸载闭环（T-010）、按键与上屏闭环（T-011）均已完成开发与脚本，正在待虚拟机制备好后做真实 Windows 安装与记事本输入验收。
+当前状态：M1-M4 功能已完成开发与自动化验证，包含 TSF 注册/卸载、全拼输入、候选窗、键位交互与本地双语译文层；T-010 至 T-013 等待虚拟机/真机端到端验收。详细安装与使用见 [安装与使用指南](docs/安装与使用.md)。
 
 ## 特性
 
@@ -65,6 +65,8 @@ cargo run -p zhu-ye-cli -- bench
 .\scripts\bench.ps1 -Release
 ```
 
+安装、启用、键位、用户词管理、升级与卸载请阅读 [安装与使用指南](docs/安装与使用.md)。
+
 ## 文档索引
 
 - [需求规格说明书](docs/需求规格说明书.md)
@@ -74,6 +76,8 @@ cargo run -p zhu-ye-cli -- bench
 - [任务清单](docs/todos-list.md)
 - [任务归档](docs/todos-done.md)
 - [数据许可证](docs/licenses.md)
+- [安装与使用指南](docs/安装与使用.md)
+- [变更记录](CHANGELOG.md)
 
 ## 路线图
 
@@ -86,4 +90,4 @@ cargo run -p zhu-ye-cli -- bench
 
 ## 许可证
 
-项目代码许可证将在发布阶段明确（候选：MIT OR Apache-2.0）。第三方数据许可证见 docs/licenses.md。
+项目代码许可证为 `MIT OR Apache-2.0`（见根 Cargo.toml）。第三方数据来源与许可证见 [docs/licenses.md](docs/licenses.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
