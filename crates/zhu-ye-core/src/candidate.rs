@@ -2,10 +2,13 @@
 //!
 //! 底层 `CandidateSorter` 只负责确定性基础排序；候选排序模型（trait）
 //! 负责把静态词典分、上下文 bigram 与用户词频加权成最终排序分。
+use std::collections::HashMap;
 
 use std::sync::Arc;
 
 use crate::bigram::{BigramModel, EmptyBigramModel};
+use crate::dict::{Dictionary, DictionaryEntry};
+use crate::pinyin::{segment_all, SyllableTable};
 use crate::user_dict::UserDictionary;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -72,6 +75,85 @@ impl Candidate {
 /// 排序必须确定，相同输入产生相同顺序。
 #[derive(Debug, Clone, Default)]
 pub struct CandidateSorter;
+
+/// 根据拼音串生成候选：整词优先，再按音节切分组合，最后合并去重并确定性排序。
+pub fn generate_candidates(
+    table: &SyllableTable,
+    dictionary: &dyn Dictionary,
+    pinyin: &str,
+) -> Vec<Candidate> {
+    if pinyin.is_empty() {
+        return Vec::new();
+    }
+
+    let mut collected: Vec<Candidate> = Vec::new();
+    for entry in dictionary.lookup(pinyin) {
+        collected.push(candidate_from_entry(&entry));
+    }
+
+    for segments in segment_all(table, pinyin) {
+        if segments.len() < 2 {
+            continue;
+        }
+        let mut combined = String::new();
+        let mut combined_pinyin = String::new();
+        let mut total = 0i64;
+        let mut complete = true;
+        for syllable in &segments {
+            match dictionary.lookup(syllable).first() {
+                Some(entry) => {
+                    combined.push_str(&entry.word);
+                    combined_pinyin.push_str(syllable);
+                    total += i64::try_from(entry.frequency).unwrap_or(i64::MAX);
+                }
+                None => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if complete {
+            collected.push(Candidate::new(combined, total).with_pinyin(combined_pinyin));
+        }
+    }
+
+    deduplicate_and_sort(collected)
+}
+
+fn candidate_from_entry(entry: &DictionaryEntry) -> Candidate {
+    let mut candidate = Candidate::new(
+        entry.word.clone(),
+        i64::try_from(entry.frequency).unwrap_or(i64::MAX),
+    );
+    candidate = candidate.with_pinyin(entry.pinyin.clone());
+    if let Some(translation) = &entry.translation {
+        candidate = candidate.with_translation(translation.clone());
+    }
+    candidate
+}
+
+fn deduplicate_and_sort(candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let mut by_text: HashMap<String, Candidate> = HashMap::new();
+    for candidate in candidates {
+        match by_text.get_mut(&candidate.text) {
+            Some(existing) => {
+                if candidate.score > existing.score {
+                    existing.score = candidate.score;
+                }
+                if existing.translation.is_none() {
+                    existing.translation = candidate.translation.clone();
+                }
+                if existing.pinyin.is_none() {
+                    existing.pinyin = candidate.pinyin.clone();
+                }
+            }
+            None => {
+                by_text.insert(candidate.text.clone(), candidate);
+            }
+        }
+    }
+    CandidateSorter::sort(by_text.into_values().collect())
+}
 
 impl CandidateSorter {
     /// 对候选按排序分降序排列。
@@ -209,7 +291,8 @@ mod tests {
 
     use crate::bigram::InMemoryBigramModel;
     use crate::candidate::{
-        Candidate, CandidateSorter, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+        generate_candidates, Candidate, CandidateSorter, RankingConfig, RankingContext,
+        RankingModel, StaticRankingModel,
     };
     use crate::user_dict::UserDictionary;
 
@@ -317,5 +400,20 @@ mod tests {
         let first = rank_with(&model, Some("我们"), &user, candidates());
         let second = rank_with(&model, Some("我们"), &user, candidates());
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn 候选生成确定且整词与切分合并去重() {
+        use crate::demo::seed_entries;
+        use crate::dict::InMemoryDictionary;
+        use crate::pinyin::SyllableTable;
+
+        let table = SyllableTable::standard();
+        let dictionary = InMemoryDictionary::from_entries(seed_entries());
+        let first = generate_candidates(&table, &dictionary, "xian");
+        let second = generate_candidates(&table, &dictionary, "xian");
+        assert_eq!(first, second);
+        let texts: Vec<&str> = first.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts.iter().filter(|t| **t == "西安").count(), 1);
     }
 }

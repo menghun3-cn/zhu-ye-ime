@@ -12,6 +12,8 @@ Status: implemented
 
 `zhu-ye-core::candidate` 现在负责排序模型，而不只是简单排序。
 
+候选生成也迁入 core：`generate_candidates`、`candidate_from_entry` 与 `deduplicate_and_sort` 从音节切分路径产出确定且去重的候选，IME 与 CLI 共用同一管线；core 测试覆盖确定性生成与整词/切分去重。
+
 `RankingModel` 是可注入的排序接口；`StaticRankingModel` 是当前确定性实现。`RankingConfig` 暴露默认权重：`unigram_weight=1`、`bigram_weight=16`、`bigram_frequency_cap=100_000`、`user_weight=48`、`user_frequency_cap=10_000`。计分全部使用整数饱和乘加运算，随后按分数降序、文本升序排序。
 
 `RankingContext` 携带 `previous_word` 与内存 `UserDictionary`。用户词命中时把 `CandidateSource` 改写为 `User`。`UserDictionary` 新增 `frequency_by_word`，对同一文本的不同拼音变体求和。
@@ -34,4 +36,6 @@ Status: implemented
 
 基础排序保持确定，无上下文时 `de` 仍首选 `的`；新增测试覆盖 bigram 提升、bigram 未命中回退、用户词频提升与两次运行结果稳定。输入引擎在提交后记录前词，也为 TSF 预览和未来的记忆钩子提供单一事实来源。
 
-T-008 保持“进行中”，直到 T-006 喂入真实 bigram 表并通过 M2 检查。AI 排序结果以后可以新增 `RankingModel` 实现承载，而不是给 `Candidate` 增加字段。
+CLI 新增 `rank <词典文件> <拼音> [前词]`，用同一生成与排序路径直接验证真实 v2 词典。`data/artifacts/real.zyct` 验证结果：`rank de` 的仍以 3,957,141 居首；`rank de 我们` 的以 3,979,557 居首、得提升至 158,049；相同命令两次运行输出一致。T-008 验收完成。
+
+已知后续：多音节切分可能产出 `给哦`、`夹哦`、`生和哦`、`发站` 等噪声候选并挤占真实候选，T-021 负责在 M2 签字前收紧切分或候选过滤。AI 排序结果以后可以新增 `RankingModel` 实现承载，而不是给 `Candidate` 增加字段。

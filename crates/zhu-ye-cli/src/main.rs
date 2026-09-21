@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::{
-    core_version, BigramModel, Candidate, CandidateSorter, Dictionary, DictionaryEntry,
-    InMemoryBigramModel, InMemoryDictionary, InMemoryTranslator, OfflineAiService, SyllableTable,
-    Translator,
+    core_version, generate_candidates, BigramModel, Candidate, CandidateSorter, Dictionary,
+    DictionaryEntry, InMemoryBigramModel, InMemoryDictionary, InMemoryTranslator, OfflineAiService,
+    RankingConfig, RankingContext, RankingModel, StaticRankingModel, SyllableTable, Translator,
 };
 use zhu_ye_core::{UserDictStore, UserDictionary};
 
@@ -24,6 +24,7 @@ fn main() {
         Some("bench") => bench(),
         Some("user") => user_command(args),
         Some("dict") => dict_command(args),
+        Some("rank") => rank_command(args),
         _ => print_usage(),
     }
 }
@@ -38,6 +39,7 @@ fn print_usage() {
     println!("  user reset         清空用户词库");
     println!("  dict <文件> [拼]   加载 v2 词典并查询词条");
     println!("  dict <文件> -r 英文  加载 v2 词典并通过译文反查中文");
+    println!("  rank <文件> <拼音> [前词]  加载 v2 词典并按上下文输出排序候选");
 }
 
 fn demo(pinyin: &str) {
@@ -377,5 +379,44 @@ fn user_command(args: Vec<String>) {
             }
         }
         _ => println!("user 子命令: list / delete <词> <拼音> / reset"),
+    }
+}
+
+/// `rank` 子命令：加载 v2 词典，生成候选并按上下文 bigram 排序。
+fn rank_command(args: Vec<String>) {
+    let Some(path) = args.get(2) else {
+        println!("用法: zhu-ye-cli rank <词典文件> <拼音> [前词]");
+        return;
+    };
+    let Some(pinyin) = args.get(3).map(String::as_str) else {
+        println!("用法: zhu-ye-cli rank <词典文件> <拼音> [前词]");
+        return;
+    };
+    let previous = args.get(4).map(String::as_str);
+    match DictionaryFile::open(Path::new(path)) {
+        Ok(file) => {
+            let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
+            let bigram: Arc<dyn BigramModel> = Arc::new(file);
+            let model = StaticRankingModel::new(RankingConfig::default(), bigram);
+            let candidates =
+                generate_candidates(&SyllableTable::standard(), dictionary.as_ref(), pinyin);
+            let user = UserDictionary::new();
+            let ranked = model.rank(candidates, &RankingContext::new(previous, &user));
+            println!("候选排序: {pinyin} (前词: {})", previous.unwrap_or("无"));
+            println!("候选数量: {}", ranked.len());
+            for (index, candidate) in ranked.iter().take(20).enumerate() {
+                let pinyin = candidate.pinyin.as_deref().unwrap_or("-");
+                let translation = candidate.translation.as_deref().unwrap_or("-");
+                println!(
+                    "{:>2}. {}  [{}]  译文: {}  得分: {}",
+                    index + 1,
+                    candidate.text,
+                    pinyin,
+                    translation,
+                    candidate.score
+                );
+            }
+        }
+        Err(error) => println!("加载失败: {error}"),
     }
 }

@@ -3,16 +3,15 @@
 //! TSF 适配层只负责把按键翻译成这里的调用，并把返回的提交文本写入文档；
 //! 候选排序、拼音切分与词典查询全部复用 `zhu-ye-core`，保证行为可单测。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use std::path::Path;
 
 use zhu_ye_core::bigram::BigramModel;
 use zhu_ye_core::candidate::{
-    Candidate, CandidateSorter, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+    Candidate, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
 };
-use zhu_ye_core::dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
+use zhu_ye_core::dict::{Dictionary, InMemoryDictionary};
 use zhu_ye_core::pinyin::{segment_all, SyllableTable};
 use zhu_ye_core::{unix_now, DictionaryFile, Result, UserDictStore, UserDictionary};
 
@@ -497,8 +496,11 @@ impl InputEngine {
     }
 
     fn refresh_candidates(&mut self) {
-        let candidates =
-            generate_candidates(&self.table, self.dictionary.as_ref(), &self.composing);
+        let candidates = zhu_ye_core::generate_candidates(
+            &self.table,
+            self.dictionary.as_ref(),
+            &self.composing,
+        );
         let context = RankingContext::new(self.previous_word.as_deref(), &self.user_dictionary);
         self.candidates = self.ranking.rank(candidates, &context);
         self.cached_translation_candidates = self
@@ -537,85 +539,6 @@ impl InputEngine {
     }
 }
 
-/// 根据拼音串生成候选：整词优先，再按音节切分组合，最后合并去重并确定性排序。
-fn generate_candidates(
-    table: &SyllableTable,
-    dictionary: &dyn Dictionary,
-    pinyin: &str,
-) -> Vec<Candidate> {
-    if pinyin.is_empty() {
-        return Vec::new();
-    }
-
-    let mut collected: Vec<Candidate> = Vec::new();
-    for entry in dictionary.lookup(pinyin) {
-        collected.push(candidate_from_entry(&entry));
-    }
-
-    for segments in segment_all(table, pinyin) {
-        if segments.len() < 2 {
-            continue;
-        }
-        let mut combined = String::new();
-        let mut combined_pinyin = String::new();
-        let mut total = 0i64;
-        let mut complete = true;
-        for syllable in &segments {
-            match dictionary.lookup(syllable).first() {
-                Some(entry) => {
-                    combined.push_str(&entry.word);
-                    combined_pinyin.push_str(syllable);
-                    total += i64::try_from(entry.frequency).unwrap_or(i64::MAX);
-                }
-                None => {
-                    complete = false;
-                    break;
-                }
-            }
-        }
-        if complete {
-            collected.push(Candidate::new(combined, total).with_pinyin(combined_pinyin));
-        }
-    }
-
-    deduplicate_and_sort(collected)
-}
-
-fn candidate_from_entry(entry: &DictionaryEntry) -> Candidate {
-    let mut candidate = Candidate::new(
-        entry.word.clone(),
-        i64::try_from(entry.frequency).unwrap_or(i64::MAX),
-    );
-    candidate = candidate.with_pinyin(entry.pinyin.clone());
-    if let Some(translation) = &entry.translation {
-        candidate = candidate.with_translation(translation.clone());
-    }
-    candidate
-}
-
-fn deduplicate_and_sort(candidates: Vec<Candidate>) -> Vec<Candidate> {
-    let mut by_text: HashMap<String, Candidate> = HashMap::new();
-    for candidate in candidates {
-        match by_text.get_mut(&candidate.text) {
-            Some(existing) => {
-                if candidate.score > existing.score {
-                    existing.score = candidate.score;
-                }
-                if existing.translation.is_none() {
-                    existing.translation = candidate.translation.clone();
-                }
-                if existing.pinyin.is_none() {
-                    existing.pinyin = candidate.pinyin.clone();
-                }
-            }
-            None => {
-                by_text.insert(candidate.text.clone(), candidate);
-            }
-        }
-    }
-    CandidateSorter::sort(by_text.into_values().collect())
-}
-
 fn candidate_ui_item(candidate: &Candidate) -> CandidateUiItem {
     CandidateUiItem {
         text: candidate.text.clone(),
@@ -648,8 +571,9 @@ fn pinyin_hints(composing: &str) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use super::{generate_candidates, m1_seed_dictionary, CandidateLayer, InputEngine, InputMode};
+    use super::{m1_seed_dictionary, CandidateLayer, InputEngine, InputMode};
     use zhu_ye_core::bigram::InMemoryBigramModel;
+    use zhu_ye_core::generate_candidates;
     use zhu_ye_core::pinyin::SyllableTable;
     use zhu_ye_core::UserDictStore;
     use zhu_ye_core::{build_v2, seed_bigrams, seed_entries};

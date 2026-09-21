@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-09-19-candidate-ranking-static-model.md
 #   git hash-object 2026-09-19-candidate-ranking-static-model.zh.md
-2026-09-19-candidate-ranking-static-model.md: 1d84b08943e4a1c204664691ee5e2f9b5cb98cbc
-2026-09-19-candidate-ranking-static-model.zh.md: 67689a1312a280ebadf0187bed6da7c3733d9a67
+2026-09-19-candidate-ranking-static-model.md: 23151a2ef9d21d300a47a342a80267947bbda1e8
+2026-09-19-candidate-ranking-static-model.zh.md: ba3d2115a493a72dec944a21522c6ac8bf09d855

@@ -17,6 +17,12 @@ the real data pipeline is still defined.
 
 `zhu-ye-core::candidate` now owns ranking instead of just sorting.
 
+Candidate generation also moved into core: `generate_candidates`,
+`candidate_from_entry`, and `deduplicate_and_sort` produce deterministic,
+deduplicated candidates from a syllable segmentation path, so IME and CLI share
+exactly the same pipeline. Core tests cover deterministic generation and
+whole-word/segmentation dedup.
+
 `RankingModel` is the injectable ranking interface; `StaticRankingModel` is the
 current deterministic implementation. `RankingConfig` exposes the default
 weights: `unigram_weight=1`, `bigram_weight=16`,
@@ -64,6 +70,14 @@ promotion, and two-run stability. The input engine records the previous word
 after commit, which also gives TSF previews and future remembering hooks a
 single source of truth.
 
-T-008 stays in progress until T-006 feeds a real bigram table and the M2 check
-passes. AI-ranked output can later be a new `RankingModel` implementation
+The CLI now has `rank <dictionary> <pinyin> [previous-word]`, which feeds the
+same generation and ranking path against a real v2 dictionary. Validation on
+`data/artifacts/real.zyct`: `rank de` keeps `的` first with 3,957,141, and
+`rank de 我们` keeps `的` first at 3,979,557 while `得` rises to 158,049; two
+identical runs produced identical output. T-008 is complete.
+
+Known follow-up: multi-syllable segmentation can emit noisy fake candidates
+such as `给哦`, `夹哦`, `生和哦`, and `发站` that crowd out real entries.
+T-021 tracks tightening segmentation or the candidate filter before M2
+signoff. AI-ranked output can later be a new `RankingModel` implementation
 instead of extra fields on `Candidate`.

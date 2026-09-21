@@ -20,7 +20,8 @@ pub mod user_store;
 pub use ai::{AiService, OfflineAiService};
 pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
 pub use candidate::{
-    Candidate, CandidateSorter, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+    generate_candidates, Candidate, CandidateSorter, RankingConfig, RankingContext, RankingModel,
+    StaticRankingModel,
 };
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 pub use error::{Error, Result};
