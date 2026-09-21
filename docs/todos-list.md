@@ -3,7 +3,7 @@
 ## 维护规则
 
 - 状态三态：`待办` / `进行中` / `已完成`
-- 编号规则：`T-xxx` 全局唯一，增量递增；当前已用至 `T-021`
+- 编号规则：`T-xxx` 全局唯一，增量递增；当前已用至 `T-022`
 - FR 关联：任务必须关联需求规格说明书中的需求编号
 - 周期任务：到期后登记观察结论并追加到 todos-done，不迁移、不删除任务本体
 - 提交前校验：任务状态与实现进度一致，未完成不得标记已完成
@@ -33,6 +33,7 @@
 | T-019 | 已完成 | 确定 git-publish 分支模型并回写配置 | FR-014 | M0-流程 | develop 集成 / main 生产 / release/vX.Y.Z / tag vX.Y.Z；已回写 AGENTS.md 与 git-publish 配置 |
 | T-020 | 已完成 | 技能与脚本适配 Rust/Cargo/PowerShell 工作流 | FR-014 | M0-流程 | 移除 pnpm/Vitest/Node 依赖；新增两个 PowerShell 门禁脚本，见 [Agent Note](../../.agents/notes/implemented/process/2026-09-18-project-ai-workflow-adaptation.md) |
 | T-021 | 已完成 | 清洗多音节切分噪声候选 | FR-001、FR-002 | M2 | 整词拼音存在直接词典条目时不再追加音节切分组合，无整词时保留回退；真实词典复验：`rank jiao` 叫 92,723 居首、`rank xian` 洗按消失、`rank fazhan` 发展 3,680 居首且无发站、`rank geio` 给哦 保留；新增 2 项 core 单测；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-ranking-static-model.md) |
+| T-022 | 已完成 | 安装与便携包随带词典数据 | FR-007、FR-010 | M5 | install/package 把 v2 词典复制为 DLL 同目录 `dictionary.zyct`；TSF 运行时支持 `ZHU_YE_DICT_PATH`、DLL 同目录与用户目录解析顺序；门禁与便携包产物已验证；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-21-installed-dictionary-deployment.md) |
 
 ## 周期任务登记
 

@@ -6,7 +6,7 @@
 .DESCRIPTION
 1. 以 release 模式构建 zhu-ye-ime（可跳过）
 2. 校验 DLL 导出
-3. 复制 DLL 到 Program Files 安装目录
+3. 复制 DLL 与 v2 词典（优先 data/artifacts/real.zyct）到 Program Files 安装目录
 4. 注册 HKLM TSF TIP/Category/LanguageProfile/CLSID 键
 5. 校验注册结果
 
@@ -18,10 +18,14 @@
 
 .EXAMPLE
 .\scripts\install.ps1 -SkipBuild
+
+.EXAMPLE
+.\scripts\install.ps1 -DictionaryPath .\data\artifacts\real.zyct
 #>
 [CmdletBinding()]
 param(
     [string]$InstallDir,
+    [string]$DictionaryPath,
     [switch]$SkipBuild
 )
 
@@ -33,6 +37,42 @@ function Test-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Resolve-DictionarySource {
+    param([string]$Path)
+
+    if ($Path) {
+        $absolute = [System.IO.Path]::GetFullPath($Path)
+        if (-not (Test-Path -LiteralPath $absolute -PathType Leaf)) {
+            throw "词典文件不存在: $absolute"
+        }
+        return $absolute
+    }
+    foreach ($candidate in @(
+        (Join-Path $repoRoot 'dictionary.zyct'),
+        (Join-Path $repoRoot 'data\artifacts\real.zyct'),
+        (Join-Path $repoRoot 'data\artifacts\seed.zyct')
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+    Write-Host '未找到现成词典产物，先生成自建演示种子...'
+    Push-Location $repoRoot
+    try {
+        & cargo run -q -p zhu-ye-dict -- build
+        if ($LASTEXITCODE -ne 0) {
+            throw 'zhu-ye-dict build 失败，无法安装词典。'
+        }
+    } finally {
+        Pop-Location
+    }
+    $built = Join-Path $repoRoot 'data\artifacts\seed.zyct'
+    if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
+        throw '词典构建完成后仍缺失，无法安装。'
+    }
+    return $built
 }
 
 if (-not (Test-Admin)) {
@@ -73,6 +113,14 @@ if (Test-Path -LiteralPath $targetDll -PathType Leaf) {
     }
 }
 Copy-Item -LiteralPath $sourceDll -Destination $targetDll -Force
+
+$dictionarySource = Resolve-DictionarySource -Path $DictionaryPath
+$targetDictionary = Join-Path $InstallDir $TsfIdentity['DictionaryFileName']
+Copy-Item -LiteralPath $dictionarySource -Destination $targetDictionary -Force
+$legacyDictionary = Join-Path $InstallDir 'seed.zyct'
+if (Test-Path -LiteralPath $legacyDictionary -PathType Leaf) {
+    Remove-Item -LiteralPath $legacyDictionary -Force
+}
 
 & (Join-Path $PSScriptRoot 'verify-tsf-dll.ps1') -DllPath $targetDll
 if ($LASTEXITCODE -ne 0) {

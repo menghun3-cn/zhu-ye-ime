@@ -22,6 +22,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
+use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_ESCAPE, VK_OEM_COMMA, VK_OEM_PERIOD, VK_RETURN,
     VK_SHIFT, VK_SPACE, VK_TAB, VK_Z,
@@ -43,6 +44,9 @@ use crate::input::{m1_seed_dictionary, InputEngine, InputMode};
 /// 输入法 TIP 的 CLSID，与 `scripts/ime-identity.ps1` 中的 `TipClsid` 保持一致。
 pub const CLSID_ZHU_YE_TIP: windows::core::GUID =
     windows::core::GUID::from_u128(0xE54D6682_8650_40E7_A9EE_6FD1137849AE);
+
+/// 安装/便携包随带的 v2 词典文件名，与 `scripts/ime-identity.ps1` 保持一致。
+const DICTIONARY_FILE_NAME: &str = "dictionary.zyct";
 
 /// 简体中文（zh-CN，LCID 0x0804）下的语言配置文件 GUID，
 /// 与 `scripts/ime-identity.ps1` 中的 `ProfileGuid` 保持一致。
@@ -604,12 +608,46 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
     }
 }
 
-/// 词典运行时路径：安装脚本把构建产物放到数据目录后，DLL 从这里加载。
+/// 词典运行时路径解析顺序：显式环境变量 > DLL 同目录（安装器写入）
+/// > 用户数据目录 > 工作目录回退。缺失或损坏时由 `create_engine` 回退内置演示词典。
 fn dictionary_path() -> PathBuf {
-    std::env::var_os("APPDATA")
+    if let Some(override_path) = std::env::var_os("ZHU_YE_DICT_PATH") {
+        return PathBuf::from(override_path);
+    }
+    resolve_dictionary_path(installed_dictionary_path(), appdata_dictionary_path())
+}
+
+/// 纯路径取舍，便于单测；调用方传入已经确认存在的候选路径。
+fn resolve_dictionary_path(installed: Option<PathBuf>, appdata: Option<PathBuf>) -> PathBuf {
+    installed
+        .or(appdata)
+        .unwrap_or_else(|| PathBuf::from(DICTIONARY_FILE_NAME))
+}
+
+/// 返回 DLL 同目录存在的 `dictionary.zyct`；便于安装器做机器级部署。
+fn installed_dictionary_path() -> Option<PathBuf> {
+    let module_name = to_wide("zhu-ye-ime.dll");
+    unsafe {
+        let module = GetModuleHandleW(PCWSTR(module_name.as_ptr())).ok()?;
+        let mut buffer = [0u16; 4096];
+        let length = GetModuleFileNameW(Some(module), &mut buffer);
+        if length == 0 {
+            return None;
+        }
+        let module_path = String::from_utf16_lossy(&buffer[..length as usize]);
+        let mut directory = PathBuf::from(module_path);
+        directory.pop();
+        let candidate = directory.join(DICTIONARY_FILE_NAME);
+        candidate.exists().then_some(candidate)
+    }
+}
+
+/// 用户数据目录里的词典，保留旧版手动放词典的开发流程。
+fn appdata_dictionary_path() -> Option<PathBuf> {
+    let candidate = std::env::var_os("APPDATA")
         .map(PathBuf::from)
-        .map(|root| root.join("ai-zhu-ye-ime").join("seed.zyct"))
-        .unwrap_or_else(|| PathBuf::from("seed.zyct"))
+        .map(|root| root.join("ai-zhu-ye-ime").join(DICTIONARY_FILE_NAME))?;
+    candidate.exists().then_some(candidate)
 }
 
 /// 用户词库 JSON 路径：`%APPDATA%\ai-zhu-ye-ime\user_words.json`。
@@ -820,6 +858,26 @@ mod tests {
         let wide = to_wide("你好");
         assert_eq!(wide, vec![0x4F60, 0x597D, 0]);
         assert_eq!(to_wide(""), vec![0]);
+    }
+
+    #[test]
+    fn 词典路径优先安装目录并回退默认文件名() {
+        let installed = Some(PathBuf::from(
+            "C:\\Program Files\\ai-zhu-ye-ime\\tsf\\dictionary.zyct",
+        ));
+        let appdata = Some(PathBuf::from("%APPDATA%\\ai-zhu-ye-ime\\dictionary.zyct"));
+        assert_eq!(
+            resolve_dictionary_path(installed.clone(), None).as_path(),
+            installed.as_deref().unwrap()
+        );
+        assert_eq!(
+            resolve_dictionary_path(None, appdata.clone()).as_path(),
+            appdata.as_deref().unwrap()
+        );
+        assert_eq!(
+            resolve_dictionary_path(None, None),
+            PathBuf::from(DICTIONARY_FILE_NAME)
+        );
     }
 
     #[test]

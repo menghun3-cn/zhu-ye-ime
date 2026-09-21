@@ -9,6 +9,7 @@
 | `verify-agent-notes.ps1` | 校验 Agent Notes 目录结构、文件格式、归档三件套与 `manifest.json` 封存；`-ArchiveWrite` 追加封存新归档笔记 |
 | `verify-translation-pairs.ps1` | 校验 `.md` / `.zh.md` 双语配对的 `.i18n.yaml` 一致性记录；确认一致后可用 `-Write` 重写记录 |
 | `bench.ps1` | 构建/运行 `zhu-ye-cli bench` 并校验 `指标:` 行阈值；`-Release` 做正式验收，`-MaxUsPerOp` 覆盖阈值 |
+| `package-portable.ps1` | 生成离线测试包：release DLL + v2 词典 + 安装/卸载脚本；`-DictionaryPath` 可指定词典，默认优先真实词典 |
 
 ## 常用命令
 
@@ -20,6 +21,14 @@ cargo run -p zhu-ye-dict -- build
 cargo run -p zhu-ye-dict -- inspect data/artifacts/seed.zyct
 cargo run -p zhu-ye-dict -- verify data/artifacts/seed.zyct
 
+```
+
+```powershell
+# 生成便携测试包（优先打包 data/artifacts/real.zyct，未生成时用 seed）
+.\scripts\package-portable.ps1
+
+# 指定打包词典
+.\scripts\package-portable.ps1 -DictionaryPath .\data\artifacts\real.zyct
 ```
 
 ```powershell

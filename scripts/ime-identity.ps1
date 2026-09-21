@@ -20,10 +20,15 @@ $script:TsfIdentity = [ordered]@{
     KeyboardCategoryGuid   = '{34745C63-B2F0-4784-8B67-5E12C8701A31}'
     LanguageIdHex          = '0x00000804'
     DllName                = 'zhu-ye-ime.dll'
+    DictionaryFileName     = 'dictionary.zyct'
 }
 
 function Get-TsfInstallDir {
     return (Join-Path ${env:ProgramFiles} 'ai-zhu-ye-ime\tsf')
+}
+
+function Get-TsfDictionaryPath {
+    return (Join-Path (Get-TsfInstallDir) $script:TsfIdentity['DictionaryFileName'])
 }
 
 function Get-TsfTipRegistryPath {

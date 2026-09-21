@@ -19,6 +19,7 @@
 - 本地双语翻译层与译文切换、英文反查（T-014）
 - `zhu-ye-cli` 自检、候选演示、词典检查与性能基准（T-014、T-015）
 - `zhu-ye-cli rank` 真实词典候选排序验证（T-008），候选生成统一下沉 zhu-ye-core
+- 安装与便携包随带 v2 词典，TSF 运行时从 DLL 同目录加载（T-022）
 - 性能基准与阈值验收脚本 `scripts/bench.ps1`（T-015）
 - 便携测试包脚本 `scripts/package-portable.ps1`（T-010）
 - Agent Notes 双语校验与归档脚本（T-018、T-020）

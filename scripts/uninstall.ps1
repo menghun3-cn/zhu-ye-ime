@@ -41,6 +41,7 @@ if (-not $InstallDir) {
 }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $targetDll = Join-Path $InstallDir $TsfIdentity['DllName']
+$targetDictionary = Join-Path $InstallDir $TsfIdentity['DictionaryFileName']
 
 Remove-TsfRegistration
 $dummyPath = Join-Path (Get-TsfInstallDir) $TsfIdentity['DllName']
@@ -53,6 +54,16 @@ if (Test-Path -LiteralPath $targetDll -PathType Leaf) {
         Remove-Item -LiteralPath $targetDll -Force
     } catch {
         throw "DLL 正被进程占用，请关闭输入法相关应用后重试: $targetDll"
+    }
+}
+
+foreach ($dictionaryFile in @($targetDictionary, (Join-Path $InstallDir 'seed.zyct'))) {
+    if (Test-Path -LiteralPath $dictionaryFile -PathType Leaf) {
+        try {
+            Remove-Item -LiteralPath $dictionaryFile -Force
+        } catch {
+            throw "词典文件正被占用，请关闭输入法相关应用后重试: $dictionaryFile"
+        }
     }
 }
 

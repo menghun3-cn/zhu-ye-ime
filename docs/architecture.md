@@ -150,6 +150,7 @@ ITfKeyEventSink 收到按键 -> KeyAction 分类
 - 中文到译文索引按中文词排序，英文反查索引按归一化英文键排序；`DictionaryFile` 实现 `Translator`，`zh_to_en` 与 `en_to_zh` 均走二分查询
 - 构建产物确定：相同输入与版本生成相同字节序列；`zhu-ye-dict` 提供 `build`、`import`、`inspect`、`verify` 四个命令，译文与反查会同步校验
 - `data/artifacts/seed.zyct` 由自建演示种子构建（20 词条 + 10 bigram + 19 译文），用于 CI 与离线演示；真实词库由 `zhu-ye-dict import` 生成 `data/artifacts/real.zyct`，数据声明见 `docs/数据清单.md` 与 `docs/licenses.md`
+- 安装/便携包把选中的 v2 词典复制为安装目录内 `dictionary.zyct`；TSF 运行时解析顺序：`ZHU_YE_DICT_PATH` > DLL 同目录 > `%APPDATA%\ai-zhu-ye-ime\dictionary.zyct` > 工作目录回退
 ## 6. 拼音切分设计
 
 - 音节表：`STANDARD_SYLLABLES` 收录 410 个标准无调全拼音节（T-007）；T-006 真实数据导入已用 CC-CEDICT 12.5 万行拼音做完整性校验（318,015 个音节，其中 894 个非标准音节被清洗丢弃）
