@@ -3,6 +3,8 @@
 //! 第一版只提供离线实现，保证零网络；后续的远程 AI 服务必须实现
 //! 同一接口，并且调用方始终以后台任务方式使用，避免阻塞输入热路径。
 
+use crate::translate::TranslationDirection;
+
 /// AI 建议来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiSource {
@@ -49,8 +51,8 @@ pub trait AiService: Send + Sync {
     /// 根据输入上下文生成建议。
     fn suggest(&self, ctx: &InputContext) -> Vec<AiSuggestion>;
 
-    /// 翻译文本，方向由实现约定或扩展参数提供。
-    fn translate(&self, _text: &str) -> Option<String> {
+    /// 按方向翻译文本；未接入远程/本地模型时返回 None。
+    fn translate(&self, _text: &str, _direction: TranslationDirection) -> Option<String> {
         None
     }
 
@@ -69,11 +71,20 @@ impl AiService for OfflineAiService {
     fn suggest(&self, _ctx: &InputContext) -> Vec<AiSuggestion> {
         Vec::new()
     }
+
+    fn translate(&self, _text: &str, _direction: TranslationDirection) -> Option<String> {
+        None
+    }
+
+    fn polish(&self, _text: &str) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{AiService, AiSuggestion, OfflineAiService};
+    use crate::translate::TranslationDirection;
 
     #[test]
     fn 离线服务返回空且可判别类型() {
@@ -86,5 +97,14 @@ mod tests {
         assert!(suggestions.is_empty());
         let _typed: Box<dyn AiService> = Box::new(service);
         let _: Vec<AiSuggestion> = suggestions;
+        assert_eq!(
+            service.translate("你好", TranslationDirection::ZhToEn),
+            None
+        );
+        assert_eq!(
+            service.translate("hello", TranslationDirection::EnToZh),
+            None
+        );
+        assert_eq!(service.polish("今天天气很好"), None);
     }
 }

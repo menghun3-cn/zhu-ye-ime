@@ -26,7 +26,7 @@ pub use candidate::{
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 pub use error::{Error, Result};
 pub use pinyin::{segment_all, valid_prefix, FullPinyinScheme, PinyinScheme, SyllableTable};
-pub use translate::{InMemoryTranslator, Translator};
+pub use translate::{InMemoryTranslator, TranslationDirection, Translator};
 pub use user_dict::UserDictionary;
 pub use user_store::{unix_now, UserDictStore};
 
