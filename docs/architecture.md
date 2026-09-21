@@ -148,11 +148,11 @@ ITfKeyEventSink 收到按键 -> KeyAction 分类
 - `DictionaryFile` 对文件只读 mmap，不整体加载进堆内存；加载时校验魔数、版本、长度、SHA-256、UTF-8、偏移分区与排序
 - 拼音索引按拼音排序，支持前缀查询与多音节按索引列表取词；bigram 按索引引用，直接接入 `BigramModel`
 - 中文到译文索引按中文词排序，英文反查索引按归一化英文键排序；`DictionaryFile` 实现 `Translator`，`zh_to_en` 与 `en_to_zh` 均走二分查询
-- 构建产物确定：相同输入与版本生成相同字节序列；`zhu-ye-dict` 提供 `build`、`inspect`、`verify` 三个命令，译文与反查会同步校验
-- 当前 `data/artifacts/seed.zyct` 由自建演示种子构建（20 词条 + 10 bigram + 19 译文），真实数据源引入前经 `licenses.md` 登记
+- 构建产物确定：相同输入与版本生成相同字节序列；`zhu-ye-dict` 提供 `build`、`import`、`inspect`、`verify` 四个命令，译文与反查会同步校验
+- `data/artifacts/seed.zyct` 由自建演示种子构建（20 词条 + 10 bigram + 19 译文），用于 CI 与离线演示；真实词库由 `zhu-ye-dict import` 生成 `data/artifacts/real.zyct`，数据声明见 `docs/数据清单.md` 与 `docs/licenses.md`
 ## 6. 拼音切分设计
 
-- 音节表：`STANDARD_SYLLABLES` 收录 410 个标准无调全拼音节（T-007）；T-006 数据管线改为公开权威数据生成并校验唯一性
+- 音节表：`STANDARD_SYLLABLES` 收录 410 个标准无调全拼音节（T-007）；T-006 真实数据导入已用 CC-CEDICT 12.5 万行拼音做完整性校验（318,015 个音节，其中 894 个非标准音节被清洗丢弃）
 - 匹配：排序数组二分前缀查询 + 自底向上动态规划，输出全部可行切分；顺序确定、非 ASCII 输入返回空
 - 输入方案：`PinyinScheme` 接口预留双拼接入，当前 `FullPinyinScheme` 只做小写归一化
 - 切分算法决策见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-full-pinyin-segmentation-core.md)（T-007）
@@ -205,6 +205,9 @@ raw 数据（CC-CEDICT/ECDICT 等）
    -> 词典包（版本化）
 ```
 
+第一版真实管线（M2/T-006）已接通 CC-CEDICT 与 FrequencyWords 中文词频：
+`zhu-ye-dict import` 读取官方空格分隔的 `简体词 [拼音] /译文/` 行，做纯 CJK 词形、标准音节、字数与同词同拼音去重清洗，再把词频映射写入词条后编译为 v2 词典。当前产物不含 bigram，T-008 的真实 bigram 语料仍待引入。
+
 原始大文件不进入 git；数据处理脚本、版本、来源与许可证全部入库。
 
 ## 10. 目录规范
@@ -221,7 +224,8 @@ raw 数据（CC-CEDICT/ECDICT 等）
 │   ├── architecture.md
 │   ├── todos-list.md
 │   ├── todos-done.md
-│   └── licenses.md
+│   ├── licenses.md
+│   └── 数据清单.md
 ├── crates/
 │   ├── zhu-ye-core/
 │   ├── zhu-ye-ime/
