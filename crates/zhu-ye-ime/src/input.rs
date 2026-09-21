@@ -42,7 +42,7 @@ pub enum CandidateLayer {
 
 /// M1 内置演示词表，供 T-011 上屏闭环使用。
 ///
-/// 数据与 T-006 词典管线共用 core 的种子词表；当磁盘上的 v1 词典文件
+/// 数据与 T-006 词典管线共用 core 的种子词表；当磁盘上的 v2 词典文件
 /// 缺失或损坏时，用这份内存词表保持输入法可运行。
 #[must_use]
 pub fn m1_seed_dictionary() -> Arc<dyn Dictionary> {
@@ -140,7 +140,7 @@ impl InputEngine {
         Self::new(m1_seed_dictionary())
     }
 
-    /// 从 v1 词典文件创建引擎；词典与 bigram 共用同一份 mmap 数据。
+    /// 从 v2 词典文件创建引擎；词典、bigram 与翻译共用同一份 mmap 数据。
     pub fn with_dictionary_file(path: &Path) -> Result<Self> {
         let file = DictionaryFile::open(path)?;
         let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
@@ -148,7 +148,7 @@ impl InputEngine {
         Ok(Self::with_bigram(dictionary, bigram))
     }
 
-    /// 从 v1 词典文件创建引擎，并接入用户词持久化。
+    /// 从 v2 词典文件创建引擎，并接入用户词持久化。
     pub fn with_dictionary_file_and_user_store(path: &Path, store: UserDictStore) -> Result<Self> {
         let file = DictionaryFile::open(path)?;
         let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
@@ -652,7 +652,7 @@ mod tests {
     use zhu_ye_core::bigram::InMemoryBigramModel;
     use zhu_ye_core::pinyin::SyllableTable;
     use zhu_ye_core::UserDictStore;
-    use zhu_ye_core::{build_v1, seed_bigrams, seed_entries};
+    use zhu_ye_core::{build_v2, seed_bigrams, seed_entries};
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let now = std::time::SystemTime::now()
@@ -881,16 +881,22 @@ mod tests {
     }
 
     #[test]
-    fn v1词典文件驱动候选生成() {
+    fn v2词典文件驱动候选生成与译文层() {
         let dir = temp_dir("dict-file");
         let path = dir.join("seed.zyct");
-        let bytes = build_v1(&seed_entries(), &seed_bigrams()).unwrap();
+        let bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
         std::fs::write(&path, bytes).unwrap();
 
         let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
         type_text(&mut engine, "nihao");
         assert_eq!(engine.candidates()[0].text, "你好");
         assert_eq!(engine.candidates()[0].translation.as_deref(), Some("hello"));
+        assert!(engine.toggle_translation_layer());
+        assert_eq!(engine.visible_candidates()[0].text, "你好");
+        assert_eq!(
+            engine.visible_candidates()[0].translation.as_deref(),
+            Some("hello")
+        );
 
         drop(engine);
         std::fs::remove_dir_all(dir).unwrap();

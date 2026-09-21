@@ -1,8 +1,8 @@
-//! v1 词典 mmap 只读加载器。
+//! v2 词典 mmap 只读加载器。
 //!
-//! `DictionaryFile` 同时实现 `Dictionary` 与 `BigramModel`：加载时完整
-//! 校验头部、内容 SHA-256、分区边界、文本 UTF-8 与记录排序；查询阶段
-//! 只按偏移读取命中记录，不再构造额外索引。
+//! `DictionaryFile` 同时实现 `Dictionary`、`BigramModel` 与 `Translator`：
+//! 加载时完整校验头部、内容 SHA-256、分区边界、文本 UTF-8 与记录排序；
+//! 查询阶段只按偏移读取命中记录，不再构造额外索引。
 
 use std::fmt;
 use std::fs::File;
@@ -14,8 +14,10 @@ use memmap2::{Mmap, MmapOptions};
 use crate::bigram::BigramModel;
 use crate::dict::{Dictionary, DictionaryEntry};
 use crate::dict_format::{
-    content_sha256, BIGRAM_RECORD_SIZE, ENTRY_RECORD_SIZE, HEADER_SIZE, PINYIN_INDEX_RECORD_SIZE,
+    content_sha256, normalize_translation_key, BIGRAM_RECORD_SIZE, ENTRY_RECORD_SIZE, HEADER_SIZE,
+    PINYIN_INDEX_RECORD_SIZE, REVERSE_TRANSLATION_RECORD_SIZE, WORD_TRANSLATION_RECORD_SIZE,
 };
+use crate::translate::{TranslationDirection, Translator};
 use crate::{Error, Result};
 
 /// mmap 词典文件；加载方只需持有文件与头部，字符串按偏移即时读取。
@@ -32,6 +34,14 @@ impl fmt::Debug for DictionaryFile {
             .field("pinyin_index_count", &self.header.pinyin_index_count)
             .field("entry_count", &self.header.entry_count)
             .field("bigram_count", &self.header.bigram_count)
+            .field(
+                "word_translation_count",
+                &self.header.word_translation_count,
+            )
+            .field(
+                "reverse_translation_count",
+                &self.header.reverse_translation_count,
+            )
             .finish()
     }
 }
@@ -96,6 +106,20 @@ impl DictionaryFile {
         &self.map[start..end]
     }
 
+    fn word_translation_records(&self) -> &[u8] {
+        let start = self.header.word_translation_offset as usize;
+        let end =
+            start + WORD_TRANSLATION_RECORD_SIZE * self.header.word_translation_count as usize;
+        &self.map[start..end]
+    }
+
+    fn reverse_translation_records(&self) -> &[u8] {
+        let start = self.header.reverse_translation_offset as usize;
+        let end = start
+            + REVERSE_TRANSLATION_RECORD_SIZE * self.header.reverse_translation_count as usize;
+        &self.map[start..end]
+    }
+
     /// 校验分区边界与全部记录；只允许合法文件进入查询阶段。
     fn validate_layout(&self) -> Result<()> {
         let file_len = u64::try_from(self.map.len())
@@ -120,16 +144,30 @@ impl DictionaryFile {
         let bigram_bytes = u64::from(self.header.bigram_count)
             .checked_mul(BIGRAM_RECORD_SIZE as u64)
             .ok_or_else(|| Error::Dictionary("bigram 区大小溢出".to_owned()))?;
-        let expected_pool = expected_bigram
+        let expected_word_translation = expected_bigram
             .checked_add(bigram_bytes)
+            .ok_or_else(|| Error::Dictionary("译文索引区偏移溢出".to_owned()))?;
+        let word_translation_bytes = u64::from(self.header.word_translation_count)
+            .checked_mul(WORD_TRANSLATION_RECORD_SIZE as u64)
+            .ok_or_else(|| Error::Dictionary("译文索引区大小溢出".to_owned()))?;
+        let expected_reverse_translation = expected_word_translation
+            .checked_add(word_translation_bytes)
+            .ok_or_else(|| Error::Dictionary("反查索引区偏移溢出".to_owned()))?;
+        let reverse_translation_bytes = u64::from(self.header.reverse_translation_count)
+            .checked_mul(REVERSE_TRANSLATION_RECORD_SIZE as u64)
+            .ok_or_else(|| Error::Dictionary("反查索引区大小溢出".to_owned()))?;
+        let expected_pool = expected_reverse_translation
+            .checked_add(reverse_translation_bytes)
             .ok_or_else(|| Error::Dictionary("文本池偏移溢出".to_owned()))?;
 
         if self.header.pinyin_index_offset != expected_index
             || self.header.entry_table_offset != expected_entry
             || self.header.bigram_offset != expected_bigram
+            || self.header.word_translation_offset != expected_word_translation
+            || self.header.reverse_translation_offset != expected_reverse_translation
             || self.header.text_pool_offset != expected_pool
         {
-            return Err(Error::Dictionary("分区偏移与 v1 固定布局不符".to_owned()));
+            return Err(Error::Dictionary("分区偏移与 v2 固定布局不符".to_owned()));
         }
         if expected_pool >= file_len {
             return Err(Error::Dictionary("文本池为空或越界".to_owned()));
@@ -137,6 +175,7 @@ impl DictionaryFile {
 
         self.validate_index_and_entries()?;
         self.validate_bigrams()?;
+        self.validate_translations()?;
         Ok(())
     }
 
@@ -233,6 +272,59 @@ impl DictionaryFile {
         Ok(())
     }
 
+    fn validate_translations(&self) -> Result<()> {
+        let mut previous_word: Option<&str> = None;
+        for index in 0..self.header.word_translation_count as usize {
+            let record = WordTranslationRecord::new(
+                &self.word_translation_records()[index * WORD_TRANSLATION_RECORD_SIZE
+                    ..(index + 1) * WORD_TRANSLATION_RECORD_SIZE],
+            );
+            if record.word_offset() == 0
+                || record.word_len() == 0
+                || record.translation_offset() == 0
+                || record.translation_len() == 0
+            {
+                return Err(Error::Dictionary(format!("译文索引 {index} 文本字段非法")));
+            }
+            let word = self.text_at(record.word_offset(), record.word_len())?;
+            let _ = self.text_at(record.translation_offset(), record.translation_len())?;
+            if let Some(previous) = previous_word {
+                if previous >= word {
+                    return Err(Error::Dictionary("译文索引未按中文词严格递增".to_owned()));
+                }
+            }
+            previous_word = Some(word);
+        }
+
+        let mut previous_key: Option<(&str, &str)> = None;
+        for index in 0..self.header.reverse_translation_count as usize {
+            let record = ReverseTranslationRecord::new(
+                &self.reverse_translation_records()[index * REVERSE_TRANSLATION_RECORD_SIZE
+                    ..(index + 1) * REVERSE_TRANSLATION_RECORD_SIZE],
+            );
+            if record.key_offset() == 0
+                || record.key_len() == 0
+                || record.word_offset() == 0
+                || record.word_len() == 0
+            {
+                return Err(Error::Dictionary(format!("反查索引 {index} 文本字段非法")));
+            }
+            let key = (
+                self.text_at(record.key_offset(), record.key_len())?,
+                self.text_at(record.word_offset(), record.word_len())?,
+            );
+            if let Some(previous) = previous_key {
+                if previous >= key {
+                    return Err(Error::Dictionary(
+                        "反查索引未按英文/中文词严格递增".to_owned(),
+                    ));
+                }
+            }
+            previous_key = Some(key);
+        }
+        Ok(())
+    }
+
     /// 读取文本池中的字符串；校验阶段对 UTF-8 与边界严格检查。
     fn text_at(&self, offset: u32, len: u16) -> Result<&str> {
         if offset == 0 {
@@ -300,6 +392,69 @@ impl DictionaryFile {
         }
         None
     }
+
+    fn find_zh_to_en(&self, word: &str) -> Option<String> {
+        if self.header.word_translation_count == 0 {
+            return None;
+        }
+        let mut low = 0usize;
+        let mut high = self.header.word_translation_count as usize;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let record = WordTranslationRecord::new(
+                &self.word_translation_records()
+                    [mid * WORD_TRANSLATION_RECORD_SIZE..(mid + 1) * WORD_TRANSLATION_RECORD_SIZE],
+            );
+            let key = self.text_unchecked(record.word_offset(), record.word_len());
+            match key.as_bytes().cmp(word.as_bytes()) {
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => high = mid,
+                std::cmp::Ordering::Equal => {
+                    return Some(
+                        self.text_unchecked(record.translation_offset(), record.translation_len())
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        None
+    }
+
+    fn find_en_to_zh(&self, text: &str) -> Option<String> {
+        if self.header.reverse_translation_count == 0 {
+            return None;
+        }
+        let key = normalize_translation_key(text);
+        if key.is_empty() {
+            return None;
+        }
+        let mut low = 0usize;
+        let mut high = self.header.reverse_translation_count as usize;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let record = ReverseTranslationRecord::new(
+                &self.reverse_translation_records()[mid * REVERSE_TRANSLATION_RECORD_SIZE
+                    ..(mid + 1) * REVERSE_TRANSLATION_RECORD_SIZE],
+            );
+            let record_key = self.text_unchecked(record.key_offset(), record.key_len());
+            if record_key.as_bytes() < key.as_bytes() {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let record = ReverseTranslationRecord::new(
+            &self.reverse_translation_records()[low * REVERSE_TRANSLATION_RECORD_SIZE
+                ..(low + 1) * REVERSE_TRANSLATION_RECORD_SIZE],
+        );
+        if self.text_unchecked(record.key_offset(), record.key_len()) != key {
+            return None;
+        }
+        Some(
+            self.text_unchecked(record.word_offset(), record.word_len())
+                .to_owned(),
+        )
+    }
 }
 
 impl Dictionary for DictionaryFile {
@@ -343,6 +498,15 @@ impl Dictionary for DictionaryFile {
 impl BigramModel for DictionaryFile {
     fn frequency(&self, previous: &str, word: &str) -> u64 {
         self.find_bigram(previous, word).unwrap_or(0)
+    }
+}
+
+impl Translator for DictionaryFile {
+    fn translate(&self, text: &str, direction: TranslationDirection) -> Option<String> {
+        match direction {
+            TranslationDirection::ZhToEn => self.find_zh_to_en(text),
+            TranslationDirection::EnToZh => self.find_en_to_zh(text),
+        }
     }
 }
 
@@ -443,13 +607,68 @@ impl<'a> BigramRecord<'a> {
     }
 }
 
+/// 中文词到译文记录视图：24 字节，12 字节保留对齐。
+struct WordTranslationRecord<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> WordTranslationRecord<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+
+    fn word_offset(&self) -> u32 {
+        u32::from_le_bytes(self.bytes[0..4].try_into().expect("固定切片"))
+    }
+
+    fn word_len(&self) -> u16 {
+        u16::from_le_bytes(self.bytes[4..6].try_into().expect("固定切片"))
+    }
+
+    fn translation_offset(&self) -> u32 {
+        u32::from_le_bytes(self.bytes[6..10].try_into().expect("固定切片"))
+    }
+
+    fn translation_len(&self) -> u16 {
+        u16::from_le_bytes(self.bytes[10..12].try_into().expect("固定切片"))
+    }
+}
+
+/// 归一化英文到中文词记录视图：24 字节，12 字节保留对齐。
+struct ReverseTranslationRecord<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> ReverseTranslationRecord<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+
+    fn key_offset(&self) -> u32 {
+        u32::from_le_bytes(self.bytes[0..4].try_into().expect("固定切片"))
+    }
+
+    fn key_len(&self) -> u16 {
+        u16::from_le_bytes(self.bytes[4..6].try_into().expect("固定切片"))
+    }
+
+    fn word_offset(&self) -> u32 {
+        u32::from_le_bytes(self.bytes[6..10].try_into().expect("固定切片"))
+    }
+
+    fn word_len(&self) -> u16 {
+        u16::from_le_bytes(self.bytes[10..12].try_into().expect("固定切片"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::DictionaryFile;
     use crate::bigram::BigramModel;
     use crate::demo::{seed_bigrams, seed_entries};
     use crate::dict::Dictionary;
-    use crate::dict_builder::build_v1;
+    use crate::dict_builder::build_v2;
+    use crate::translate::{TranslationDirection, Translator};
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let now = std::time::SystemTime::now()
@@ -463,10 +682,10 @@ mod tests {
     }
 
     #[test]
-    fn 构建文件可加载并按拼音与bigram查询() {
+    fn 构建文件可加载并按拼音bigram翻译查询() {
         let dir = temp_dir("roundtrip");
         let path = dir.join("seed.zyct");
-        let bytes = build_v1(&seed_entries(), &seed_bigrams()).unwrap();
+        let bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
         std::fs::write(&path, &bytes).unwrap();
 
         let file = DictionaryFile::open(&path).unwrap();
@@ -480,6 +699,35 @@ mod tests {
         assert_eq!(file.frequency("你好", "中国"), 0);
         assert_eq!(file.frequency("我们", "的"), 0);
 
+        assert_eq!(file.zh_to_en("你好").as_deref(), Some("hello"));
+        assert_eq!(file.zh_to_en("中国").as_deref(), Some("China"));
+        assert_eq!(file.zh_to_en("尼好"), None);
+        assert_eq!(file.en_to_zh("hello").as_deref(), Some("你好"));
+        assert_eq!(file.en_to_zh("HELLO").as_deref(), Some("你好"));
+        assert_eq!(file.en_to_zh("good morning").as_deref(), Some("早上好"));
+        assert_eq!(file.en_to_zh("not-in-dict"), None);
+        assert_eq!(
+            file.translate("你好", TranslationDirection::ZhToEn)
+                .as_deref(),
+            Some("hello")
+        );
+
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 无译文词典可构建加载且翻译查询不崩溃() {
+        let dir = temp_dir("no-translation");
+        let path = dir.join("no-translation.zyct");
+        let entries = vec![crate::dict::DictionaryEntry::new("测试", "ceshi", 10)];
+        let bytes = build_v2(&entries, &[]).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let file = DictionaryFile::open(&path).unwrap();
+        assert_eq!(file.lookup("ceshi").len(), 1);
+        assert_eq!(file.zh_to_en("测试"), None);
+        assert_eq!(file.en_to_zh("test"), None);
         drop(file);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -488,9 +736,20 @@ mod tests {
     fn 内容篡改会被拒绝() {
         let dir = temp_dir("tamper");
         let path = dir.join("tampered.zyct");
-        let mut bytes = build_v1(&seed_entries(), &seed_bigrams()).unwrap();
+        let mut bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(DictionaryFile::open(&path).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 头部翻译计数与内容不符会被拒绝() {
+        let dir = temp_dir("bad-count");
+        let path = dir.join("bad-count.zyct");
+        let mut bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
+        bytes[20..24].copy_from_slice(&0u32.to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
         assert!(DictionaryFile::open(&path).is_err());
         std::fs::remove_dir_all(dir).unwrap();
@@ -500,7 +759,7 @@ mod tests {
     fn 同频词条保持稳定顺序() {
         let dir = temp_dir("stable-order");
         let path = dir.join("stable.zyct");
-        let bytes = build_v1(&seed_entries(), &seed_bigrams()).unwrap();
+        let bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
         std::fs::write(&path, &bytes).unwrap();
         let file = DictionaryFile::open(&path).unwrap();
         let first = file.lookup("de");

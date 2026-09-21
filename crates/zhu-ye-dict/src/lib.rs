@@ -1,11 +1,11 @@
 //! 词典数据管线。
 //!
-//! 本 crate 负责把受控种子/清洗后的词表编译为 v1 二进制词典包，并提供
+//! 本 crate 负责把受控种子/清洗后的词表编译为 v2 二进制词典包，并提供
 //! `build` / `inspect` / `verify` 三个 CLI 命令。字节布局、哈希与加载器
 //! 全部由 `zhu-ye-core` 统一承载，避免构建方与加载方出现两套格式。
 
 pub use zhu_ye_core::demo::{seed_bigrams, seed_entries};
-pub use zhu_ye_core::dict_builder::build_v1;
+pub use zhu_ye_core::dict_builder::build_v2;
 pub use zhu_ye_core::dict_format::DICT_VERSION;
 
 /// 词典二进制格式版本。
@@ -17,7 +17,7 @@ pub const fn dict_schema_version() -> u32 {
 /// 返回当前数据管线状态，供自检使用。
 #[must_use]
 pub fn pipeline_status() -> &'static str {
-    "v1 格式构建/检查可用：build、inspect、verify"
+    "v2 格式构建/检查可用：build、inspect、verify"
 }
 
 #[cfg(test)]
@@ -28,12 +28,13 @@ mod tests {
     use zhu_ye_core::dict::Dictionary;
     use zhu_ye_core::dict_format::DictHeader;
     use zhu_ye_core::dict_loader::DictionaryFile;
+    use zhu_ye_core::translate::Translator;
 
-    use super::{build_v1, dict_schema_version, pipeline_status, seed_bigrams, seed_entries};
+    use super::{build_v2, dict_schema_version, pipeline_status, seed_bigrams, seed_entries};
 
     #[test]
     fn 版本与状态可用于自检() {
-        assert_eq!(dict_schema_version(), 1);
+        assert_eq!(dict_schema_version(), 2);
         assert!(pipeline_status().contains("build"));
     }
 
@@ -55,9 +56,11 @@ mod tests {
     fn 构建加载查询闭环() {
         let entries = seed_entries();
         let bigrams = seed_bigrams();
-        let bytes = build_v1(&entries, &bigrams).unwrap();
+        let bytes = build_v2(&entries, &bigrams).unwrap();
         let header = DictHeader::from_bytes(&bytes).unwrap();
         assert_eq!(header.entry_count, 20);
+        assert_eq!(header.word_translation_count, 19);
+        assert_eq!(header.reverse_translation_count, 19);
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -74,6 +77,8 @@ mod tests {
         assert_eq!(nihao.len(), 2);
         assert_eq!(nihao[0].word, "你好");
         assert_eq!(file.frequency("你好", "世界"), 120);
+        assert_eq!(file.zh_to_en("你好").as_deref(), Some("hello"));
+        assert_eq!(file.en_to_zh("china").as_deref(), Some("中国"));
 
         drop(file);
         std::fs::remove_dir_all(&dir).unwrap();

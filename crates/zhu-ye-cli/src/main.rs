@@ -35,7 +35,8 @@ fn print_usage() {
     println!("  user [list]        查看用户词库");
     println!("  user delete W P    删除用户词（词与拼音）");
     println!("  user reset         清空用户词库");
-    println!("  dict <文件> [拼]   加载 v1 词典并查询词条");
+    println!("  dict <文件> [拼]   加载 v2 词典并查询词条");
+    println!("  dict <文件> -r 英文  加载 v2 词典并通过译文反查中文");
 }
 
 fn demo(pinyin: &str) {
@@ -143,7 +144,7 @@ fn bench() {
     println!("累积命中切分: {hits}");
 }
 
-/// 加载 v1 词典文件；文件缺失或损坏时回退内置演示词典。
+/// 加载 v2 词典文件；文件缺失或损坏时回退内置演示词典。
 fn load_dictionary() -> Arc<dyn Dictionary> {
     let path = dict_file_path();
     match DictionaryFile::open(&path) {
@@ -159,10 +160,11 @@ fn dictionary_source_label() -> String {
         Ok(file) => {
             let header = file.header();
             format!(
-                "{} (mmap v1，{} 词条，{} bigram)",
+                "{} (mmap v2，{} 词条，{} bigram，{} 译文)",
                 path.display(),
                 header.entry_count,
-                header.bigram_count
+                header.bigram_count,
+                header.word_translation_count
             )
         }
         Err(_) => format!("内置演示词典（未找到 {}）", path.display()),
@@ -176,24 +178,38 @@ fn dict_file_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("data/artifacts/seed.zyct"))
 }
 
-/// `dict` 子命令：加载 v1 词典并查询指定拼音。
+/// `dict` 子命令：加载 v2 词典，查询拼音词条或通过 `-r` 反查英文。
 fn dict_command(args: Vec<String>) {
     let Some(path) = args.get(2) else {
         println!("用法: zhu-ye-cli dict <词典文件> [拼音]");
+        println!("      zhu-ye-cli dict <词典文件> -r 英文");
         return;
     };
-    let pinyin = args.get(3).map(String::as_str).unwrap_or("nihao");
     match DictionaryFile::open(Path::new(path)) {
         Ok(file) => {
             let header = file.header();
             println!("词典文件: {path}");
             println!(
-                "格式 v1：词条 {}，拼音索引 {}，bigram {}，文件大小 {} 字节",
+                "格式 v2：词条 {}，拼音索引 {}，bigram {}，译文 {}，反查 {}，文件大小 {} 字节",
                 header.entry_count,
                 header.pinyin_index_count,
                 header.bigram_count,
+                header.word_translation_count,
+                header.reverse_translation_count,
                 file.file_size()
             );
+            if args.get(3).map(String::as_str) == Some("-r") {
+                let Some(text) = args.get(4).map(String::as_str) else {
+                    println!("用法: zhu-ye-cli dict <词典文件> -r 英文");
+                    return;
+                };
+                match file.en_to_zh(text) {
+                    Some(word) => println!("反查 {text}: {word}"),
+                    None => println!("反查 {text}: 无结果"),
+                }
+                return;
+            }
+            let pinyin = args.get(3).map(String::as_str).unwrap_or("nihao");
             let found = file.lookup(pinyin);
             if found.is_empty() {
                 println!("拼音 {pinyin} 无词条");

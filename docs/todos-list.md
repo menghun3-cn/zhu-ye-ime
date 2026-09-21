@@ -17,15 +17,15 @@
 | T-003 | 已完成 | 产出验收标准.md | FR-001 至 FR-014 | M0-文档 | 功能与性能验收 |
 | T-004 | 已完成 | 产出架构文档 architecture.md | FR-011、FR-014 | M0-文档 | 模块与数据架构 |
 | T-005 | 已完成 | 搭建 Rust workspace 与 crate 骨架 | FR-011、FR-014 | M0-脚手架 | build/test/clippy 全部通过 |
-| T-006 | 进行中 | 词典数据管线与二进制格式 | FR-002、FR-007 | M2 | v1 二进制格式（ZYDT/96 字节头部/拼音索引/bigram/文本池/SHA-256）、自建演示种子、mmap 加载器与 build/inspect/verify CLI 已完成并验证；待引入真实数据源并做音节表校验；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-19-dictionary-binary-format-v1.md) |
-| T-007 | 进行中 | 全拼音节切分核心 | FR-001 | M2 | 标准全拼表/动态规划切分/双拼接口已实现；T-006 v1 词典已能按拼音前缀加载查询，音节表完整性校验待真实数据管线；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-full-pinyin-segmentation-core.md) |
+| T-006 | 进行中 | 词典数据管线与二进制格式 | FR-002、FR-007 | M2 | v2 二进制格式（ZYDT/128 字节头部/拼音索引/bigram/文本池/翻译与反查索引/SHA-256）、自建演示种子、mmap 加载器与 build/inspect/verify CLI 已完成并验证；待引入真实数据源并做音节表校验；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-19-dictionary-binary-format-v1.md) 与 [v2 翻译索引](../.agents/notes/implemented/architecture/2026-09-21-dictionary-v2-translation-index.md) |
+| T-007 | 进行中 | 全拼音节切分核心 | FR-001 | M2 | 标准全拼表/动态规划切分/双拼接口已实现；T-006 v2 词典已能按拼音前缀加载查询，音节表完整性校验待真实数据管线；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-full-pinyin-segmentation-core.md) |
 | T-008 | 进行中 | 候选排序静态模型（unigram+bigram） | FR-002 | M2 | RankingModel/StaticRankingModel/内存 bigram 与排序接入已完成；T-006 mmap bigram 模型已可用，待真实统计语料；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-ranking-static-model.md) |
 | T-009 | 进行中 | 用户词学习与持久化 | FR-003 | M3 | UserDictStore 版本化 JSON/原子写/损坏备份恢复、选择即记忆、删除与重置、TSF 接入真实路径已完成；待 VM 端到端复核；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-user-dict-persistence.md) |
 | T-010 | 进行中 | TSF 服务注册与卸载闭环 | FR-010、FR-013 | M1 | DLL 导出/COM 生命周期/安装卸载脚本/便携测试包已完成；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-18-tsf-registration-and-lifetime.md)；待其他机器安装验收 |
 | T-011 | 进行中 | TSF 上屏闭环 | FR-001、FR-004 | M1 | 按键/组合/上屏已实现（20 项单测、clippy、DLL 导出校验通过）；待 VM 安装后记事本验收；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-18-tsf-composition-and-key-events.md) |
 | T-012 | 进行中 | 候选窗渲染（主题/DPI/高对比度） | FR-009、FR-011 | M3 | 独立 GDI 双缓冲自绘、主题跟随系统深浅色/高对比度、DPI 适配与演示截图已验证；TSF 联动与 VM 验收待 T-013；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-window-gdi-rendering.md) |
 | T-013 | 进行中 | 键位交互（Shift/Tab/翻页/选择） | FR-004、FR-006、FR-013 | M3 | 引擎分页/译文层、Shift 中英切换、Tab/逗号/句号与数字键接入、TSF 候选窗生命周期与定位已完成（49 项 lib 单测、clippy 通过）；待 VM 记事本验收；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-20-candidate-window-tsf-integration.md) |
-| T-014 | 待办 | 双语翻译层与译文切换 | FR-005、FR-006、FR-007 | M4 | 本地词典译文物化 |
+| T-014 | 已完成 | 双语翻译层与译文切换 | FR-005、FR-006、FR-007 | M4 | 词典格式升级 v2：中文词→译文索引、归一化英文→中文反查、DictionaryFile 实现 Translator、输入引擎译文层驱动、zhu-ye-cli dict -r 反查；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-21-dictionary-v2-translation-index.md) |
 | T-015 | 待办 | 性能基准与验收脚本 | FR-011、FR-014 | M4 | bench/self-check |
 | T-016 | 待办 | README、安装文档、许可证清单 | FR-010、FR-012 | M5 | 发布就绪 |
 | T-017 | 进行中 | 周期任务：使用体验与稳定性观察 | FR-008、FR-011、FR-012 | 观察期 | 每两周一轮 |

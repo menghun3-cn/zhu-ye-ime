@@ -12,7 +12,7 @@
 ## 常用命令
 
 ```powershell
-# 构建 v1 词典数据包（默认 data/artifacts/seed.zyct）
+# 构建 v2 词典数据包（默认 data/artifacts/seed.zyct）
 cargo run -p zhu-ye-dict -- build
 
 # 检查与完整性校验

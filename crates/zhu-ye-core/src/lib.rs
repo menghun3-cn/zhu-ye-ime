@@ -30,7 +30,7 @@ pub use user_dict::UserDictionary;
 pub use user_store::{unix_now, UserDictStore};
 
 pub use demo::{seed_bigrams, seed_entries};
-pub use dict_builder::build_v1;
+pub use dict_builder::build_v2;
 pub use dict_loader::DictionaryFile;
 
 /// 返回核心库版本标识，用于自检输出。
