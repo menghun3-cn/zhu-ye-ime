@@ -62,6 +62,8 @@ The CLI self-check reports 410 syllables; `demo cha` now segments where the
 old scaffold failed. The workspace test suite grows to 38 passing tests and
 clippy passes with `-D warnings`.
 
-T-007 remains in progress until T-006 regenerates the table from authoritative
-data and the M2 acceptance check passes. The segmentation order is stable but
-not scored; candidate ranking is owned by T-008.
+The table was validated against 318,015 syllables from the CC-CEDICT real
+import: 894 non-standard syllables were cleaned and dropped. The M2 acceptance
+check passes (`cha`, `duo`, `guan` segment on the real dictionary and `xian`
+keeps both `xian` and `xi-an`), so T-007 is complete. The segmentation order
+is stable but not scored; candidate ranking is owned by T-008.
