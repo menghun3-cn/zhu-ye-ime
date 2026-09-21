@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::{
-    core_version, Candidate, CandidateSorter, Dictionary, DictionaryEntry, InMemoryDictionary,
-    OfflineAiService, SyllableTable, Translator,
+    core_version, BigramModel, Candidate, CandidateSorter, Dictionary, DictionaryEntry,
+    InMemoryBigramModel, InMemoryDictionary, InMemoryTranslator, OfflineAiService, SyllableTable,
+    Translator,
 };
 use zhu_ye_core::{UserDictStore, UserDictionary};
 
@@ -125,23 +126,121 @@ fn self_check() {
         ),
         Err(error) => println!("用户词库: {} 读取失败: {error}", store.path().display()),
     }
+    let segment_us = measure_segment(2_000, false);
+    let lookup_us = measure_lookup(1_000, false);
+    let bigram_us = measure_bigram(2_000, false);
+    let (zh_en_us, en_zh_us) = measure_translation(1_000, false);
+    println!(
+        "性能基线(快速): segment={segment_us:.2}us lookup={lookup_us:.2}us bigram={bigram_us:.2}us zh_en={zh_en_us:.2}us en_zh={en_zh_us:.2}us"
+    );
     let _ = service;
 }
 
 fn bench() {
+    if cfg!(debug_assertions) {
+        println!("性能基准（debug 数值仅供趋势参考，验收以 release 为准）");
+    } else {
+        println!("性能基准（release）");
+    }
+    let segment_us = measure_segment(50_000, true);
+    let lookup_us = measure_lookup(20_000, true);
+    let bigram_us = measure_bigram(100_000, true);
+    let (zh_en_us, en_zh_us) = measure_translation(50_000, true);
+    println!(
+        "指标: segment_us={segment_us:.3} lookup_us={lookup_us:.3} bigram_us={bigram_us:.3} zh_en_us={zh_en_us:.3} en_zh_us={en_zh_us:.3}"
+    );
+}
+
+fn us_per_op(elapsed: std::time::Duration, ops: usize) -> f64 {
+    elapsed.as_secs_f64() * 1_000_000.0 / ops as f64
+}
+
+fn measure_segment(runs: usize, print: bool) -> f64 {
     let table = SyllableTable::standard();
-    let runs = 50_000;
     let start = Instant::now();
     let mut hits = 0usize;
     for _ in 0..runs {
         hits += zhu_ye_core::segment_all(&table, "nihao").len();
     }
     let elapsed = start.elapsed();
-    println!(
-        "切分基准: {runs} 次, 总 {elapsed:?}, 平均 {:?}/次",
-        elapsed / runs
-    );
-    println!("累积命中切分: {hits}");
+    if print {
+        println!(
+            "切分基准: {runs} 次, 总 {elapsed:?}, 平均 {:?}/次, 累积切分 {hits}",
+            elapsed / runs as u32
+        );
+    }
+    us_per_op(elapsed, runs)
+}
+
+fn measure_lookup(runs: usize, print: bool) -> f64 {
+    let dictionary: Arc<dyn Dictionary> = load_dictionary();
+    let queries = ["nihao", "xian", "de", "shuru", "zaoshanghao"];
+    let start = Instant::now();
+    let mut hits = 0usize;
+    for _ in 0..runs {
+        for query in queries {
+            hits = hits.saturating_add(dictionary.lookup(query).len());
+        }
+    }
+    let ops = runs.saturating_mul(queries.len());
+    let elapsed = start.elapsed();
+    if print {
+        println!(
+            "候选查找基准: {ops} 次, 总 {elapsed:?}, 平均 {:?}/次, 累积词条 {hits}",
+            elapsed / ops as u32
+        );
+    }
+    us_per_op(elapsed, ops)
+}
+
+fn measure_bigram(runs: usize, print: bool) -> f64 {
+    let bigram: Arc<dyn BigramModel> = match DictionaryFile::open(&dict_file_path()) {
+        Ok(file) => Arc::new(file),
+        Err(_) => Arc::new(InMemoryBigramModel::new()),
+    };
+    let start = Instant::now();
+    let mut hits = 0u64;
+    for _ in 0..runs {
+        hits = hits.wrapping_add(bigram.frequency("你好", "世界"));
+    }
+    let elapsed = start.elapsed();
+    if print {
+        println!(
+            "bigram 基准: {runs} 次, 总 {elapsed:?}, 平均 {:?}/次, 命中 {hits}",
+            elapsed / runs as u32
+        );
+    }
+    us_per_op(elapsed, runs)
+}
+
+fn measure_translation(runs: usize, print: bool) -> (f64, f64) {
+    let translator: Arc<dyn Translator> = match DictionaryFile::open(&dict_file_path()) {
+        Ok(file) => Arc::new(file),
+        Err(_) => Arc::new(InMemoryTranslator::new()),
+    };
+    let start = Instant::now();
+    let mut zh_hits = 0usize;
+    for _ in 0..runs {
+        zh_hits += usize::from(translator.zh_to_en("你好").is_some());
+    }
+    let zh_elapsed = start.elapsed();
+    let start = Instant::now();
+    let mut en_hits = 0usize;
+    for _ in 0..runs {
+        en_hits += usize::from(translator.en_to_zh("hello").is_some());
+    }
+    let en_elapsed = start.elapsed();
+    if print {
+        println!(
+            "翻译正查基准: {runs} 次, 总 {zh_elapsed:?}, 平均 {:?}/次, 命中 {zh_hits}",
+            zh_elapsed / runs as u32
+        );
+        println!(
+            "翻译反查基准: {runs} 次, 总 {en_elapsed:?}, 平均 {:?}/次, 命中 {en_hits}",
+            en_elapsed / runs as u32
+        );
+    }
+    (us_per_op(zh_elapsed, runs), us_per_op(en_elapsed, runs))
 }
 
 /// 加载 v2 词典文件；文件缺失或损坏时回退内置演示词典。

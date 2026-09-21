@@ -26,7 +26,7 @@
 | T-012 | 进行中 | 候选窗渲染（主题/DPI/高对比度） | FR-009、FR-011 | M3 | 独立 GDI 双缓冲自绘、主题跟随系统深浅色/高对比度、DPI 适配与演示截图已验证；TSF 联动与 VM 验收待 T-013；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-window-gdi-rendering.md) |
 | T-013 | 进行中 | 键位交互（Shift/Tab/翻页/选择） | FR-004、FR-006、FR-013 | M3 | 引擎分页/译文层、Shift 中英切换、Tab/逗号/句号与数字键接入、TSF 候选窗生命周期与定位已完成（49 项 lib 单测、clippy 通过）；待 VM 记事本验收；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-20-candidate-window-tsf-integration.md) |
 | T-014 | 已完成 | 双语翻译层与译文切换 | FR-005、FR-006、FR-007 | M4 | 词典格式升级 v2：中文词→译文索引、归一化英文→中文反查、DictionaryFile 实现 Translator、输入引擎译文层驱动、zhu-ye-cli dict -r 反查；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-21-dictionary-v2-translation-index.md) |
-| T-015 | 待办 | 性能基准与验收脚本 | FR-011、FR-014 | M4 | bench/self-check |
+| T-015 | 已完成 | 性能基准与验收脚本 | FR-011、FR-014 | M4 | zhu-ye-cli bench 覆盖切分/候选查找/bigram/正反翻译并输出指标行；self-check 输出快速基线；scripts/bench.ps1 按阈值验收；见 [Agent Note](../.agents/notes/implemented/testing/2026-09-21-cli-benchmark-metrics-and-acceptance.md) |
 | T-016 | 待办 | README、安装文档、许可证清单 | FR-010、FR-012 | M5 | 发布就绪 |
 | T-017 | 进行中 | 周期任务：使用体验与稳定性观察 | FR-008、FR-011、FR-012 | 观察期 | 每两周一轮 |
 | T-018 | 已完成 | 适配 Agent Notes 与开发/提交/推送流程 | FR-014 | M0-流程 | 规则写入 AGENTS.md；见 [Agent Note](../../.agents/notes/implemented/process/2026-09-18-project-ai-workflow-adaptation.md) |

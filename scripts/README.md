@@ -8,6 +8,7 @@
 | --- | --- |
 | `verify-agent-notes.ps1` | 校验 Agent Notes 目录结构、文件格式、归档三件套与 `manifest.json` 封存；`-ArchiveWrite` 追加封存新归档笔记 |
 | `verify-translation-pairs.ps1` | 校验 `.md` / `.zh.md` 双语配对的 `.i18n.yaml` 一致性记录；确认一致后可用 `-Write` 重写记录 |
+| `bench.ps1` | 构建/运行 `zhu-ye-cli bench` 并校验 `指标:` 行阈值；`-Release` 做正式验收，`-MaxUsPerOp` 覆盖阈值 |
 
 ## 常用命令
 
@@ -39,6 +40,11 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 git diff --check
+```
+
+# 性能基准与阈值验收（正式验收加 -Release）
+.\scripts\bench.ps1
+.\scripts\bench.ps1 -Release -MaxUsPerOp 200
 ```
 
 原 TypeScript/pnpm 版脚本已移除；需要自动化完整文档站、翻译简报等扩展门禁时，后续以 Rust/Cargo 或 PowerShell 等价实现。

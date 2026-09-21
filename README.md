@@ -58,6 +58,13 @@ TSF 安装/卸载脚本（需要管理员 PowerShell）：
 .\scripts\package-portable.ps1
 ```
 
+性能基准与阈值验收（正式验收加 `-Release`）：
+
+```powershell
+cargo run -p zhu-ye-cli -- bench
+.\scripts\bench.ps1 -Release
+```
+
 ## 文档索引
 
 - [需求规格说明书](docs/需求规格说明书.md)
