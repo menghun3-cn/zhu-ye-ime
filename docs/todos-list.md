@@ -3,7 +3,7 @@
 ## 维护规则
 
 - 状态三态：`待办` / `进行中` / `已完成`
-- 编号规则：`T-xxx` 全局唯一，增量递增；当前已用至 `T-023`
+- 编号规则：`T-xxx` 全局唯一，增量递增；当前已用至 `T-024`
 - FR 关联：任务必须关联需求规格说明书中的需求编号
 - 周期任务：到期后登记观察结论并追加到 todos-done，不迁移、不删除任务本体
 - 提交前校验：任务状态与实现进度一致，未完成不得标记已完成
@@ -35,6 +35,7 @@
 | T-021 | 已完成 | 清洗多音节切分噪声候选 | FR-001、FR-002 | M2 | 整词拼音存在直接词典条目时不再追加音节切分组合，无整词时保留回退；真实词典复验：`rank jiao` 叫 92,723 居首、`rank xian` 洗按消失、`rank fazhan` 发展 3,680 居首且无发站、`rank geio` 给哦 保留；新增 2 项 core 单测；见 [Agent Note](../.agents/notes/implemented/feature/2026-09-19-candidate-ranking-static-model.md) |
 | T-022 | 已完成 | 安装与便携包随带词典数据 | FR-007、FR-010 | M5 | install/package 把 v2 词典复制为 DLL 同目录 `dictionary.zyct`；TSF 运行时支持 `ZHU_YE_DICT_PATH`、DLL 同目录与用户目录解析顺序；门禁与便携包产物已验证；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-21-installed-dictionary-deployment.md) |
 | T-023 | 已完成 | AI 服务接口对齐方案设计 | FR-008 | M5 | `AiService.translate` 增加 `TranslationDirection` 参数；`OfflineAiService` 显式实现空建议/双向空翻译/空润色；`TranslationDirection` 从 core 公共导出；fmt/clippy/workspace 测试与 Agent Notes 双语文档门禁全部通过；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-21-ai-service-contract-and-offline-default.md) |
+| T-024 | 已完成 | 主机侧端到端回归（核心输入闭环） | FR-001 至 FR-007、FR-014 | M5 | 新增 `zhu-ye-ime` 的 `host-e2e` 检查器与 `scripts/e2e.ps1` 验收入口；种子词典 17 项检查与真实词典 smoke 4 项已通过，fmt/clippy/workspace tests 与脚本门禁全部通过；覆盖切分/排序/数字选择/翻页交互/模式切换/用户词/译文层/正反查；见 [Agent Note](../.agents/notes/implemented/testing/2026-09-21-host-e2e-regression.md) |
 
 ## 周期任务登记
 

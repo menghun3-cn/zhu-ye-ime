@@ -13,6 +13,10 @@ crate-type = ["cdylib"]
 name = "candidate-demo"
 path = "src/bin/candidate_demo.rs"
 
+[[bin]]
+name = "host-e2e"
+path = "src/bin/host_e2e.rs"
+
 [dependencies]
 zhu-ye-core = { path = "../zhu-ye-core" }
 windows = { version = "0.61", features = [

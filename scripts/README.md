@@ -10,6 +10,7 @@
 | `verify-translation-pairs.ps1` | 校验 `.md` / `.zh.md` 双语配对的 `.i18n.yaml` 一致性记录；确认一致后可用 `-Write` 重写记录 |
 | `bench.ps1` | 构建/运行 `zhu-ye-cli bench` 并校验 `指标:` 行阈值；`-Release` 做正式验收，`-MaxUsPerOp` 覆盖阈值 |
 | `package-portable.ps1` | 生成离线测试包：release DLL + v2 词典 + 安装/卸载脚本；`-DictionaryPath` 可指定词典，默认优先真实词典 |
+| `e2e.ps1` | 构建/运行 `host-e2e`，对种子词典执行核心输入闭环回归；存在真实词典时追加 smoke；`-Release` 正式验收，`-SkipBuild` 跳过构建，`-RealDictionaryPath` 指定真实词典 |
 
 ## 常用命令
 

@@ -21,6 +21,7 @@
 - `zhu-ye-cli rank` 真实词典候选排序验证（T-008），候选生成统一下沉 zhu-ye-core
 - 安装与便携包随带 v2 词典，TSF 运行时从 DLL 同目录加载（T-022）
 - 性能基准与阈值验收脚本 `scripts/bench.ps1`（T-015）
+- 主机侧端到端回归检查器与 `scripts/e2e.ps1` 验收入口，覆盖切分、排序、用户词、译文层与正反查（T-024）
 - 便携测试包脚本 `scripts/package-portable.ps1`（T-010）
 - Agent Notes 双语校验与归档脚本（T-018、T-020）
 
