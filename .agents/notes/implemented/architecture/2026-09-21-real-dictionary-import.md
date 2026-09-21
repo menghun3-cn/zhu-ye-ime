@@ -17,10 +17,11 @@ rebuild.
 ## Decision
 
 `zhu-ye-dict import` consumes CC-CEDICT plus FrequencyWords Chinese word
-frequency and compiles a real v2 dictionary. The parser accepts the official
-space-separated `简体词 [pin1 yin1] /译文/` format and the older tab-separated
-form by locating the `[pinyin]` brackets instead of relying on field count.
-Each line passes through five cleaning rules before compilation:
+frequency, optionally adds an OPUS GlobalVoices tokenized Chinese corpus for
+bigram statistics, and compiles a real v2 dictionary. The parser accepts the
+official space-separated `简体词 [pin1 yin1] /译文/` format and the older
+tab-separated form by locating the `[pinyin]` brackets instead of relying on
+field count. Each line passes through five cleaning rules before compilation:
 
 1. The simplified word must be pure CJK.
 2. Pinyin is split on spaces/apostrophes, normalized to unaccented ASCII
@@ -38,11 +39,18 @@ such as `nihao`.
 
 The real run on 2026-09-21 accepted 120,028 entries from 125,113 CC-CEDICT
 lines, hit 28,130 frequency entries, validated 318,015 syllables, and rejected
-894 non-standard syllables. Source URLs, licenses, SHA-256 values, cleaning
-rules, reproduction command, and result hashes are recorded in
-`docs/数据清单.md` and `docs/licenses.md`; raw files and generated artifacts
-stay out of git. The imported dictionary currently has no bigram records, so
-T-008's real bigram corpus remains a separate pending item.
+894 non-standard syllables. The same run consumed 397,039 corpus lines from
+OPUS GlobalVoices v2018q4 (`mono/zhs.tok.gz`) and produced 820,368 unique
+bigram pairs. Bigram cleaning treats each corpus line as an independent
+context, keeps only pure-CJK whitespace tokens, and splits each token by
+longest dictionary match (up to 8 characters); unmatched characters break the
+context so punctuation and unknown spans do not create cross-sentence
+co-occurrences. Counts saturate at the `u32` limit of the v2 format. Source
+URLs, licenses, SHA-256 values, cleaning rules, reproduction command, and
+result hashes are recorded in `docs/数据清单.md` and `docs/licenses.md`; raw
+files and generated artifacts stay out of git. The imported dictionary now
+carries real bigram records, so T-008's ranking verification can run against
+`data/artifacts/real.zyct`.
 
 ## Alternatives considered
 
@@ -63,13 +71,27 @@ string, so keeping both would only keep the last one in the pinyin index and
 make the build input inconsistent. One entry per word-plus-normalized-pinyin
 keeps `build_v2` deterministic.
 
+**Count raw whitespace tokens without dictionary segmentation.** Rejected:
+Chinese OPUS tokens often span several dictionary words or include
+punctuation, so raw token adjacency would introduce noisy and rare pairs.
+Segmenting only against the import vocabulary keeps the bigram statistics
+consistent with the entries shipped in the same dictionary.
+
+**Use an external segmentation engine (for example jieba).** Rejected: it
+would add a large dependency and a second vocabulary with different
+segmentation conventions. Longest dictionary match is deterministic,
+license-light, and sufficient for static co-occurrence statistics; richer
+segmentation belongs to the user-side AI features, not the offline import.
+
 ## Consequences
 
-The pipeline now produces a real dictionary with 120,028 bilingual entries and
-unigram frequencies, and the unknown-syllable sample list gives a concrete
-signal for extending the engine's syllable table. The generated artifact is
-not committed, so the runtime seed dictionary remains the default until real
-data is packaged through the release process. Because CC-CEDICT and
-FrequencyWords content are CC BY-SA 4.0, any future distribution of derived
-dictionary packages must carry attribution and share-alike compliance;
-raw data and local artifacts are not part of the repository today.
+The pipeline now produces a real dictionary with 120,028 bilingual entries,
+unigram frequencies, and 820,368 real bigram records, and the
+unknown-syllable sample list still gives a concrete signal for extending the
+engine's syllable table. The generated artifact is not committed, so the
+runtime seed dictionary remains the default until real data is packaged
+through the release process. Because CC-CEDICT and FrequencyWords content are
+CC BY-SA 4.0 and GlobalVoices content is CC BY 3.0, any future distribution
+of derived dictionary packages must carry attribution and share-alike
+compliance for the applicable sources; raw data and local artifacts are not
+part of the repository today.

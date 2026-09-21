@@ -196,7 +196,7 @@ score = static_score(word) × unigram_weight
 ## 9. 数据管线
 
 ```text
-raw 数据（CC-CEDICT/ECDICT 等）
+raw 数据（CC-CEDICT/FrequencyWords/GlobalVoices 等）
    -> 清洗/校验
    -> 合并去重/拼音注音
    -> 词频统计（开放语料）
@@ -205,8 +205,8 @@ raw 数据（CC-CEDICT/ECDICT 等）
    -> 词典包（版本化）
 ```
 
-第一版真实管线（M2/T-006）已接通 CC-CEDICT 与 FrequencyWords 中文词频：
-`zhu-ye-dict import` 读取官方空格分隔的 `简体词 [拼音] /译文/` 行，做纯 CJK 词形、标准音节、字数与同词同拼音去重清洗，再把词频映射写入词条后编译为 v2 词典。当前产物不含 bigram，T-008 的真实 bigram 语料仍待引入。
+第一版真实管线（M2/T-006）已接通 CC-CEDICT、FrequencyWords 中文词频与 OPUS GlobalVoices 分词语料：
+`zhu-ye-dict import` 读取官方空格分隔的 `简体词 [拼音] /译文/` 行，做纯 CJK 词形、标准音节、字数与同词同拼音去重清洗，再把词频映射写入词条；可选项 `--bigram` 按词典最长匹配统计分词语料的相邻共现，最终编译为携带 120,028 词条与 820,368 个真实 bigram 的 v2 词典。bigram 清洗规则与数据来源见 [数据清单.md](./数据清单.md)。
 
 原始大文件不进入 git；数据处理脚本、版本、来源与许可证全部入库。
 

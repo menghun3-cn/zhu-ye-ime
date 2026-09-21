@@ -5,14 +5,16 @@
 
 use std::path::{Path, PathBuf};
 
+use std::collections::HashSet;
+
 use zhu_ye_core::bigram::BigramModel;
 use zhu_ye_core::dict::Dictionary;
 use zhu_ye_core::dict_format::DictHeader;
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
-    build_real_dictionary, build_v2, dict_schema_version, pipeline_status, seed_bigrams,
-    seed_entries,
+    build_real_bigrams, build_real_dictionary, build_v2, dict_schema_version, pipeline_status,
+    seed_bigrams, seed_entries,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -53,7 +55,7 @@ fn print_usage() {
     println!("zhu-ye-dict 命令：");
     println!("  build [输出路径]      构建自建演示种子词典（默认 {DEFAULT_OUTPUT}）");
     println!(
-        "  import <CC-CEDICT> <词频> [输出路径] [上限]  导入真实数据构建词典（默认 {DEFAULT_REAL_OUTPUT}）"
+        "  import <CC-CEDICT> <词频> [输出路径] [上限] [--bigram 语料]  导入真实数据构建词典（默认 {DEFAULT_REAL_OUTPUT}）"
     );
     println!("  inspect <文件>        打印词典头部元数据与内容哈希");
     println!("  verify <文件>         完整加载校验并核对种子词条/bigram/翻译");
@@ -80,27 +82,57 @@ fn build_command(output: Option<PathBuf>) -> Result<(), String> {
 fn import_command(args: &[String]) -> Result<(), String> {
     let cedict_path = required_path(args, 2)?;
     let frequency_path = required_path(args, 3)?;
-    let output = args
-        .get(4)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_REAL_OUTPUT));
-    let max_entries = args
-        .get(5)
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .map_err(|_| format!("词条上限必须是整数: {value}"))
-        })
-        .transpose()?;
+    let mut output = PathBuf::from(DEFAULT_REAL_OUTPUT);
+    let mut max_entries = None;
+    let mut bigram_path = None;
+    let mut output_arg_seen = false;
+    let mut index = 4;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--bigram" => {
+                index += 1;
+                bigram_path = Some(
+                    args.get(index)
+                        .map(PathBuf::from)
+                        .ok_or_else(|| "--bigram 缺少语料路径".to_owned())?,
+                );
+                index += 1;
+            }
+            _ if !output_arg_seen => {
+                output = PathBuf::from(&args[index]);
+                output_arg_seen = true;
+                index += 1;
+            }
+            _ if max_entries.is_none() => {
+                max_entries = Some(
+                    args[index]
+                        .parse::<usize>()
+                        .map_err(|_| format!("词条上限必须是整数: {}", args[index]))?,
+                );
+                index += 1;
+            }
+            _ => return Err(format!("未知参数: {}", args[index])),
+        }
+    }
 
-    let cedict_text = std::fs::read_to_string(&cedict_path)
-        .map_err(|error| format!("读取 CC-CEDICT 失败: {error}"))?;
-    let frequency_text = std::fs::read_to_string(&frequency_path)
-        .map_err(|error| format!("读取词频文件失败: {error}"))?;
+    let cedict_text = read_text_file(&cedict_path, "CC-CEDICT")?;
+    let frequency_text = read_text_file(&frequency_path, "词频文件")?;
 
     let (entries, stats) = build_real_dictionary(&cedict_text, &frequency_text, max_entries);
-    let bytes = build_v2(&entries, &[]).map_err(|error| error.to_string())?;
+    let vocabulary: HashSet<&str> = entries.iter().map(|entry| entry.word.as_str()).collect();
+    let mut bigram_owned = Vec::new();
+    let mut bigram_stats = None;
+    if let Some(bigram_path) = &bigram_path {
+        let corpus_text = read_text_file(bigram_path, "bigram 语料")?;
+        let (bigrams, corpus_stats) = build_real_bigrams(&corpus_text, &vocabulary);
+        bigram_owned = bigrams;
+        bigram_stats = Some(corpus_stats);
+    }
+    let bigram_refs: Vec<(&str, &str, u64)> = bigram_owned
+        .iter()
+        .map(|(previous, word, frequency)| (previous.as_str(), word.as_str(), *frequency))
+        .collect();
+    let bytes = build_v2(&entries, &bigram_refs).map_err(|error| error.to_string())?;
     let header = DictHeader::from_bytes(&bytes).map_err(|error| error.to_string())?;
     write_dictionary_file(&output, &bytes)?;
 
@@ -135,6 +167,16 @@ fn import_command(args: &[String]) -> Result<(), String> {
     );
     if !stats.unknown_syllables.is_empty() {
         println!("未知音节样本: {}", stats.unknown_syllables.join("、"));
+    }
+    if let Some(bigram_stats) = &bigram_stats {
+        println!(
+            "bigram 统计: 语料行 {corpus_lines}，分词 {tokens_total}，命中词表 {tokens_matched}，候选词对 {pairs_formed}，唯一词对 {unique_pairs}",
+            corpus_lines = bigram_stats.corpus_lines,
+            tokens_total = bigram_stats.tokens_total,
+            tokens_matched = bigram_stats.tokens_matched,
+            pairs_formed = bigram_stats.pairs_formed,
+            unique_pairs = bigram_stats.unique_pairs
+        );
     }
     Ok(())
 }
@@ -222,6 +264,10 @@ fn print_built_summary(path: &Path, bytes: &[u8], header: &DictHeader) {
         bytes.len()
     );
     println!("内容 SHA-256: {}", hex(&header.content_hash));
+}
+
+fn read_text_file(path: &Path, label: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|error| format!("读取{label}失败: {error}"))
 }
 
 fn write_dictionary_file(output: &Path, bytes: &[u8]) -> Result<(), String> {

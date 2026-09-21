@@ -146,6 +146,41 @@ fn is_cjk_word(word: &str) -> bool {
             .all(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
 }
 
+/// 按词典最长匹配拆分 CJK 串；无法匹配的字符以 `None` 标记，作为上下文断点。
+/// 最多尝试 8 个汉字，兼顾语料切分质量与构建速度。
+fn segment_dictionary_words<'a>(
+    token: &'a str,
+    vocabulary: &HashSet<&str>,
+) -> Vec<Option<&'a str>> {
+    const MAX_WORD_CHARS: usize = 8;
+    let mut words = Vec::new();
+    let mut offset = 0usize;
+    while offset < token.len() {
+        let mut best: Option<(usize, &str)> = None;
+        for (char_count, (char_offset, ch)) in token[offset..].char_indices().enumerate() {
+            if char_count >= MAX_WORD_CHARS {
+                break;
+            }
+            let end = offset + char_offset + ch.len_utf8();
+            if vocabulary.contains(&token[offset..end]) {
+                best = Some((end, &token[offset..end]));
+            }
+        }
+        match best {
+            Some((end, word)) => {
+                words.push(Some(word));
+                offset = end;
+            }
+            None => {
+                let ch = token[offset..].chars().next().expect("偏移位于字符边界");
+                words.push(None);
+                offset += ch.len_utf8();
+            }
+        }
+    }
+    words
+}
+
 /// 从原始文本构建真实词条列表。
 ///
 /// 清洗规则：简体词须为纯 CJK 词形；无调拼音全部音节必须在标准全拼表中；
@@ -220,9 +255,75 @@ pub fn build_real_dictionary(
     (entries, stats)
 }
 
+/// bigram 语料统计结果。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BigramStats {
+    /// 参与统计的语料行数。
+    pub corpus_lines: usize,
+    /// 语料中的空白分词总数。
+    pub tokens_total: usize,
+    /// 命中词典词表且作为有效中文词计入的词数。
+    pub tokens_matched: usize,
+    /// 相邻两个有效词形成的候选词对数。
+    pub pairs_formed: usize,
+    /// 去重后的词对数。
+    pub unique_pairs: usize,
+}
+
+/// 从空白分词的中文语料统计 bigram 词对。
+///
+/// 每条语料行视为独立上下文。原始 token 先用词典最长匹配拆词，
+/// 无法匹配的字符作为上下文断点；标点、数字、拉丁字母同样断开，避免
+/// 跨句或跨非语义词的虚假共现。计数截断到 v2 字段允许的 u32 上限。
+pub fn build_real_bigrams(
+    corpus_text: &str,
+    vocabulary: &HashSet<&str>,
+) -> (Vec<(String, String, u64)>, BigramStats) {
+    let mut counts: HashMap<(String, String), u64> = HashMap::new();
+    let mut stats = BigramStats::default();
+    for line in corpus_text.lines() {
+        stats.corpus_lines += 1;
+        let mut previous: Option<&str> = None;
+        for token in line.split_whitespace() {
+            stats.tokens_total += 1;
+            if !is_cjk_word(token) {
+                previous = None;
+                continue;
+            }
+            for part in segment_dictionary_words(token, vocabulary) {
+                let Some(word) = part else {
+                    previous = None;
+                    continue;
+                };
+                stats.tokens_matched += 1;
+                if let Some(previous_word) = previous {
+                    stats.pairs_formed += 1;
+                    let entry = counts
+                        .entry((previous_word.to_owned(), word.to_owned()))
+                        .or_insert(0);
+                    *entry = entry.saturating_add(1).min(u64::from(u32::MAX));
+                }
+                previous = Some(word);
+            }
+        }
+    }
+    let mut bigrams: Vec<(String, String, u64)> = counts
+        .into_iter()
+        .map(|((previous, word), frequency)| (previous, word, frequency))
+        .collect();
+    bigrams.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    stats.unique_pairs = bigrams.len();
+    (bigrams, stats)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_real_dictionary, load_frequency_map, normalize_pinyin, parse_cedict_line};
+    use std::collections::HashSet;
+
+    use super::{
+        build_real_bigrams, build_real_dictionary, load_frequency_map, normalize_pinyin,
+        parse_cedict_line,
+    };
 
     #[test]
     fn 解析ccdect数据行() {
@@ -317,5 +418,52 @@ mod tests {
         assert_eq!(stats.accepted_entries, 1);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].pinyin, "hao");
+    }
+
+    #[test]
+    fn 分词语料统计相邻有效词对() {
+        let vocabulary = HashSet::from(["你好", "世界", "的"]);
+        let corpus = "你好 世界 的 世界 你好\n你好 世界";
+        let (bigrams, stats) = build_real_bigrams(corpus, &vocabulary);
+        assert_eq!(stats.corpus_lines, 2);
+        assert_eq!(stats.tokens_total, 7);
+        assert_eq!(stats.tokens_matched, 7);
+        assert_eq!(stats.pairs_formed, 5);
+        assert_eq!(stats.unique_pairs, 4);
+        assert_eq!(
+            bigrams
+                .iter()
+                .find(|(previous, word, _)| previous == "你好" && word == "世界")
+                .map(|(_, _, frequency)| *frequency),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn 未收录词与标点断开bigram上下文() {
+        let vocabulary = HashSet::from(["你好", "世界", "的"]);
+        let corpus = "你好 ， 世界\n你好 alien 世界\n你好 缺席 世界";
+        let (bigrams, stats) = build_real_bigrams(corpus, &vocabulary);
+        assert!(bigrams.is_empty());
+        assert_eq!(stats.pairs_formed, 0);
+        assert_eq!(stats.tokens_matched, 6);
+    }
+
+    #[test]
+    fn 未收录长词按词典最长匹配拆分后统计() {
+        let vocabulary = HashSet::from(["全民", "牛肉", "阿根廷", "你好"]);
+        let corpus = "全民牛肉 你好\n阿根廷 全民牛肉";
+        let (bigrams, stats) = build_real_bigrams(corpus, &vocabulary);
+        assert_eq!(stats.tokens_total, 4);
+        assert_eq!(stats.tokens_matched, 6);
+        assert_eq!(stats.pairs_formed, 4);
+        assert_eq!(stats.unique_pairs, 3);
+        assert_eq!(
+            bigrams
+                .iter()
+                .find(|(previous, word, _)| previous == "全民" && word == "牛肉")
+                .map(|(_, _, frequency)| *frequency),
+            Some(2)
+        );
     }
 }

@@ -12,8 +12,11 @@ pub use zhu_ye_core::dict_builder::build_v2;
 pub use zhu_ye_core::dict_format::DICT_VERSION;
 
 pub mod import;
-pub use import::ImportStats;
-pub use import::{build_real_dictionary, load_frequency_map, normalize_pinyin, parse_cedict_line};
+pub use import::{
+    build_real_bigrams, build_real_dictionary, load_frequency_map, normalize_pinyin,
+    parse_cedict_line,
+};
+pub use import::{BigramStats, ImportStats};
 
 /// 词典二进制格式版本。
 #[must_use]
