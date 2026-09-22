@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 校验竹叶输入法 DLL 是否可加载且包含 TSF 所需导出函数。

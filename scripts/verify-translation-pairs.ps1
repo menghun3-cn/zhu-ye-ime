@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 校验仓库内 .md / .zh.md 双语配对与 .i18n.yaml 一致性记录。

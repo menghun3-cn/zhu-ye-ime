@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 卸载竹叶输入法 TSF 服务并清理注册表与 DLL。

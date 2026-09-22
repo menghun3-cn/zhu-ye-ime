@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 git-publish 发布前检查（PowerShell 版，Windows 原生）。

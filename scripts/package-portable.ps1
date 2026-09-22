@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 生成可复制到其他 Windows 机器进行 TSF 注册/卸载测试的便携包。
@@ -66,8 +66,18 @@ $null = New-Item -ItemType Directory -Path $scriptDir, $dllDir -Force
 $docsDir = Join-Path $staging 'docs'
 $null = New-Item -ItemType Directory -Path $docsDir -Force
 
+# Windows PowerShell 5.1 需要 UTF-8 BOM 才能正确解析中文脚本。
 foreach ($script in @('ime-identity.ps1', 'install.ps1', 'uninstall.ps1', 'verify-tsf-dll.ps1')) {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination $scriptDir
+    $sourcePath = Join-Path $PSScriptRoot $script
+    $scriptText = [System.IO.File]::ReadAllText(
+        $sourcePath,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    [System.IO.File]::WriteAllText(
+        (Join-Path $scriptDir $script),
+        $scriptText,
+        [System.Text.UTF8Encoding]::new($true)
+    )
 }
 Copy-Item -LiteralPath $dllSource -Destination (Join-Path $dllDir 'zhu_ye_ime.dll')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\licenses.md') -Destination $docsDir
@@ -135,7 +145,7 @@ $testGuide = @'
 [System.IO.File]::WriteAllText(
     (Join-Path $staging 'README-测试.txt'),
     ($testGuide -replace "`r?`n", "`r`n"),
-    [System.Text.UTF8Encoding]::new($false)
+    [System.Text.UTF8Encoding]::new($true)
 )
 
 Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath -Force

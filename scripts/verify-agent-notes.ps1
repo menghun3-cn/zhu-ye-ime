@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 验证 Agent Notes 树、文件格式、双语三件套与归档封存。

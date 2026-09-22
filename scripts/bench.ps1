@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 运行 zhu-ye-cli bench 并校验性能指标阈值。
