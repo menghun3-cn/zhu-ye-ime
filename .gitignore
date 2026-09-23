@@ -16,3 +16,6 @@ data/cache/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# VM 测试凭据（不提交）
+docs/vm-win-info.md

@@ -2,36 +2,43 @@
 //!
 //! 本模块负责输入法 DLL 的 COM 生命周期、类工厂、文本服务实例，以及 M1 的
 //! 按键 → 组合 → 上屏最小闭环：
-//! - `ITfKeyEventSink` 接收键盘事件并决定是否吃键；
+//! - `ITfKeyEventSink` 必须经 `ITfKeystrokeMgr::AdviseKeyEventSink` 注册后
+//!   才能接收键盘事件并决定是否吃键（经 `ITfThreadMgr::AdviseSink` 注册会失败）；
 //! - `ITfEditSession` 在 TSF 编辑会话内写入组合文本或提交文本；
 //! - `ITfCompositionSink` 在宿主终止组合时同步清理输入引擎状态。
 //!
 //! TSF 注册表写入与清理由 `scripts/` 下的安装/卸载脚本完成，本模块不直接改注册表。
 
 use std::ffi::c_void;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::{
-    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_POINTER, LPARAM, POINT, RECT, S_FALSE,
-    S_OK, WPARAM,
+    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_POINTER, HMODULE, LPARAM, POINT, RECT,
+    S_FALSE, S_OK, WPARAM,
 };
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
-use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
+use windows::Win32::System::LibraryLoader::{
+    GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_ESCAPE, VK_OEM_COMMA, VK_OEM_PERIOD, VK_RETURN,
-    VK_SHIFT, VK_SPACE, VK_TAB, VK_Z,
+    GetKeyState, VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_MENU,
+    VK_OEM_COMMA, VK_OEM_PERIOD, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
     ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfKeyEventSink,
-    ITfKeyEventSink_Impl, ITfSource, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
-    ITfTextInputProcessor_Impl, ITfThreadMgr, TF_ES_READWRITE, TF_ES_SYNC, TF_IAS_NOQUERY,
+    ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
+    ITfTextInputProcessor_Impl, ITfThreadMgr, TF_ES_READWRITE, TF_ES_SYNC, TF_IAS_QUERYONLY,
 };
 use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
@@ -104,8 +111,7 @@ impl KeyAction {
 struct EngineState {
     engine: InputEngine,
     tid: u32,
-    thread_mgr: Option<ITfThreadMgr>,
-    key_sink_cookie: Option<u32>,
+    keystroke_mgr: Option<ITfKeystrokeMgr>,
     composition: Option<ITfComposition>,
     candidate_window: CandidateWindow,
 }
@@ -115,8 +121,7 @@ impl EngineState {
         Self {
             engine: create_engine(None),
             tid: 0,
-            thread_mgr: None,
-            key_sink_cookie: None,
+            keystroke_mgr: None,
             composition: None,
             candidate_window: CandidateWindow::new(),
         }
@@ -126,8 +131,7 @@ impl EngineState {
         Self {
             engine: create_engine(Some(store)),
             tid: 0,
-            thread_mgr: None,
-            key_sink_cookie: None,
+            keystroke_mgr: None,
             composition: None,
             candidate_window: CandidateWindow::new(),
         }
@@ -195,45 +199,60 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
     fn Activate(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32) -> Result<()> {
         // 自检等场景允许空线程管理器；此时不注册按键事件，其余状态照常可用。
         let Some(thread_mgr) = ptim.cloned() else {
+            debug_log("zhu-ye: Activate tm=none");
             return Ok(());
         };
 
-        let source = thread_mgr.cast::<ITfSource>()?;
+        // `ITfKeyEventSink` 只能经 `ITfKeystrokeMgr::AdviseKeyEventSink` 注册：
+        // 通过 `ITfThreadMgr::AdviseSink` 注册会返回 CONNECT_E_CANNOTCONNECT
+        // (0x80040202)，按下按键永远不会送达文本服务。
+        let keystroke_mgr = match unsafe { get_keystroke_mgr(&thread_mgr) } {
+            Ok(km) => km,
+            Err(err) => {
+                debug_log(&format!("zhu-ye: Activate keystroke-mgr FAILED {err:?}"));
+                return Err(err);
+            }
+        };
         let key_sink = self.to_object().to_interface::<ITfKeyEventSink>();
-        let cookie = unsafe { source.AdviseSink(&ITfKeyEventSink::IID, &key_sink) }?;
-
-        let mut state = state_lock(self);
-        state.tid = tid;
-        state.thread_mgr = Some(thread_mgr);
-        state.key_sink_cookie = Some(cookie);
-        Ok(())
+        match unsafe { keystroke_mgr.AdviseKeyEventSink(tid, &key_sink, true) } {
+            Ok(()) => {
+                let mut state = state_lock(self);
+                state.tid = tid;
+                state.keystroke_mgr = Some(keystroke_mgr);
+                debug_log(&format!("zhu-ye: Activate tid={tid} key-sink ok"));
+                Ok(())
+            }
+            Err(err) => {
+                debug_log(&format!("zhu-ye: Activate key-sink FAILED {err:?}"));
+                Err(err)
+            }
+        }
     }
 
     fn Deactivate(&self) -> Result<()> {
+        debug_log("zhu-ye: Deactivate");
         let mut state = state_lock(self);
         state.composition = None;
         state.engine.cancel_input();
         state.candidate_window.hide();
 
-        if let Some(thread_mgr) = state.thread_mgr.take() {
-            if let Some(cookie) = state.key_sink_cookie.take() {
-                if let Ok(source) = thread_mgr.cast::<ITfSource>() {
-                    let _ = unsafe { source.UnadviseSink(cookie) };
-                }
-            }
+        if let Some(keystroke_mgr) = state.keystroke_mgr.take() {
+            let _ = unsafe { keystroke_mgr.UnadviseKeyEventSink(state.tid) };
         }
         Ok(())
     }
 }
 
 impl ITfTextInputProcessorEx_Impl for TextService_Impl {
-    fn ActivateEx(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32, _dwflags: u32) -> Result<()> {
+    fn ActivateEx(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32, dwflags: u32) -> Result<()> {
+        debug_log(&format!("zhu-ye: ActivateEx flags=0x{dwflags:X} tid={tid}"));
         ITfTextInputProcessor_Impl::Activate(self, ptim, tid)
     }
 }
 
 impl ITfKeyEventSink_Impl for TextService_Impl {
-    fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
+    fn OnSetFocus(&self, fforeground: BOOL) -> Result<()> {
+        debug_log(&format!("zhu-ye: OnSetFocus fg={}", fforeground.0));
         Ok(())
     }
 
@@ -243,9 +262,12 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Result<BOOL> {
-        Ok(BOOL(
-            plan_action(wparam, lparam, self.state()).is_some() as i32
-        ))
+        let action = plan_action(wparam, lparam, key_modifiers_down(), self.state());
+        debug_log(&format!(
+            "zhu-ye: TestKeyDown 0x{:X} -> {:?}",
+            wparam.0, action
+        ));
+        Ok(BOOL(action.is_some() as i32))
     }
 
     fn OnTestKeyUp(
@@ -258,7 +280,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     }
 
     fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
-        let Some(action) = plan_action(wparam, lparam, self.state()) else {
+        let Some(action) = plan_action(wparam, lparam, key_modifiers_down(), self.state()) else {
             return Ok(BOOL(0));
         };
 
@@ -379,13 +401,35 @@ fn classify_key(wparam: WPARAM, lparam: LPARAM) -> Option<KeyAction> {
     }
 }
 
+/// 判断 Ctrl 或 Alt 修饰键是否按下；按住时系统组合键（复制/粘贴/保存等）
+/// 必须放行给宿主应用，避免输入法吞掉 Ctrl+A/C/S/V 等快捷键。
+fn key_modifiers_down() -> bool {
+    // GetKeyState 返回 SHORT，高位为 1 表示按下，即 i16 值为负。
+    unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 || GetKeyState(i32::from(VK_MENU.0)) < 0 }
+}
+
+/// 从 `ITfThreadMgr` 取出按键管理器。
+///
+/// TSF 中 `ITfKeystrokeMgr` 由线程管理器对象一并实现，通过
+/// `QueryInterface(IID_ITfKeystrokeMgr)` 获取（windows crate 生成的
+/// `ITfThreadMgr` 只导出 11 个自身方法，vtable 槽 3..13，再往后访问就会越界，
+/// 因此绝不能按槽位手工读取——此前按“第 14 槽”假设实现，导致 conhost/MSCTF
+/// 在 TIP 激活时进程崩溃）。
+unsafe fn get_keystroke_mgr(thread_mgr: &ITfThreadMgr) -> Result<ITfKeystrokeMgr> {
+    thread_mgr.cast()
+}
+
 /// 决定是否吃下按键。字母仅在中文模式下进入组合；
 /// 功能键只在已有组合时处理，避免键盘事件被无谓吞掉。
 fn plan_action(
     wparam: WPARAM,
     lparam: LPARAM,
+    modifier_held: bool,
     state: &Rc<Mutex<EngineState>>,
 ) -> Option<KeyAction> {
+    if modifier_held {
+        return None;
+    }
     let action = classify_key(wparam, lparam)?;
     let engine = &state.lock().unwrap().engine;
     match action {
@@ -429,24 +473,35 @@ fn apply_action(
 
 /// 计算下一次组合串文本；不修改引擎，真实状态在 TSF 写入完成后同步。
 fn compose_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
-    let engine = &mut state.lock().unwrap().engine;
-    match action {
-        KeyAction::Letter(c) => format!("{}{}", engine.composing(), c),
-        KeyAction::Backspace => engine.preview_after_backspace().unwrap_or_default(),
-        _ => String::new(),
-    }
+    let text = {
+        let engine = &mut state.lock().unwrap().engine;
+        match action {
+            KeyAction::Letter(c) => format!("{}{}", engine.composing(), c),
+            KeyAction::Backspace => engine.preview_after_backspace().unwrap_or_default(),
+            _ => String::new(),
+        }
+    };
+    debug_log(&format!("zhu-ye: compose-text {action:?} -> {text:?}"));
+    text
 }
 
 /// 计算本次提交文本；清空引擎状态交给 TSF 写入完成后的 `sync_engine`。
 fn commit_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
-    let engine = &mut state.lock().unwrap().engine;
-    match action {
-        KeyAction::Space => engine.preview_space().unwrap_or_default(),
-        KeyAction::Enter => engine.preview_enter().unwrap_or_default(),
-        KeyAction::Escape => String::new(),
-        KeyAction::Select(index) => engine.preview_selection(index).unwrap_or_default(),
-        _ => String::new(),
-    }
+    let text = {
+        let engine = &mut state.lock().unwrap().engine;
+        match action {
+            KeyAction::Space => engine.preview_space().unwrap_or_default(),
+            KeyAction::Enter => engine.preview_enter().unwrap_or_default(),
+            KeyAction::Escape => String::new(),
+            KeyAction::Select(index) => engine.preview_selection(index).unwrap_or_default(),
+            _ => String::new(),
+        }
+    };
+    debug_log(&format!(
+        "zhu-ye: commit-text {action:?} -> {text:?} ({} utf8)",
+        text.len()
+    ));
+    text
 }
 
 /// 将引擎状态推进到动作后的实际状态。
@@ -490,10 +545,16 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
 fn refresh_candidate_window(state: &Rc<Mutex<EngineState>>, edit: Option<(&ITfContext, u32)>) {
     let view = state.lock().unwrap().engine.candidate_ui_view();
     if view.visible_items().is_empty() {
+        debug_log("zhu-ye: cand-hide (no items)");
         state.lock().unwrap().candidate_window.hide();
         return;
     }
     let placement = edit.and_then(|(context, ec)| composition_placement(state, context, ec));
+    debug_log(&format!(
+        "zhu-ye: cand-show items={} first={:?}",
+        view.visible_items().len(),
+        view.visible_items().first()
+    ));
     state
         .lock()
         .unwrap()
@@ -537,13 +598,53 @@ fn update_composition(
         Some(composition) => {
             let range = unsafe { composition.GetRange() }?;
             unsafe { range.SetText(ec, 0, &wide) }?;
+            debug_log(&format!("zhu-ye: comp-update {text:?}"));
         }
         None => {
+            debug_log("zhu-ye: comp-insert-begin");
             let insert = context.cast::<ITfInsertAtSelection>()?;
-            let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &wide) }?;
+            debug_log("zhu-ye: comp-insert-cast-ok");
+            // 注意：不能用 TF_IAS_NOQUERY 直接写入——msctf 的
+            // InsertTextAtSelection 写入分支在本机与 Win10/1809 上都会
+            // 在非空 pprange 下崩溃（c0000005），本地探针 tsf_min_host
+            // 已验证。改为 QUERYONLY 取得插入点 range，再由
+            // StartComposition + range.SetText 写入（组合范围会覆盖新文本，
+            // 探针已用 GetText 逐键验证）。
+            let wide_text = &wide[..wide.len() - 1];
+            let range =
+                match unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, wide_text) } {
+                    Ok(range) => {
+                        debug_log("zhu-ye: comp-insert-ok");
+                        range
+                    }
+                    Err(err) => {
+                        debug_log(&format!("zhu-ye: comp-insert-err {err:?}"));
+                        return Err(err);
+                    }
+                };
+            debug_log("zhu-ye: comp-ccomp-begin");
             let composition_services = context.cast::<ITfContextComposition>()?;
-            let composition = unsafe { composition_services.StartComposition(ec, &range, sink) }?;
+            debug_log("zhu-ye: comp-ccomp-cast-ok");
+            let composition =
+                match unsafe { composition_services.StartComposition(ec, &range, sink) } {
+                    Ok(composition) => {
+                        debug_log("zhu-ye: comp-start-ok");
+                        composition
+                    }
+                    Err(err) => {
+                        debug_log(&format!("zhu-ye: comp-start-err {err:?}"));
+                        return Err(err);
+                    }
+                };
+            if let Err(err) = unsafe { range.SetText(ec, 0, wide_text) } {
+                debug_log(&format!("zhu-ye: comp-settext-err {err:?}"));
+                // 组合已启动但写入失败：立即结束空组合，避免悬挂。
+                let _ = unsafe { composition.EndComposition(ec) };
+                return Err(err);
+            }
+            debug_log("zhu-ye: comp-settext-ok");
             state.lock().unwrap().composition = Some(composition);
+            debug_log(&format!("zhu-ye: comp-start {text:?}"));
         }
     }
     Ok(())
@@ -567,13 +668,24 @@ fn finish_composition(
             let range = unsafe { composition.GetRange() }?;
             unsafe { range.SetText(ec, 0, &wide) }?;
             unsafe { composition.EndComposition(ec) }?;
+            if text.is_empty() {
+                debug_log("zhu-ye: commit-cancel (empty)");
+            } else {
+                debug_log(&format!("zhu-ye: commit {text:?} ({} utf8)", text.len()));
+            }
         }
         None if !text.is_empty() => {
             let insert = context.cast::<ITfInsertAtSelection>()?;
             let wide = to_wide(text);
-            unsafe { insert.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &wide) }?;
+            let wide_text = &wide[..wide.len() - 1];
+            // 同 update_composition：QUERYONLY + SetText 绕过崩溃的写入分支。
+            let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, wide_text) }?;
+            unsafe { range.SetText(ec, 0, wide_text) }?;
+            debug_log(&format!("zhu-ye: commit-no-comp {text:?}"));
         }
-        None => {}
+        None => {
+            debug_log("zhu-ye: commit-noop (no comp, empty)");
+        }
     }
     Ok(())
 }
@@ -583,17 +695,54 @@ fn to_wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// 输出调试日志到调试器输出通道，便于在虚拟机中观察按键流程。
+/// 输出调试日志：先写入调试器输出通道，再在“验收期文件日志”开关
+/// （`C:\zhu-ye-test\tsf-debug.enable` 存在）时追加写
+/// `C:\zhu-ye-test\tsf-debug.log`，便于在没有调试器的远程虚拟机上观察
+/// TSF 生命周期与按键流程。验收结束后移除文件日志部分。
 fn debug_log(message: &str) {
     let wide = to_wide(message);
     unsafe { OutputDebugStringW(PCWSTR(wide.as_ptr())) };
+    if !file_log_enabled() {
+        return;
+    }
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(FILE_LOG_PATH)
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let tid = unsafe { GetCurrentThreadId() };
+        let _ = writeln!(file, "[{now}] pid={pid} tid={tid} {message}");
+    }
+}
+
+/// 验收期文件日志路径与开关缓存。
+const FILE_LOG_PATH: &str = r"C:\zhu-ye-test\tsf-debug.log";
+static FILE_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+static FILE_LOG_CHECKED: AtomicBool = AtomicBool::new(false);
+
+fn file_log_enabled() -> bool {
+    if !FILE_LOG_CHECKED.load(Ordering::Relaxed) {
+        FILE_LOG_ENABLED.store(
+            PathBuf::from(r"C:\zhu-ye-test\tsf-debug.enable").exists(),
+            Ordering::Relaxed,
+        );
+        FILE_LOG_CHECKED.store(true, Ordering::Relaxed);
+    }
+    FILE_LOG_ENABLED.load(Ordering::Relaxed)
 }
 
 /// 创建输入引擎：优先加载 `%APPDATA%\ai-zhu-ye-ime\seed.zyct`，
 /// 缺失或损坏时回退 M1 内置演示词典，保证输入法始终可启动。
 fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
-    match DictionaryFile::open(&dictionary_path()) {
+    let dict_path = dictionary_path();
+    match DictionaryFile::open(&dict_path) {
         Ok(file) => {
+            debug_log(&format!("zhu-ye: dict-ok path={dict_path:?}"));
             let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
             let bigram: Arc<dyn BigramModel> = Arc::new(file);
             match user_store {
@@ -601,10 +750,13 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
                 None => InputEngine::with_bigram(dictionary, bigram),
             }
         }
-        Err(_) => match user_store {
-            Some(store) => InputEngine::with_user_store(m1_seed_dictionary(), store),
-            None => InputEngine::with_m1_seed(),
-        },
+        Err(_) => {
+            debug_log(&format!("zhu-ye: dict-fallback path={dict_path:?}"));
+            match user_store {
+                Some(store) => InputEngine::with_user_store(m1_seed_dictionary(), store),
+                None => InputEngine::with_m1_seed(),
+            }
+        }
     }
 }
 
@@ -624,11 +776,24 @@ fn resolve_dictionary_path(installed: Option<PathBuf>, appdata: Option<PathBuf>)
         .unwrap_or_else(|| PathBuf::from(DICTIONARY_FILE_NAME))
 }
 
+/// 本 DLL 内的锚点函数：取其地址经 `GetModuleHandleExW(FROM_ADDRESS)`
+/// 反查 DLL 所在目录，与 DLL 文件名解耦（安装脚本用版本化文件名
+/// `zhu-ye-ime-vN.dll` 规避“被 explorer 锁定”问题，不能按名查找）。
+fn dictionary_module_anchor() {}
+
 /// 返回 DLL 同目录存在的 `dictionary.zyct`；便于安装器做机器级部署。
 fn installed_dictionary_path() -> Option<PathBuf> {
-    let module_name = to_wide("zhu-ye-ime.dll");
     unsafe {
-        let module = GetModuleHandleW(PCWSTR(module_name.as_ptr())).ok()?;
+        let mut module = HMODULE::default();
+        let address = (dictionary_module_anchor as fn()) as usize;
+        let ok = GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(address as *const u16),
+            &mut module,
+        );
+        if ok.is_err() {
+            return None;
+        }
         let mut buffer = [0u16; 4096];
         let length = GetModuleFileNameW(Some(module), &mut buffer);
         if length == 0 {
@@ -826,30 +991,52 @@ mod tests {
     fn 未激活组合时功能键放行字母进入引擎() {
         let state = Rc::new(Mutex::new(EngineState::new()));
         assert_eq!(
-            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::Letter('a'))
         );
         assert_eq!(
-            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, &state),
             None
         );
         assert_eq!(
-            plan_action(WPARAM(VK_RETURN.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_RETURN.0 as usize), LPARAM(0), false, &state),
             None
         );
         assert_eq!(
-            plan_action(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), false, &state),
             None
         );
 
         state.lock().unwrap().engine.handle_letter('a');
         assert_eq!(
-            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::Space)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::Select(0))
+        );
+    }
+
+    #[test]
+    fn ctrl或alt修饰键一律放行给宿主() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        assert_eq!(
+            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), true, &state),
+            None
+        );
+        assert_eq!(
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), true, &state),
+            None
+        );
+
+        // 组合进行中按 Ctrl+S 等系统组合键也不被输入法吞掉。
+        state.lock().unwrap().engine.handle_letter('n');
+        assert_eq!(plan_action(WPARAM(0x53), LPARAM(0), true, &state), None);
+        // 无修饰键时字母仍正常进入组合。
+        assert_eq!(
+            plan_action(WPARAM(0x53), LPARAM(0), false, &state),
+            Some(KeyAction::Letter('s'))
         );
     }
 
@@ -930,21 +1117,21 @@ mod tests {
     fn shift与组合内功能键放行策略正确() {
         let state = Rc::new(Mutex::new(EngineState::new()));
         assert_eq!(
-            plan_action(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::ToggleMode)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, &state),
             None
         );
 
         state.lock().unwrap().engine.handle_letter('n');
         assert_eq!(
-            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::ToggleLayer)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::PageDown)
         );
     }
@@ -973,11 +1160,11 @@ mod tests {
         sync_engine(&state, KeyAction::ToggleMode);
         assert_eq!(state.lock().unwrap().engine.mode(), InputMode::English);
         assert_eq!(
-            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, &state),
             None
         );
         assert_eq!(
-            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), &state),
+            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false, &state),
             None
         );
     }

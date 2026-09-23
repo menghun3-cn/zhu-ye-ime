@@ -27,11 +27,13 @@ session cannot be granted, the engine is still advanced so later keystrokes are 
 based on drifted state.
 
 Inside the edit session, `ITfEditSession::DoEditSession` runs one `apply_action`
-callback. Letter/Backspace updates pass through `ITfInsertAtSelection` plus
-`ITfContextComposition::StartComposition` and `ITfRange::SetText`; Space, Enter, Esc,
-and digits end the composition through `EndComposition` or insert committed text
-directly when no composition exists. The engine is synchronized after TSF text is
-written.
+callback. Letter/Backspace updates locate the insertion point with
+`ITfInsertAtSelection` in query-only mode, then write through
+`ITfContextComposition::StartComposition` and `ITfRange::SetText`; Space, Enter,
+Esc, and digits end the composition through `EndComposition` or insert committed
+text directly when no composition exists. The engine is synchronized after TSF
+text is written. The `InsertAtSelection` **write** branch is deliberately not
+used — see the [write-path crash note](../../implemented/bug-fix/2026-09-23-tsf-insert-at-selection-write-path-crash.md).
 
 The input behavior itself lives in `crates/zhu-ye-ime/src/input.rs` as a pure Rust
 `InputEngine` with the M1 seed dictionary, so candidate generation, ordering,
@@ -74,8 +76,10 @@ composition path. Twenty unit tests pass across the engine and TSF adapter,
 `cargo clippy --workspace --all-targets -- -D warnings` passes, and the release DLL
 export check passes.
 
-T-011 stays in progress until the current build is installed on a real Windows test
-machine (the VM being prepared) and typing is verified in Notepad. The earlier
-registration note's claim that M1 has no key processing no longer matches this build;
-this note is authoritative for the current TSF adapter. Candidate-window rendering and
-full key interaction (Shift/Tab/paging) are deferred to T-012/T-013.
+T-011 passed VM acceptance on 2026-09-23: Notepad typing, composition, commit,
+paging, layer and mode switching, and user-word learning all verified with zero
+crashes; the crash root causes and their fixes are recorded in the
+[write-path crash note](../../implemented/bug-fix/2026-09-23-tsf-insert-at-selection-write-path-crash.md)
+and the [page-slice note](../../implemented/bug-fix/2026-09-23-candidate-window-page-slice-hidden.md).
+The earlier registration note's claim that M1 has no key processing no longer
+matches this build; this note is authoritative for the current TSF adapter.

@@ -412,6 +412,9 @@ impl InputEngine {
                 items: Vec::new(),
             };
         }
+        // items 必须携带当前层**全部**候选：`CandidateUiView::visible_items()`
+        // 会再按 `page` 切片一次；若这里只放当前页，翻页后切片越界变空，
+        // 候选窗会被误判为“无候选”而隐藏（VM 验收翻页时复现）。
         CandidateUiView {
             composition: self.composing.clone(),
             pinyin_hint: pinyin_hints(&self.composing),
@@ -420,7 +423,7 @@ impl InputEngine {
             selected: 0,
             translation_mode: self.layer == CandidateLayer::Translation,
             items: self
-                .visible_candidates()
+                .current_layer_candidates()
                 .iter()
                 .map(candidate_ui_item)
                 .collect(),
@@ -851,6 +854,21 @@ mod tests {
         assert_eq!(engine.preview_selection(0).as_deref(), Some("尼好"));
         assert_eq!(engine.handle_space().as_deref(), Some("尼好"));
         assert!(!engine.is_active());
+    }
+
+    #[test]
+    fn 翻页后视图快照可见项跟随当前页() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao");
+        engine.page_size = 1;
+        let view = engine.candidate_ui_view();
+        assert_eq!(view.visible_items().len(), 1);
+        assert_eq!(view.visible_items()[0].text, "你好");
+        engine.next_page();
+        let view = engine.candidate_ui_view();
+        assert_eq!(view.visible_items().len(), 1);
+        assert_eq!(view.visible_items()[0].text, "尼好");
+        // 修复前：items 只含引擎当前页，翻页后 view 再按 page 切片越界变空
     }
 
     #[test]

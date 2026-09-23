@@ -1,0 +1,4 @@
+# 静态链接 MSVC CRT：便携包与 TSF DLL 不依赖目标机器安装
+# Visual C++ 运行库（vcruntime140.dll），保证在全新 Windows 上可直接加载。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

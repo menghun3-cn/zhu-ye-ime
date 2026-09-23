@@ -30,7 +30,10 @@ typed, while the committed text becomes `previous_word` for bigram context.
 `candidate_ui_view` produces the snapshot consumed by the window. The view is
 empty when the engine is in English mode even though the composition string is
 kept, which hides the popup during English typing and restores it when mode
-switches back.
+switches back. The view's `items` carries the **full** current-layer candidate
+list; `CandidateUiView::visible_items()` slices it by page — an earlier
+implementation that pre-sliced `items` to a single page hid the popup after
+paging (see the [page-slice note](../../implemented/bug-fix/2026-09-23-candidate-window-page-slice-hidden.md)).
 
 TSF adds four key actions: Shift toggles mode (repeat key-down events with bit
 30 of `lparam` are ignored so holding Shift does not flip mode repeatedly),
@@ -67,9 +70,11 @@ Shift/Tab/comma/period, repeat suppression, and English-mode key fallthrough.
 TSF lifecycle tests continue to pass: activate/deactivate, class factory,
 aggregation rejection, and unload counter.
 
-T-013 remains in progress until the build is installed on the VM and typing,
-paging, layer switching, mode switching, translation commit, and popup
-positioning are verified in Notepad.
+T-013 passed VM acceptance on 2026-09-23: paging, layer switching, mode
+switching, translation commit, popup visibility across pages, and popup
+positioning were verified in Notepad (see the
+[page-slice note](../../implemented/bug-fix/2026-09-23-candidate-window-page-slice-hidden.md)
+for the one defect found and fixed during that acceptance).
 
 ## Alternatives considered
 

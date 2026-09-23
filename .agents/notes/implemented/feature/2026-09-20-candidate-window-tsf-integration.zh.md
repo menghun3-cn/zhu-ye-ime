@@ -14,7 +14,7 @@ FR-004、FR-006 与 FR-013 要求候选窗跟随真实组合而不是静态演�
 
 `InputEngine` 新增 `CandidateLayer`（中文/译文）、从 0 开始的 `page` 与 `page_size`（默认 9，对应数字键 1-9）。`handle_letter` 与 `handle_backspace` 会把页码重置；`next_page`/`previous_page` 在两端回卷。`toggle_translation_layer` 只有在至少一个候选带非空译文时才进入译文层，因此窗口永远不会出现空白译文页。提交会回到中文层；即使上屏的是译文，学习用户词时也记录中文原词，而 `previous_word` 取实际提交文本用于 bigram 上下文。
 
-`candidate_ui_view` 生成候选窗消费的快照。引擎处于英文模式时视图为空，但组合串仍保留：英文打字期间弹窗隐藏，切回中文后恢复。
+`candidate_ui_view` 生成候选窗消费的快照。引擎处于英文模式时视图为空，但组合串仍保留：英文打字期间弹窗隐藏，切回中文后恢复。视图的 `items` 携带当前层的**全部**候选，由 `CandidateUiView::visible_items()` 按页切片——早期实现把 `items` 预切片成单页，导致翻页后弹窗隐藏（见[分页切片笔记](../../implemented/bug-fix/2026-09-23-candidate-window-page-slice-hidden.zh.md)）。
 
 TSF 新增四个键动作：Shift 切换模式（忽略 `lparam` 第 30 位标记的长按重复事件，按住 Shift 不会连续切换）、Tab 切换图层、逗号上翻、句号下翻。Tab 与翻页只在中文模式且有活动组合时才被输入法吃下；英文模式下这些键以及字母、Backspace、空格、回车、Esc、数字都放行给宿主。Shift 始终由输入法处理，保证可以从英文模式切回中文。
 
@@ -28,7 +28,7 @@ Shift 切到英文模式时候选窗立即隐藏，Tab/翻页/选择不再吃掉
 
 `cargo fmt`、`cargo clippy --all-targets -- -D warnings` 与 `cargo test --workspace` 均通过。新增覆盖：翻页与回卷、基于当前页的选择与预览、输入变化后页码重置、图层过滤、无译文拒绝进入译文层、译文提交语义与学习、模式切换保留组合、英文模式空视图、Shift/Tab/逗号/句号键分类、长按防抖以及英文模式功能键放行。TSF 生命周期测试继续通过：激活/停用、类工厂、拒绝聚合与卸载计数。
 
-T-013 保持“进行中”，直到构建安装到虚拟机并在记事本中验证输入、翻页、图层切换、模式切换、译文提交与弹窗定位。
+T-013 已于 2026-09-23 通过 VM 验收：记事本中翻页、图层切换、模式切换、译文提交、跨页弹窗可见性与弹窗定位均验证通过（验收中发现的唯一缺陷及修复见[分页切片笔记](../../implemented/bug-fix/2026-09-23-candidate-window-page-slice-hidden.zh.md)）。
 
 ## 曾考虑的替代方案
 

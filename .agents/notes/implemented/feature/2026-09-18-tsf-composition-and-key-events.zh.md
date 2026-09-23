@@ -14,7 +14,7 @@ Status: implemented
 
 按键映射为小型 `KeyAction` 集合：a-z 进入组合，Backspace 删除组合末尾；空格、回车、Esc 与 1-9 仅在已有组合时提交或取消。`OnTestKeyDown` 报告输入法是否要吃键；`OnKeyDown` 请求使用 `TF_ES_SYNC | TF_ES_READWRITE` 的同步读写编辑会话。若编辑会话无法获得，仍推进引擎状态，避免后续按键基于漂移状态继续。
 
-在编辑会话内，`ITfEditSession::DoEditSession` 执行一次 `apply_action` 回调。字母/Backspace 更新经 `ITfInsertAtSelection`、`ITfContextComposition::StartComposition` 与 `ITfRange::SetText` 完成；空格、回车、Esc 与数字通过 `EndComposition` 结束组合，或在没有组合时直接插入提交文本。TSF 文本写入后再同步引擎。
+在编辑会话内，`ITfEditSession::DoEditSession` 执行一次 `apply_action` 回调。字母/Backspace 更新以只读（query-only）模式经 `ITfInsertAtSelection` 定位插入点，再经 `ITfContextComposition::StartComposition` 与 `ITfRange::SetText` 写入；空格、回车、Esc 与数字通过 `EndComposition` 结束组合，或在没有组合时直接插入提交文本。TSF 文本写入后再同步引擎。刻意不使用 `InsertAtSelection` 的**写入**分支——见[写入路径崩溃笔记](../../implemented/bug-fix/2026-09-23-tsf-insert-at-selection-write-path-crash.zh.md)。
 
 输入行为本体位于 `crates/zhu-ye-ime/src/input.rs`，是带 M1 演示词典的纯 Rust `InputEngine`，候选生成、排序、选择与预览方法都可在无 Windows 环境下单测。共享运行时状态采用 `Rc<Mutex<EngineState>>` 而非 `Arc`：TSF apartment 回调始终在同一线程，且保存的 COM 接口不保证 `Send + Sync`。每个编辑会话回调对象携带一个 `Box<dyn FnOnce>`，只执行一次。
 
@@ -37,4 +37,4 @@ Status: implemented
 
 字母、Backspace、空格、回车、Esc 与 1-9 现在能产生 TSF 组合或提交文本，M1 演示词典会让 `nihao` 在组合路径中变成 `你好`。引擎与 TSF 适配层共 20 项单元测试通过，`cargo clippy --workspace --all-targets -- -D warnings` 通过，release DLL 导出校验通过。
 
-T-011 保持"进行中"，直到当前构建安装到真实 Windows 测试机（正在准备的虚拟机）并在记事本中验证输入为止。早先注册笔记中"M1 无按键处理"的描述已不匹配当前构建；本笔记代表当前 TSF 适配层的事实。候选窗渲染与完整键位交互（Shift/Tab/翻页）延后到 T-012/T-013。
+T-011 已于 2026-09-23 通过 VM 验收：记事本输入、组合、提交、翻页、图层与模式切换、用户词学习全部验证，零崩溃；崩溃根因与修复分别记录在[写入路径崩溃笔记](../../implemented/bug-fix/2026-09-23-tsf-insert-at-selection-write-path-crash.zh.md)与[分页切片笔记](../../implemented/bug-fix/2026-09-23-candidate-window-page-slice-hidden.zh.md)。早先注册笔记中“M1 无按键处理”的描述已不匹配当前构建；本笔记代表当前 TSF 适配层的事实。

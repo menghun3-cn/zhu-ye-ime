@@ -123,7 +123,7 @@ if (Test-Path -LiteralPath $legacyDictionary -PathType Leaf) {
 }
 
 & (Join-Path $PSScriptRoot 'verify-tsf-dll.ps1') -DllPath $targetDll
-if ($LASTEXITCODE -ne 0) {
+if (-not $?) {
     throw 'DLL 导出校验失败，安装中止。'
 }
 
