@@ -1,0 +1,8 @@
+# Bilingual-pair consistency record: the git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record with the project's
+# translation-pairing verifier:
+#   git hash-object 2026-09-19-full-pinyin-segmentation-core.md
+#   git hash-object 2026-09-19-full-pinyin-segmentation-core.zh.md
+2026-09-19-full-pinyin-segmentation-core.md: e2ec79f4433d65b6cae1a49e9e253b5e41fecf88
+2026-09-19-full-pinyin-segmentation-core.zh.md: 89671cf3af7fa1c0c05dca1fa5086e5d7e4a1556

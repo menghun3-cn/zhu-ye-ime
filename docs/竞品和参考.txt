@@ -1,0 +1,5 @@
+水杉输入法
+https://github.com/metasequoiaime/MSIME-Windows
+
+青简输入法
+https://github.com/qingjian-team/qingjian

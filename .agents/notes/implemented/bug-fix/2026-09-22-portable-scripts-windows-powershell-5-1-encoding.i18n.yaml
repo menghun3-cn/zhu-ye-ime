@@ -1,0 +1,8 @@
+# Bilingual-pair consistency record: the git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record with the project's
+# translation-pairing verifier:
+#   git hash-object 2026-09-22-portable-scripts-windows-powershell-5-1-encoding.md
+#   git hash-object 2026-09-22-portable-scripts-windows-powershell-5-1-encoding.zh.md
+2026-09-22-portable-scripts-windows-powershell-5-1-encoding.md: 35afffc5f5ade3e16ca1287153a2c6a8d65b7ed5
+2026-09-22-portable-scripts-windows-powershell-5-1-encoding.zh.md: b1dbda9ce828a94536098d8bad196bbf4923978b
