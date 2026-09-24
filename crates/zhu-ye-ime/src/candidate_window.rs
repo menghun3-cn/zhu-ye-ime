@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Gdi::{
     COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET, DEFAULT_GUI_FONT,
     DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
     FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
@@ -335,7 +335,13 @@ impl CandidateWindowState {
             let row = to_win_rect(self.metrics.row_rect(index));
             let is_selected = selected == Some(index);
             if is_selected {
-                fill_rect(hdc, row, self.theme.highlight_background);
+                // 搜狗风选中块：圆角浅蓝块（与窗口圆角一致的半径）。
+                fill_round_rect(
+                    hdc,
+                    row,
+                    self.theme.highlight_background,
+                    self.metrics.corner_radius,
+                );
             }
             let Some(item) = visible.get(index) else {
                 continue;
@@ -718,14 +724,36 @@ fn paint_background(
     }
 }
 
-fn fill_rect(hdc: HDC, rect: RECT, color: UiColor) {
+/// 圆角填充矩形（选中块用）；无边框，圆角半径与窗口一致。
+fn fill_round_rect(hdc: HDC, rect: RECT, color: UiColor, radius: i32) {
     unsafe {
         let brush = CreateSolidBrush(COLORREF(color.to_colorref()));
-        if brush.is_invalid() {
+        let pen = CreatePen(PS_NULL, 0, COLORREF(color.to_colorref()));
+        if brush.is_invalid() || pen.is_invalid() {
+            if !brush.is_invalid() {
+                let _ = DeleteObject(brush.into());
+            }
+            if !pen.is_invalid() {
+                let _ = DeleteObject(pen.into());
+            }
             return;
         }
-        FillRect(hdc, &rect, brush);
+        let old_brush = SelectObject(hdc, brush.into());
+        let old_pen = SelectObject(hdc, pen.into());
+        let diameter = radius.saturating_mul(2);
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            diameter,
+            diameter,
+        );
+        SelectObject(hdc, old_brush);
+        SelectObject(hdc, old_pen);
         let _ = DeleteObject(brush.into());
+        let _ = DeleteObject(pen.into());
     }
 }
 

@@ -149,22 +149,24 @@ pub struct SystemColors {
 pub fn theme(kind: UiThemeKind) -> CandidateUiTheme {
     match kind {
         UiThemeKind::Light => CandidateUiTheme {
-            background: UiColor::rgb(0xFA, 0xFA, 0xFA),
+            // 搜狗经典风（浅色）：白底、浅灰圆角边框、浅蓝圆角选中块+深蓝文字、序号/译文浅灰。
+            background: UiColor::rgb(0xFF, 0xFF, 0xFF),
             foreground: UiColor::rgb(0x1F, 0x1F, 0x1F),
-            secondary: UiColor::rgb(0x6E, 0x6E, 0x6E),
-            border: UiColor::rgb(0xD7, 0xD7, 0xD7),
-            highlight_background: UiColor::rgb(0xE8, 0xF0, 0xFE),
+            secondary: UiColor::rgb(0x99, 0x99, 0x99),
+            border: UiColor::rgb(0xE5, 0xE5, 0xE5),
+            highlight_background: UiColor::rgb(0xE6, 0xF2, 0xFE),
             highlight_foreground: UiColor::rgb(0x0B, 0x57, 0xD0),
-            marker: UiColor::rgb(0x0B, 0x57, 0xD0),
+            marker: UiColor::rgb(0x99, 0x99, 0x99),
         },
         UiThemeKind::Dark => CandidateUiTheme {
+            // 搜狗经典风（深色）同构变体：深底、深蓝灰选中块、浅灰序号/译文。
             background: UiColor::rgb(0x20, 0x20, 0x20),
             foreground: UiColor::rgb(0xED, 0xED, 0xED),
             secondary: UiColor::rgb(0x9E, 0x9E, 0x9E),
             border: UiColor::rgb(0x3C, 0x3C, 0x3C),
             highlight_background: UiColor::rgb(0x3A, 0x4A, 0x5C),
             highlight_foreground: UiColor::rgb(0xFF, 0xFF, 0xFF),
-            marker: UiColor::rgb(0x8A, 0xB4, 0xF8),
+            marker: UiColor::rgb(0x9E, 0x9E, 0x9E),
         },
         UiThemeKind::HighContrast => theme_from_system_colors(SystemColors {
             window: 0xFF00_0000,
@@ -375,22 +377,10 @@ impl CandidateMetrics {
     }
 }
 
-/// 候选序号标记：1-9 使用圈数字，其余使用 `10.` 样式。
+/// 候选序号标记：纯数字（无圈无点），翻页后 10/11 等样式一致。
 #[must_use]
 pub fn index_marker(index: usize) -> String {
-    match index {
-        0 => "①",
-        1 => "②",
-        2 => "③",
-        3 => "④",
-        4 => "⑤",
-        5 => "⑥",
-        6 => "⑦",
-        7 => "⑧",
-        8 => "⑨",
-        _ => return format!("{}.", index + 1),
-    }
-    .to_owned()
+    format!("{}", index + 1)
 }
 
 /// 估算文本像素宽度：ASCII 约为 0.55 倍字高，CJK 与其他字符约 1 倍字高。
@@ -443,7 +433,7 @@ fn bgr_to_rgb(color: u32) -> u32 {
 mod tests {
     use super::{
         fit_text, index_marker, theme, theme_from_system_colors, CandidateMetrics, CandidateUiItem,
-        CandidateUiView, SystemColors, UiThemeKind, DEFAULT_PAGE_SIZE,
+        CandidateUiView, SystemColors, UiColor, UiThemeKind, DEFAULT_PAGE_SIZE,
     };
     use zhu_ye_core::candidate::CandidateSource;
 
@@ -554,6 +544,16 @@ mod tests {
     }
 
     #[test]
+    fn 序号纯数字无圈无点且翻页后样式一致() {
+        for index in 0..=13 {
+            let marker = index_marker(index);
+            assert_eq!(marker, format!("{}", index + 1), "序号 {index}");
+            assert!(!marker.contains('①') && !marker.contains('⑨'));
+            assert!(!marker.ends_with('.'));
+        }
+    }
+
+    #[test]
     fn 长文本按宽度截断且保留省略号() {
         let long_cjk = "这是一个特别长的候选词用来验证文本不会溢出窗口边界".repeat(3);
         let fitted = fit_text(&long_cjk, 180, 16);
@@ -562,7 +562,22 @@ mod tests {
 
         let short = "你好";
         assert_eq!(fit_text(short, 180, 16), short);
-        assert_eq!(index_marker(0), "①");
-        assert_eq!(index_marker(9), "10.");
+        assert_eq!(index_marker(0), "1");
+        assert_eq!(index_marker(9), "10");
+    }
+
+    #[test]
+    fn 搜狗风色板结构与强调关系() {
+        let light = theme(UiThemeKind::Light);
+        assert_eq!(light.background, UiColor::rgb(0xFF, 0xFF, 0xFF));
+        assert_eq!(light.highlight_background, UiColor::rgb(0xE6, 0xF2, 0xFE));
+        assert_eq!(light.highlight_foreground, UiColor::rgb(0x0B, 0x57, 0xD0));
+        // 序号/译文浅灰：与主文本和选中块均可区分。
+        assert_eq!(light.marker, light.secondary);
+        assert_ne!(light.marker, light.foreground);
+
+        let dark = theme(UiThemeKind::Dark);
+        assert_eq!(dark.marker, dark.secondary);
+        assert_ne!(dark.marker, dark.foreground);
     }
 }
