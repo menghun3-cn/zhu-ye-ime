@@ -38,10 +38,10 @@
 | T-024 | 已完成 | 主机侧端到端回归（核心输入闭环） | FR-001 至 FR-007、FR-014 | M5 | 新增 `zhu-ye-ime` 的 `host-e2e` 检查器与 `scripts/e2e.ps1` 验收入口；种子词典 17 项检查与真实词典 smoke 4 项已通过，fmt/clippy/workspace tests 与脚本门禁全部通过；覆盖切分/排序/数字选择/翻页交互/模式切换/用户词/译文层/正反查；见 [Agent Note](../.agents/notes/implemented/testing/2026-09-21-host-e2e-regression.md) |
 | T-025 | 已完成 | 便携包脚本适配 Windows PowerShell 5.1 UTF-8 编码 | FR-010、FR-013、FR-014 | M1 | 全部 PowerShell 脚本加 UTF-8 BOM，打包脚本复写 BOM，`README-测试.txt` 同步；Windows PowerShell 5.1 下已验证解析与中文错误消息；见 [Agent Note](../.agents/notes/implemented/bug-fix/2026-09-22-portable-scripts-windows-powershell-5-1-encoding.md) |
 | T-026 | 已完成 | 版本化 DLL 无锁升级机制固化 | FR-010、FR-013 | M5 | install/uninstall/ime-identity/verify-tsf-dll 已固化：版本化命名（`-Version` 显式或 SHA-256 前 8 位内容指纹）、复制→PE 头静态校验（MZ+PE 签名，实测 LoadLibraryEx 对文本文件不报错）+导出校验→词典复制（源==目标跳过）→注册表切换（切换前快照上一版）→失败回滚（Set-TsfRegistrationRollback 还原 InProcServer32/IconFile，无旧版则清空注册）→旧版延迟清理（Add-TsfDelayedCleanup：无占用立即删，占用则 DELAY rename 为 `*.zy-del`，因平台 MoveFileEx 删除操作返回 ERROR_PATH_NOT_FOUND）；VM 演练 v3 全场景通过（坏 DLL PE 拒绝且注册不动/坏副本删除/v6→v7 无锁切换/卸载全清/备份词典重装 v8）；见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-23-versioned-dll-deployment-and-dictionary-location.md) |
-| T-027 | 待办 | 恢复 VM 交互会话后补做 T-017 首轮 UI 级日常输入观察 | FR-008、FR-013 | 观察期 | T-017 首轮观察（2026-09-24）发现验收 VM 会话 1 处于 Disc 状态（输入桌面不可用，SendKeys/截屏被拒，explorer 无法重启），UI 级日常输入 smoke 无法执行；先以引擎级输入环代替；待会话恢复（RDP/控制台重启 Shell）后补做 vm_ui_test5 全场景 |
+| T-027 | 待办 | 恢复 VM 交互会话后补做 T-017 首轮 UI 级观察 | FR-008、FR-013 | 观察期 | T-017 首轮观察（2026-09-24）发现验收 VM 会话 1 处于 Disc 状态（输入桌面不可用，SendKeys/截屏被拒，explorer 无法重启），UI 级日常输入 smoke 无法执行；先以引擎级输入环代替；待会话恢复（RDP/控制台重启 Shell）后补做 vm_ui_test5 全场景，并补测宿主内候选刷新端到端计时（FR-011 ≤30ms/目标≤15ms） |
 
 ## 周期任务登记
 
 | ID | 周期 | 首轮周期 | 处理规则 | 最近结论 |
 | --- | --- | --- | --- | --- |
-| T-017 | 每 14 天 | 2026-09-18 至 2026-10-02 | 执行日常输入、性能、稳定性检查；结论追加 todos-done；发现问题创建新任务 | 首轮观察执行中（2026-09-24 日常输入 smoke + 性能采样 + 2h 稳定性会话）；轮末 2026-10-02 到期后正式登记结论 |
+| T-017 | 每 14 天 | 2026-09-18 至 2026-10-02 | 执行日常输入、性能、稳定性检查；结论追加 todos-done；发现问题创建新任务 | 首轮轮中期观察已登记（G-010，2026-09-24）：稳定性/性能达标、无产品缺陷；UI 级输入观察受会话限制待补（T-027）；轮末 2026-10-02 正式复核 |
