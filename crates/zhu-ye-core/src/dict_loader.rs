@@ -493,6 +493,71 @@ impl Dictionary for DictionaryFile {
         found.sort_by_key(|entry| std::cmp::Reverse(entry.frequency));
         found
     }
+
+    fn lookup_prefix(&self, pinyin_prefix: &str) -> Vec<DictionaryEntry> {
+        if pinyin_prefix.is_empty() {
+            return Vec::new();
+        }
+        // 拼音索引按拼音串升序排列：先二分到首个 >= 前缀的位置，再线性扫描
+        // 仍以前缀开头的记录，把各拼音下的词条汇总后按词频降序返回。
+        let mut low = 0usize;
+        let mut high = self.header.pinyin_index_count as usize;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let record = PinyinIndexRecord::new(
+                &self.index_records()
+                    [mid * PINYIN_INDEX_RECORD_SIZE..(mid + 1) * PINYIN_INDEX_RECORD_SIZE],
+            );
+            let key = self.text_unchecked(
+                u32::try_from(record.pinyin_offset()).expect("拼音索引偏移在 u32 内"),
+                record.pinyin_len(),
+            );
+            if key.as_bytes() < pinyin_prefix.as_bytes() {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let mut found = Vec::new();
+        for index in low..self.header.pinyin_index_count as usize {
+            let record = PinyinIndexRecord::new(
+                &self.index_records()
+                    [index * PINYIN_INDEX_RECORD_SIZE..(index + 1) * PINYIN_INDEX_RECORD_SIZE],
+            );
+            let key = self.text_unchecked(
+                u32::try_from(record.pinyin_offset()).expect("拼音索引偏移在 u32 内"),
+                record.pinyin_len(),
+            );
+            if !key.starts_with(pinyin_prefix) {
+                break;
+            }
+            for entry_index in record.entry_start()..record.entry_start() + record.entry_count() {
+                let entry = EntryRecord::new(
+                    &self.entry_records()[entry_index as usize * ENTRY_RECORD_SIZE
+                        ..(entry_index as usize + 1) * ENTRY_RECORD_SIZE],
+                );
+                let entry_pinyin = self.text_unchecked(entry.pinyin_offset(), entry.pinyin_len());
+                let translation = if entry.translation_len() == 0 {
+                    None
+                } else {
+                    Some(
+                        self.text_unchecked(entry.translation_offset(), entry.translation_len())
+                            .to_owned(),
+                    )
+                };
+                found.push(DictionaryEntry {
+                    word: self
+                        .text_unchecked(entry.word_offset(), entry.word_len())
+                        .to_owned(),
+                    pinyin: entry_pinyin.to_owned(),
+                    translation,
+                    frequency: u64::from(entry.frequency()),
+                });
+            }
+        }
+        found.sort_by_key(|entry| std::cmp::Reverse(entry.frequency));
+        found
+    }
 }
 
 impl BigramModel for DictionaryFile {
@@ -765,6 +830,32 @@ mod tests {
         let first = file.lookup("de");
         let texts: Vec<&str> = first.iter().map(|entry| entry.word.as_str()).collect();
         assert_eq!(texts, vec!["的", "得", "地"]);
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 拼音前缀查询按词频降序返回() {
+        let dir = temp_dir("prefix");
+        let path = dir.join("prefix.zyct");
+        let bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let file = DictionaryFile::open(&path).unwrap();
+
+        // `nih` 前缀：nihao 下的 你好(100)/尼好(1)，按词频降序。
+        let nih = file.lookup_prefix("nih");
+        let words: Vec<&str> = nih.iter().map(|e| e.word.as_str()).collect();
+        assert_eq!(words, vec!["你好", "尼好"]);
+        assert!(nih.iter().all(|e| e.pinyin.starts_with("nih")));
+        // 短前缀跨多个拼音仍按词频降序；`ni` 应包含 ni 与 nihao 两组。
+        let ni = file.lookup_prefix("ni");
+        assert!(ni.iter().any(|e| e.word == "你"));
+        assert!(ni.iter().any(|e| e.word == "你好"));
+        for entry in &ni {
+            assert!(entry.pinyin.starts_with("ni"));
+        }
+        assert!(file.lookup_prefix("zzzzz").is_empty());
+        assert!(file.lookup_prefix("").is_empty());
         drop(file);
         std::fs::remove_dir_all(dir).unwrap();
     }

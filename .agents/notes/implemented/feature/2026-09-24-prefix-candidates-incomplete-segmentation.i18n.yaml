@@ -1,0 +1,8 @@
+# Bilingual-pair consistency record: the git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record with the project's
+# translation-pairing verifier:
+#   git hash-object 2026-09-24-prefix-candidates-incomplete-segmentation.md
+#   git hash-object 2026-09-24-prefix-candidates-incomplete-segmentation.zh.md
+2026-09-24-prefix-candidates-incomplete-segmentation.md: d711c67d40adc8e57d93f86bb54fa740c161b56e
+2026-09-24-prefix-candidates-incomplete-segmentation.zh.md: 3fc9cbed80c78abf02e8515c72ff7f08b5b807a1

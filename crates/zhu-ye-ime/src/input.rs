@@ -20,6 +20,9 @@ use crate::candidate_ui::{CandidateUiItem, CandidateUiView};
 /// 单页候选数，与数字键 1-9 一一对应；翻页按此分页。
 pub const CANDIDATE_PAGE_SIZE: usize = 9;
 
+/// 前缀候选（T-029）补全组最多进入排序的条数；防止短前缀命中过多词条。
+const PREFIX_COMPLETION_CAP: usize = 32;
+
 /// 输入模式。T-013 接入 Shift 切换；这里先提供状态与切换方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -499,13 +502,27 @@ impl InputEngine {
     }
 
     fn refresh_candidates(&mut self) {
-        let candidates = zhu_ye_core::generate_candidates(
+        let context = RankingContext::new(self.previous_word.as_deref(), &self.user_dictionary);
+        // T-029：输入串存在尾部残缺音节时走前缀候选（补全组优先 + 完成组回退），
+        // 两组分别经排序模型排序后按组间顺序融合，确保补全组始终在前。
+        let groups = zhu_ye_core::generate_prefix_candidates(
             &self.table,
             self.dictionary.as_ref(),
             &self.composing,
+            PREFIX_COMPLETION_CAP,
         );
-        let context = RankingContext::new(self.previous_word.as_deref(), &self.user_dictionary);
-        self.candidates = self.ranking.rank(candidates, &context);
+        if !groups.completions.is_empty() || !groups.completed.is_empty() {
+            let completions = self.ranking.rank(groups.completions, &context);
+            let completed = self.ranking.rank(groups.completed, &context);
+            self.candidates = zhu_ye_core::merge_candidate_groups(completions, completed);
+        } else {
+            let candidates = zhu_ye_core::generate_candidates(
+                &self.table,
+                self.dictionary.as_ref(),
+                &self.composing,
+            );
+            self.candidates = self.ranking.rank(candidates, &context);
+        }
         self.cached_translation_candidates = self
             .candidates
             .iter()
@@ -627,6 +644,57 @@ mod tests {
             .collect();
         assert!(texts.contains(&"先"));
         assert!(texts.contains(&"西安"));
+    }
+
+    #[test]
+    fn nih前缀候选补全组优先且含完成组() {
+        let mut eng = engine();
+        type_text(&mut eng, "nih");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        // 组 2（补齐 nih → nihao）在前：你好/尼好；组 1（最后完整音节 ni）在后：你。
+        assert_eq!(&texts[..3], &["你好", "尼好", "你"]);
+        assert_eq!(eng.candidates()[0].translation.as_deref(), Some("hello"));
+
+        let mut other = engine();
+        type_text(&mut other, "nih");
+        assert_eq!(eng.candidates(), other.candidates());
+    }
+
+    #[test]
+    fn 无完整音节开头的输入不出现前缀候选() {
+        let mut eng = engine();
+        type_text(&mut eng, "zh");
+        assert!(eng.candidates().is_empty());
+
+        let mut eng2 = engine();
+        type_text(&mut eng2, "z");
+        assert!(eng2.candidates().is_empty());
+    }
+
+    #[test]
+    fn backspace从残缺回到完整音节重算候选() {
+        let mut engine = engine();
+        type_text(&mut engine, "nih");
+        assert!(engine.candidates().iter().any(|c| c.text == "你好"));
+        assert!(engine.handle_backspace());
+        assert_eq!(engine.composing(), "ni");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["你"]);
+    }
+
+    #[test]
+    fn 选择前缀候选后残留拼音丢弃() {
+        let mut engine = engine();
+        type_text(&mut engine, "nih");
+        let selected = engine.select_index(2); // 完成组"你"（对应 ni，残留 h 丢弃）
+        assert_eq!(selected, Some("你".to_owned()));
+        assert_eq!(engine.composing(), "");
+        assert!(engine.candidates().is_empty());
+        assert!(engine.user_dictionary().frequency_by_word("你") > 0);
     }
 
     #[test]

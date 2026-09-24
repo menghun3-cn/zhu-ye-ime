@@ -124,6 +124,28 @@ fn seed_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     }
 
     engine.handle_escape();
+    type_text(&mut engine, "nih");
+    let prefix_texts: Vec<&str> = engine
+        .candidates()
+        .iter()
+        .map(|candidate| candidate.text.as_str())
+        .collect();
+    if prefix_texts.starts_with(&["你好", "尼好", "你"]) {
+        runner.pass("前缀候选补全组优先且含完成组");
+    } else {
+        runner.fail(
+            "前缀候选补全组优先且含完成组",
+            &format!("实际: {prefix_texts:?}"),
+        );
+    }
+    engine.handle_escape();
+    type_text(&mut engine, "zh");
+    if engine.candidates().is_empty() {
+        runner.pass("无完整音节开头无前缀候选");
+    } else {
+        runner.fail("无完整音节开头无前缀候选", "zh 不应出现候选");
+    }
+    engine.handle_escape();
 
     let mut expected: Vec<(String, Option<String>)> = Vec::new();
     type_text(&mut engine, "nihao");

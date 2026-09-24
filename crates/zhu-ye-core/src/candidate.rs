@@ -76,6 +76,73 @@ impl Candidate {
 #[derive(Debug, Clone, Default)]
 pub struct CandidateSorter;
 
+/// 前缀候选分组（T-029）：输入串无法完整切分时使用。
+///
+/// - `completions`：组 2，拼音以输入串为前缀的完整词（如 `nih` → 你好），展示在前；
+/// - `completed`：组 1，输入串尾部残缺音节之前的最后完整音节的候选（如 `nih` → ni 的你/泥），展示在后。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrefixCandidateGroups {
+    /// 组 2：前缀补全词。
+    pub completions: Vec<Candidate>,
+    /// 组 1：最后完整音节的候选。
+    pub completed: Vec<Candidate>,
+}
+
+/// 前缀候选生成（T-029）：输入串存在尾部残缺音节时，返回补全组与完成组；
+/// 输入为空、可完整切分（调用方应走 `generate_candidates`）或开头无完整音节时两组皆空。
+/// 组 2 按词频降序截断到 `completion_cap` 条以内，控制查询成本。
+#[must_use]
+pub fn generate_prefix_candidates(
+    table: &SyllableTable,
+    dictionary: &dyn Dictionary,
+    pinyin: &str,
+    completion_cap: usize,
+) -> PrefixCandidateGroups {
+    let empty = PrefixCandidateGroups::default();
+    if pinyin.is_empty() || !segment_all(table, pinyin).is_empty() {
+        return empty;
+    }
+    // 找最长可完整切分前缀 P；找不到（如 `z`/`zh`）则两组皆空，避免前缀泛滥。
+    let mut complete_len = 0usize;
+    for cut in (1..pinyin.len()).rev() {
+        if !segment_all(table, &pinyin[..cut]).is_empty() {
+            complete_len = cut;
+            break;
+        }
+    }
+    if complete_len == 0 {
+        return empty;
+    }
+    let completions = dictionary
+        .lookup_prefix(pinyin)
+        .into_iter()
+        .map(|entry| candidate_from_entry(&entry))
+        .take(completion_cap.max(1))
+        .collect();
+    let completed = generate_candidates(table, dictionary, &pinyin[..complete_len]);
+    PrefixCandidateGroups {
+        completions,
+        completed,
+    }
+}
+
+/// 组 2 + 组 1 有序融合：保留组间顺序（补全组在前），同文本去重、优先保留补全组。
+/// 与 `deduplicate_and_sort` 的去重粒度一致（按文本），保证展示确定。
+#[must_use]
+pub fn merge_candidate_groups(
+    completions: Vec<Candidate>,
+    completed: Vec<Candidate>,
+) -> Vec<Candidate> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::with_capacity(completions.len() + completed.len());
+    for candidate in completions.into_iter().chain(completed) {
+        if seen.insert(candidate.text.clone()) {
+            merged.push(candidate);
+        }
+    }
+    merged
+}
+
 /// 根据拼音串生成候选：整词优先，无整词时按音节切分组合，最后合并去重并确定性排序。
 pub fn generate_candidates(
     table: &SyllableTable,
@@ -293,8 +360,8 @@ mod tests {
 
     use crate::bigram::InMemoryBigramModel;
     use crate::candidate::{
-        generate_candidates, Candidate, CandidateSorter, RankingConfig, RankingContext,
-        RankingModel, StaticRankingModel,
+        generate_candidates, generate_prefix_candidates, merge_candidate_groups, Candidate,
+        CandidateSorter, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
     };
     use crate::user_dict::UserDictionary;
 
@@ -451,5 +518,103 @@ mod tests {
         let candidates = generate_candidates(&table, &dictionary, "nihao");
         let texts: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["你好"]);
+    }
+
+    #[test]
+    fn 前缀候选补全组优先于完成组() {
+        use crate::dict::{DictionaryEntry, InMemoryDictionary};
+        use crate::pinyin::SyllableTable;
+
+        let table = SyllableTable::standard();
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你好", "nihao", 100).with_translation("hello"),
+            DictionaryEntry::new("泥好", "nihao", 30),
+            DictionaryEntry::new("你", "ni", 200),
+            DictionaryEntry::new("泥", "ni", 50),
+        ]);
+        let groups = generate_prefix_candidates(&table, &dictionary, "nih", 32);
+        let completions: Vec<&str> = groups.completions.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(completions, vec!["你好", "泥好"]);
+        let completed: Vec<&str> = groups.completed.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(completed, vec!["你", "泥"]);
+
+        let merged = merge_candidate_groups(groups.completions, groups.completed);
+        let texts: Vec<&str> = merged.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["你好", "泥好", "你", "泥"]);
+    }
+
+    #[test]
+    fn 前缀候选补全截断到上限() {
+        use crate::dict::{DictionaryEntry, InMemoryDictionary};
+        use crate::pinyin::SyllableTable;
+
+        let table = SyllableTable::standard();
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你好", "nihao", 100),
+            DictionaryEntry::new("泥好", "nihao", 30),
+            DictionaryEntry::new("你", "ni", 200),
+        ]);
+        let groups = generate_prefix_candidates(&table, &dictionary, "nih", 1);
+        assert_eq!(groups.completions.len(), 1);
+        assert_eq!(groups.completions[0].text, "你好");
+        // 完成组不受补全上限影响。
+        assert_eq!(
+            groups
+                .completed
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["你"]
+        );
+    }
+
+    #[test]
+    fn 前缀候选无完整音节或可完整切分时为空() {
+        use crate::dict::{DictionaryEntry, InMemoryDictionary};
+        use crate::pinyin::SyllableTable;
+
+        let table = SyllableTable::standard();
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你好", "nihao", 100),
+            DictionaryEntry::new("你", "ni", 200),
+        ]);
+        // `zh` 前无完整音节：两组皆空，避免前缀泛滥。
+        let groups = generate_prefix_candidates(&table, &dictionary, "zh", 32);
+        assert!(groups.completions.is_empty());
+        assert!(groups.completed.is_empty());
+        // 可完整切分时不由前缀逻辑处理。
+        let groups = generate_prefix_candidates(&table, &dictionary, "nihao", 32);
+        assert!(groups.completions.is_empty());
+        assert!(groups.completed.is_empty());
+    }
+
+    #[test]
+    fn 前缀候选生成确定性() {
+        use crate::dict::{DictionaryEntry, InMemoryDictionary};
+        use crate::pinyin::SyllableTable;
+
+        let table = SyllableTable::standard();
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你好", "nihao", 100),
+            DictionaryEntry::new("泥好", "nihao", 30),
+            DictionaryEntry::new("你", "ni", 200),
+        ]);
+        let first = generate_prefix_candidates(&table, &dictionary, "nih", 32);
+        let second = generate_prefix_candidates(&table, &dictionary, "nih", 32);
+        assert_eq!(first, second);
+        assert_eq!(
+            merge_candidate_groups(first.completions, first.completed),
+            merge_candidate_groups(second.completions, second.completed)
+        );
+    }
+
+    #[test]
+    fn 融合去重保留补全组() {
+        let merged = merge_candidate_groups(
+            vec![Candidate::new("你好", 100)],
+            vec![Candidate::new("你好", 1), Candidate::new("泥", 50)],
+        );
+        let texts: Vec<&str> = merged.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["你好", "泥"]);
     }
 }
