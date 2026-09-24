@@ -33,6 +33,18 @@ seed dictionary.
   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)`, then
   `GetModuleFileNameW` for the directory. The mechanism works under any
   deployment file name, versioned or not.
+- **Solidified installer/uninstaller (T-026).** `install.ps1` runs the
+  deployment as one transaction: copy the new DLL as `zhu-ye-ime-<Version>.dll`
+  (or `zhu-ye-ime-<sha256-8>.dll` when `-Version` is omitted), statically
+  verify the PE header (MZ magic + `e_lfanew` PE signature) before the
+  `LoadLibraryEx(DONT_RESOLVE_DLL_REFERENCES)` export check — the loader call
+  alone accepts some invalid files, so the header check is mandatory — copy the
+  dictionary (skipped when source equals target), then switch the CLSID
+  `InProcServer32`. The previous DLL path is snapshotted before the switch, so a
+  late failure rolls back `InProcServer32`/`IconFile` to the old build or, when
+  there is none, removes the registration entirely. Old versioned DLLs go
+  through `Add-TsfDelayedCleanup`: immediate delete when unlocked, otherwise a
+  deferred rename to `<name>.zy-del` that the next install/uninstall sweeps.
 
 ## Alternatives considered
 
@@ -43,8 +55,11 @@ processes degrades the interactive session used for acceptance.
 **Always remove the old versioned DLL right after the registry switch.**
 Rejected: a process that still had the old image mapped (e.g. a lingering
 Notepad) keeps using the file; immediate delete fails or corrupts that session.
-Deferred cleanup with `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)` is the intended
-end state in T-026.
+Deferred cleanup with `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)` is the end
+state. Measured on the VM platform (Windows Server 2019), the delete-only
+variant (null destination) fails with `ERROR_PATH_NOT_FOUND` even for valid
+locked files — only the rename variant registers — so the deferred mechanism
+renames to `<name>.zy-del` and sweeps on the next install/uninstall.
 
 **Keep a plain unversioned name and cache the install directory at first load.**
 Rejected: the first load could come from an old image; the module-anchor lookup is
@@ -56,6 +71,15 @@ Versioned deployment is exercised on the VM as v4 → v5 without any lock fight,
 and `dict-ok path="C:\zhu-ye-test\tsf\dictionary.zyct"` confirms the anchor-based
 lookup finds the real dictionary under the versioned file name. Explorer restarts
 automatically and loads the registry-pointed build, which doubles as the
-upgrade/reload mechanism. T-026 is tracked in the todos list to solidify the
-mechanism in `install.ps1`/`uninstall.ps1` (copy new version, switch registry,
-`MoveFileEx` delayed cleanup, rollback path).
+upgrade/reload mechanism. The mechanism is now solidified in
+`install.ps1`/`uninstall.ps1` (T-026) and passed the full VM drill on
+2026-09-24: a text-file "bad DLL" source is rejected by the PE-header check with
+the registration untouched and the bad copy removed; v6 → v7 upgrades switch the
+registry with zero lock conflicts (old DLLs deleted immediately since nothing
+holds them); uninstall clears the registration plus all DLLs/dictionary and
+Program Files residue; reinstall restores from a backup dictionary. Explorer
+module-load verification is unavailable on the acceptance VM (session 1 is stuck
+in Disc state and cannot restart the shell), so mechanism verification relies on
+the registry switch + file cleanup + PE/export checks + `Test-TsfRegistration`
+instead. The anchor-based dictionary lookup keeps working under any versioned
+file name.

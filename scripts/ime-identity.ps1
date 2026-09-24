@@ -1,15 +1,16 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
-竹叶输入法 TSF 身份常量与注册表工具。
+竹叶输入法 TSF 身份常量与安装/卸载共享工具。
 
 .DESCRIPTION
 统一维护 TIP CLSID、语言 Profile GUID、键盘类别 GUID、默认安装目录与 DLL 名称，
-并为安装/卸载脚本提供创建、删除和校验 HKLM TSF 注册的辅助函数。
+为安装/卸载脚本提供创建、删除和校验 HKLM TSF 注册的辅助函数，以及
+版本化 DLL 升级所需的 InProcServer32 读写与 MoveFileEx 延迟清理工具。
 
 .NOTES
 常量必须与 crates/zhu-ye-ime/src/tsf.rs 中 CLSID_ZHU_YE_TIP、PROFILE_GUID_ZHU_YE 保持一致。
-本文件只读共享，不含任何写注册表副作用。
+本文件只读共享，dot-source 加载本身不含任何副作用。
 #>
 Set-StrictMode -Version Latest
 
@@ -123,5 +124,82 @@ function Test-TsfRegistration {
         return ($defaultValue -eq $DllPath -and $threading -eq 'Apartment')
     } finally {
         $inprocKey.Dispose()
+    }
+}
+
+function Get-TsfInprocServerDefault {
+    <#
+    .SYNOPSIS
+    读取当前注册的 InProcServer32 (默认) DLL 路径；未注册时返回 $null。
+    #>
+    $inprocPath = "SOFTWARE\Classes\CLSID\$($script:TsfIdentity['TipClsid'])\InProcServer32"
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($inprocPath, $false)
+    if ($null -eq $key) { return $null }
+    try {
+        return $key.GetValue($null)
+    } finally {
+        $key.Dispose()
+    }
+}
+
+function Set-TsfInprocServerDefault {
+    <#
+    .SYNOPSIS
+    仅改写 InProcServer32 (默认) DLL 路径，不触碰 TSF 注册的其余键（用于升级失败回滚）。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$DllPath
+    )
+    Set-TsfRegistryValue -Path "SOFTWARE\Classes\CLSID\$($script:TsfIdentity['TipClsid'])\InProcServer32" -Name $null -Value $DllPath
+}
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ZhuYeMoveFile {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, uint dwFlags);
+}
+'@
+
+function Add-TsfDelayedCleanup {
+    <#
+    .SYNOPSIS
+    清理被占用、无法立即删除的旧版本 DLL（无占用时立即删除，占用时登记
+    MoveFileEx 重启后迁移清理），实现无锁升级/卸载。
+
+    .DESCRIPTION
+    平台限制：在本项目目标 Windows Server 上实测，
+    MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT) 的"删除"操作（lpNewFileName 为
+    NULL 或空串）返回 ERROR_PATH_NOT_FOUND，而"改名"操作可用；因此占用文件
+    的延迟清理退化为改名到 "<原名>.zy-del"，由下一次安装/卸载清扫该残留
+    （改名后的文件不再被任何进程映射，可立即删除）。
+    文件在磁盘上不存在视为已清理；标记失败仅输出警告，不抛错。
+    #>
+    param(
+        [Parameter(Mandatory)][string[]]$Paths
+    )
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        try {
+            Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+            Write-Host "  已删除: $path"
+            continue
+        } catch {
+            # 被进程占用，改走重启后迁移清理。
+        }
+        $sweepTarget = "$path.zy-del"
+        try {
+            # 清扫上一次重启遗留的同名 .zy-del（目标不存在时重启改名才会成功）。
+            Remove-Item -LiteralPath $sweepTarget -Force -ErrorAction Stop
+        } catch {
+        }
+        if ([ZhuYeMoveFile]::MoveFileEx($path, $sweepTarget, 5)) {
+            Write-Host "  已登记重启后迁移清理: $path -> $sweepTarget"
+        } else {
+            $errorCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Warning "延迟清理标记失败（Win32 $errorCode）: $path"
+        }
     }
 }
