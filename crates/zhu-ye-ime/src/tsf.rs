@@ -32,7 +32,7 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_MENU,
-    VK_OEM_COMMA, VK_OEM_PERIOD, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_Z,
+    VK_OEM_MINUS, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
@@ -395,8 +395,10 @@ fn classify_key(wparam: WPARAM, lparam: LPARAM) -> Option<KeyAction> {
         }
         code if code == VK_SHIFT.0 && !is_repeat(lparam) => Some(KeyAction::ToggleMode),
         code if code == VK_TAB.0 => Some(KeyAction::ToggleLayer),
-        code if code == VK_OEM_COMMA.0 => Some(KeyAction::PageUp),
-        code if code == VK_OEM_PERIOD.0 => Some(KeyAction::PageDown),
+        // T-033：候选翻页键改用 `-`（上一页）与 `=`/`+`（下一页，VK_OEM_PLUS
+        // 同时覆盖 Shift+`=` 的 `+`），替换原 `,`（上翻）与 `.`（下翻）。
+        code if code == VK_OEM_MINUS.0 => Some(KeyAction::PageUp),
+        code if code == VK_OEM_PLUS.0 => Some(KeyAction::PageDown),
         _ => None,
     }
 }
@@ -421,6 +423,8 @@ unsafe fn get_keystroke_mgr(thread_mgr: &ITfThreadMgr) -> Result<ITfKeystrokeMgr
 
 /// 决定是否吃下按键。字母仅在中文模式下进入组合；
 /// 功能键只在已有组合时处理，避免键盘事件被无谓吞掉。
+/// Shift 只在无活动组合时切换模式：按 `+`（Shift+`=`）翻页时，先落下的 Shift
+/// 只作为修饰键放行给宿主，避免翻页顺带把中文模式切走（T-033）。
 fn plan_action(
     wparam: WPARAM,
     lparam: LPARAM,
@@ -434,7 +438,8 @@ fn plan_action(
     let engine = &state.lock().unwrap().engine;
     match action {
         KeyAction::Letter(_) => (engine.mode() == InputMode::Chinese).then_some(action),
-        KeyAction::ToggleMode => Some(action),
+        KeyAction::ToggleMode if !engine.is_active() => Some(action),
+        KeyAction::ToggleMode => None,
         _ if engine.is_active() => Some(action),
         _ => None,
     }
@@ -910,7 +915,7 @@ pub fn paired_core_version() -> &'static str {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use windows::Win32::UI::Input::KeyboardAndMouse::VK_0;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_0, VK_OEM_COMMA, VK_OEM_PERIOD};
     use windows::Win32::UI::TextServices::{ITfTextInputProcessor, ITfThreadMgr};
 
     /// 生命周期计数是全局状态；测试并行运行时互斥，避免相互干扰。
@@ -1092,13 +1097,22 @@ mod tests {
             classify_key(WPARAM(VK_TAB.0 as usize), LPARAM(0)),
             Some(KeyAction::ToggleLayer)
         );
+        // T-033：`-` 上翻、`=`/`+` 下翻；逗号句号不再映射翻页。
         assert_eq!(
-            classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_OEM_MINUS.0 as usize), LPARAM(0)),
             Some(KeyAction::PageUp)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0)),
             Some(KeyAction::PageDown)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0)),
+            None
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0)),
+            None
         );
     }
 
@@ -1128,14 +1142,24 @@ mod tests {
             None
         );
 
+        // T-033：组合进行中 Shift 不切换模式（`+` 翻页时 Shift 只是修饰键），
+        // Tab 与 `=`/`+` 翻页照常吃下。
         state.lock().unwrap().engine.handle_letter('n');
+        assert_eq!(
+            plan_action(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), false, &state),
+            None
+        );
         assert_eq!(
             plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::ToggleLayer)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::PageDown)
+        );
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_MINUS.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::PageUp)
         );
     }
 
@@ -1167,7 +1191,7 @@ mod tests {
             None
         );
         assert_eq!(
-            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0), false, &state),
             None
         );
     }

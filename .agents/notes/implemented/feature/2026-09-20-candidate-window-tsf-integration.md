@@ -36,12 +36,16 @@ implementation that pre-sliced `items` to a single page hid the popup after
 paging (see the [page-slice note](../../implemented/bug-fix/2026-09-23-candidate-window-page-slice-hidden.md)).
 
 TSF adds four key actions: Shift toggles mode (repeat key-down events with bit
-30 of `lparam` are ignored so holding Shift does not flip mode repeatedly),
-Tab toggles the layer, comma pages up, and period pages down. Tab and paging
-are only consumed while a Chinese-mode composition is active; in English mode
-they fall through to the host, as do letters, Backspace, Space, Enter, Esc,
-and digits. Shift is always handled by the IME so it can recover from English
-to Chinese mode.
+30 of `lparam` are ignored so holding Shift does not flip mode repeatedly;
+since T-033 Shift is only accepted while no composition is active, so the
+Shift that precedes the `+` page key stays a plain modifier), Tab toggles the
+layer, Minus pages up, and Equal/Plus pages down (T-033 replaced the original
+comma/period paging; see
+[page-keys note](../../implemented/feature/2026-09-25-page-keys-minus-plus.md)).
+Tab and paging are only consumed while a Chinese-mode composition is active;
+in English mode they fall through to the host, as do letters, Backspace,
+Space, Enter, Esc, and digits. Shift is always handled by the IME so it can
+recover from English to Chinese mode.
 
 Edit-session actions write text and then refresh the candidate window with a
 placement computed from `ITfContextView::GetTextExt` on the composition range;
@@ -66,7 +70,8 @@ restores the previous composition and candidate layer.
 selection and preview, page reset on input change, layer filtering, empty
 translation-layer refusal, translation commit semantics and learning, mode
 switch preserving composition, English-mode empty view, key classification for
-Shift/Tab/comma/period, repeat suppression, and English-mode key fallthrough.
+Shift/Tab/Minus/Equal, comma/period unbound (T-033), repeat suppression, and
+English-mode key fallthrough.
 TSF lifecycle tests continue to pass: activate/deactivate, class factory,
 aggregation rejection, and unload counter.
 
