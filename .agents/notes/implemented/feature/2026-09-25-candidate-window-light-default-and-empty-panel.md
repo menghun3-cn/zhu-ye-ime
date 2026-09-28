@@ -85,6 +85,10 @@ kept in dark mode) confirms both behaviors: `z`, `zh`, and `w` log
 58 px (360×58 rect) — while `nihao`/`zhidao`/`wo` render full panels and
 commits spell 你好知道我 (GBK `C4 E3 BA C3 D6 AA B5 C0 CE D2`); commit and
 Escape log `cand-hide (no composition)`. Pixel histograms of the archived
-screenshots (shots8) match the light palette: white `FFFFFF` background,
-`E6F2FE` highlight block, `999999` secondary, `0B57D0` selected text — all
-on a dark-mode system, proving the fixed-light default.
+screenshots (shots8) match the then-current light palette: white `FFFFFF`
+background, `E6F2FE` highlight block, `999999` secondary, `0B57D0` selected
+text — all on a dark-mode system, proving the fixed-light default. The
+palette values were later replaced by T-032 (blue border/text with red
+selected text, see
+2026-09-25-candidate-window-blue-red-palette.md); the light-default and
+always-visible-panel decisions here remain in force.

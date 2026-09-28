@@ -149,23 +149,23 @@ pub struct SystemColors {
 pub fn theme(kind: UiThemeKind) -> CandidateUiTheme {
     match kind {
         UiThemeKind::Light => CandidateUiTheme {
-            // 搜狗经典风（浅色）：白底、浅灰圆角边框、浅蓝圆角选中块+深蓝文字、序号/译文浅灰。
+            // T-032 指令配色：白底、亮蓝圆角边框、候选词亮蓝、选中行红字（浅蓝块保留）、序号/译文浅灰。
             background: UiColor::rgb(0xFF, 0xFF, 0xFF),
-            foreground: UiColor::rgb(0x1F, 0x1F, 0x1F),
+            foreground: UiColor::rgb(0x1E, 0x88, 0xE5),
             secondary: UiColor::rgb(0x99, 0x99, 0x99),
-            border: UiColor::rgb(0xE5, 0xE5, 0xE5),
+            border: UiColor::rgb(0x1E, 0x88, 0xE5),
             highlight_background: UiColor::rgb(0xE6, 0xF2, 0xFE),
-            highlight_foreground: UiColor::rgb(0x0B, 0x57, 0xD0),
+            highlight_foreground: UiColor::rgb(0xD3, 0x2F, 0x2F),
             marker: UiColor::rgb(0x99, 0x99, 0x99),
         },
         UiThemeKind::Dark => CandidateUiTheme {
-            // 搜狗经典风（深色）同构变体：深底、深蓝灰选中块、浅灰序号/译文。
+            // T-032 深色同构：深底、亮蓝边框与候选词、选中亮红字（深蓝灰块保留）、浅灰序号/译文。
             background: UiColor::rgb(0x20, 0x20, 0x20),
-            foreground: UiColor::rgb(0xED, 0xED, 0xED),
+            foreground: UiColor::rgb(0x64, 0xB5, 0xF6),
             secondary: UiColor::rgb(0x9E, 0x9E, 0x9E),
-            border: UiColor::rgb(0x3C, 0x3C, 0x3C),
+            border: UiColor::rgb(0x42, 0xA5, 0xF5),
             highlight_background: UiColor::rgb(0x3A, 0x4A, 0x5C),
-            highlight_foreground: UiColor::rgb(0xFF, 0xFF, 0xFF),
+            highlight_foreground: UiColor::rgb(0xFF, 0x8A, 0x80),
             marker: UiColor::rgb(0x9E, 0x9E, 0x9E),
         },
         UiThemeKind::HighContrast => theme_from_system_colors(SystemColors {
@@ -585,12 +585,18 @@ mod tests {
         let light = theme(UiThemeKind::Light);
         assert_eq!(light.background, UiColor::rgb(0xFF, 0xFF, 0xFF));
         assert_eq!(light.highlight_background, UiColor::rgb(0xE6, 0xF2, 0xFE));
-        assert_eq!(light.highlight_foreground, UiColor::rgb(0x0B, 0x57, 0xD0));
+        // T-032：蓝框蓝字、选中红字。
+        assert_eq!(light.border, UiColor::rgb(0x1E, 0x88, 0xE5));
+        assert_eq!(light.foreground, UiColor::rgb(0x1E, 0x88, 0xE5));
+        assert_eq!(light.highlight_foreground, UiColor::rgb(0xD3, 0x2F, 0x2F));
         // 序号/译文浅灰：与主文本和选中块均可区分。
         assert_eq!(light.marker, light.secondary);
         assert_ne!(light.marker, light.foreground);
 
         let dark = theme(UiThemeKind::Dark);
+        assert_eq!(dark.border, UiColor::rgb(0x42, 0xA5, 0xF5));
+        assert_eq!(dark.foreground, UiColor::rgb(0x64, 0xB5, 0xF6));
+        assert_eq!(dark.highlight_foreground, UiColor::rgb(0xFF, 0x8A, 0x80));
         assert_eq!(dark.marker, dark.secondary);
         assert_ne!(dark.marker, dark.foreground);
     }
