@@ -405,6 +405,37 @@ fn real_smoke(path: &Path, runner: &mut Runner) -> Result<(), String> {
         runner.fail("真实词典 xian 无音节切分噪声", &format!("实际: {xian:?}"));
     }
 
+    let zhidao: Vec<String> = file
+        .lookup("zhidao")
+        .iter()
+        .map(|entry| entry.word.clone())
+        .collect();
+    if zhidao.first().map(String::as_str) == Some("知道") {
+        runner.pass("真实词典整词 zhidao 首候选知道");
+    } else {
+        runner.fail(
+            "真实词典整词 zhidao 首候选知道",
+            &format!("实际: {zhidao:?}"),
+        );
+    }
+
+    let mut real_engine = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("真实词典引擎创建失败: {error}"))?;
+    type_text(&mut real_engine, "nih");
+    let nih_texts: Vec<&str> = real_engine
+        .candidates()
+        .iter()
+        .map(|candidate| candidate.text.as_str())
+        .collect();
+    if nih_texts.first() == Some(&"你好") && nih_texts.contains(&"你") {
+        runner.pass("真实词典前缀候选补全组优先且含完成组");
+    } else {
+        runner.fail(
+            "真实词典前缀候选补全组优先且含完成组",
+            &format!("实际: {nih_texts:?}"),
+        );
+    }
+
     if file.zh_to_en("你好").is_some() && file.en_to_zh("good").is_some() {
         runner.pass("真实词典双向翻译可用");
     } else {
