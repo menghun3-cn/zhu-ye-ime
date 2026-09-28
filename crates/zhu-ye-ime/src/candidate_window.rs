@@ -313,6 +313,10 @@ impl CandidateWindowState {
 
     /// 把一帧快照画到指定 DC；`width`/`height` 为窗口客户区尺寸。
     fn paint(&mut self, hdc: HDC, width: i32, height: i32) {
+        // 关键修复（T-034）：此前创建了 `create_font` 的 HFONT 却从未
+        // `SelectObject` 进绘制 DC，所有 DrawTextW 都用了 DC 默认字体
+        // （现代中文 Windows 上为微软雅黑），字体名改动因此不生效。
+        let old_font = unsafe { SelectObject(hdc, self.font.into()) };
         let selected = self.view.selected_on_page();
         let page_rows = self.view.panel_rows();
         let visible = self.view.visible_items();
@@ -399,6 +403,10 @@ impl CandidateWindowState {
                 self.metrics.header_hint_rect(),
                 self.theme.secondary,
             );
+        }
+        // 恢复旧字体；`paint_window` 每帧用全新兼容 DC，恢复是防御性的。
+        unsafe {
+            SelectObject(hdc, old_font);
         }
     }
 }
@@ -773,10 +781,9 @@ fn draw_text(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
 fn create_font(height: i32) -> (HFONT, bool) {
     unsafe {
         let mut face = [0u16; 32];
-        for (slot, unit) in face
-            .iter_mut()
-            .zip("Microsoft YaHei UI".encode_utf16().chain(Some(0)))
-        {
+        // T-034：候选框字体为宋体（SimSun）。此前字体名虽设为雅黑却从未
+        // SelectObject，实际渲染的一直是 DC 默认字体；paint() 已修复选择。
+        for (slot, unit) in face.iter_mut().zip("SimSun".encode_utf16().chain(Some(0))) {
             *slot = unit;
         }
         let metrics = LOGFONTW {

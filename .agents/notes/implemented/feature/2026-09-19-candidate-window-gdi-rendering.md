@@ -35,7 +35,9 @@ returns immediately to avoid flicker. Theme resolution reads
 longer follows `AppsUseLightTheme` (dark is only reachable through an explicit
 `ThemePreference::Dark`; see
 2026-09-25-candidate-window-light-default-and-empty-panel.md), `WM_THEMECHANGED` and `WM_SETTINGCHANGE` refresh the
-palette, and `WM_DPICHANGED` rebuilds metrics and the font. Fonts, bitmaps,
+palette, and `WM_DPICHANGED` rebuilds metrics and the font. The candidate
+font face is SimSun since T-034 (see
+2026-09-25-candidate-window-font-simsun.md). Fonts, bitmaps,
 DCs, and the boxed state are released on every path, including window
 destruction.
 
