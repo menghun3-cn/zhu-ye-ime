@@ -13,7 +13,7 @@ use zhu_ye_core::dict_format::DictHeader;
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
-    build_manifest, build_pack, build_real_bigrams, build_real_dictionary, build_v2,
+    build_base, build_manifest, build_pack, build_real_bigrams, build_real_dictionary, build_v2,
     dict_schema_version, pipeline_status, seed_bigrams, seed_entries, source_check, today,
     verify_manifest,
 };
@@ -47,6 +47,7 @@ fn run() -> Result<(), String> {
         Some("verify") => verify_command(required_path(&args, 2)?),
         Some("source-check") => source_check_command(),
         Some("build-pack") => build_pack_command(args.get(2).map(String::as_str)),
+        Some("build-base") => build_base_command(&args),
         Some("build-manifest") => build_manifest_command(&args),
         Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
         _ => {
@@ -67,6 +68,9 @@ fn print_usage() {
     println!("  source-check          核对 data/pins 全部源的缓存哈希（M6）");
     println!(
         "  build-pack <it|med>  构建领域词包（THUOCL + 词级/单字级注音，输出 data/artifacts/<id>.zyct）（M6）"
+    );
+    println!(
+        "  build-base [--min-score N]  构建基础包（xdhyc 骨架 + wordfreq 词频 + jieba 扩充，N 默认 2000）（M6）"
     );
     println!(
         "  build-manifest [目录] [--version V] [--min-engine V]  扫描 *.zyct 生成 manifest.json（M6）"
@@ -90,6 +94,32 @@ fn build_pack_command(pack_id: Option<&str>) -> Result<(), String> {
     let stats = build_pack(pack_id, Path::new("."))?;
     println!("内容 SHA-256: {}", stats.sha256);
     Ok(())
+}
+
+/// `build-base [--min-score N]`：构建基础包（骨架 + 词频 + 扩充）。
+fn build_base_command(args: &[String]) -> Result<(), String> {
+    let mut min_score = 2000u32;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--min-score" => {
+                index += 1;
+                min_score = args
+                    .get(index)
+                    .ok_or_else(|| "--min-score 缺少数值".to_owned())?
+                    .parse::<u32>()
+                    .map_err(|error| format!("--min-score 解析失败: {error}"))?;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                return Err(format!("多余参数：{}", args[index]));
+            }
+        }
+        index += 1;
+    }
+    build_base(Path::new("."), min_score).map(|_| ())
 }
 
 /// `build-manifest [目录] [--version V] [--min-engine V]`：

@@ -284,6 +284,11 @@ impl PinyinTables {
     pub fn char_map_len(&self) -> usize {
         self.char_pinyin.len()
     }
+
+    /// 单字注音表字键迭代（供覆盖统计使用）。
+    pub fn char_map_keys(&self) -> impl Iterator<Item = &char> {
+        self.char_pinyin.keys()
+    }
 }
 
 /// 把带音调符号的拼音字母归一化为无调 ASCII（`ü` 系转 `v`）；非拼音字符返回 `None`。
@@ -532,6 +537,358 @@ pub fn verify_manifest(path: &Path) -> Result<usize, String> {
     Ok(checked)
 }
 
+// ---------------------------------------------------------------------------
+// build-base：骨架 + 领域词频标定 + 注音合并
+// ---------------------------------------------------------------------------
+
+/// 解析 wordfreq 数据文件（cBpack）：gzip 内 msgpack，
+/// 解码为 list：[{format:"cB", version:1}, 0cB 词表, -1cB 词表, ...]。
+/// 第 k 个词表（跳过头部后）表示 -k cB，对应概率 10^(-k/100)，
+/// zipf = 9 - k/100；返回 词 -> round(zipf×1000)（u32，单调排序用）。
+pub fn load_wordfreq_zh(decoded: &[u8]) -> Result<HashMap<String, u32>, String> {
+    let mut reader = std::io::Cursor::new(decoded);
+    let value = rmpv::decode::read_value(&mut reader)
+        .map_err(|error| format!("wordfreq msgpack 解析失败: {error}"))?;
+    let rmpv::Value::Array(items) = value else {
+        return Err("wordfreq 数据不是 msgpack 数组".to_owned());
+    };
+    if items.len() < 2 {
+        return Err("wordfreq 数据缺少头部或词表".to_owned());
+    }
+    let mut frequencies = HashMap::new();
+    for (index, chunk) in items.iter().enumerate().skip(1) {
+        let rmpv::Value::Array(words) = chunk else {
+            return Err(format!("wordfreq 词表 {index} 不是数组"));
+        };
+        // zipf×1000 = (9 - index/100)*1000 = 9000 - 10*index
+        let frequency =
+            9000u32.saturating_sub(u32::try_from(index).unwrap_or(u32::MAX).saturating_mul(10));
+        for word in words {
+            if let rmpv::Value::String(text) = word {
+                if let Some(text) = text.as_str() {
+                    frequencies.insert(text.to_owned(), frequency);
+                }
+            }
+        }
+    }
+    Ok(frequencies)
+}
+
+/// 从 wordfreq wheel 内读取 `wordfreq/data/large_zh.msgpack.gz` 并解析。
+pub fn load_wordfreq_wheel_zh(wheel_bytes: &[u8]) -> Result<HashMap<String, u32>, String> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(wheel_bytes))
+        .map_err(|error| format!("wordfreq wheel 打开失败: {error}"))?;
+    let mut entry = archive
+        .by_name("wordfreq/data/large_zh.msgpack.gz")
+        .map_err(|error| format!("wordfreq 内 large_zh.msgpack.gz 缺失: {error}"))?;
+    let mut compressed = Vec::new();
+    entry
+        .read_to_end(&mut compressed)
+        .map_err(|error| format!("wordfreq 条目读取失败: {error}"))?;
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(&compressed[..])
+        .read_to_end(&mut decoded)
+        .map_err(|error| format!("wordfreq gzip 解压失败: {error}"))?;
+    load_wordfreq_zh(&decoded)
+}
+
+/// 解析 jieba dict.txt 行（`词 频次 词性`），返回 词 -> 频次。
+pub fn load_jieba_freq(text: &str) -> HashMap<String, u64> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(word) = parts.next() else {
+            continue;
+        };
+        let Some(count) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        map.insert(word.to_owned(), count);
+    }
+    map
+}
+
+/// jieba 频次 -> zipf×1000 标定：与 wordfreq 同尺度（wordfreq 顶部 ≈ 7,500-7,600 对应
+/// 的 3.2e5 词频；取 log10 斜率使 jieba 顶部亦落在 ~7,500 量级）。
+/// `score = 2000 + 1000*log10(freq)`，封顶 9000。
+#[must_use]
+pub fn jieba_score(count: u64) -> u32 {
+    if count == 0 {
+        return 0;
+    }
+    let score = 2000.0 + 1000.0 * (count as f64).log10();
+    score.round().clamp(0.0, 9000.0) as u32
+}
+
+/// 将镜像拼音中的儿化标记 `'r`（撇号后为独立 r 音节）归一为 `'er`；
+/// 仅当 r 后不再紧跟字母时才判定为儿化（`hua1'r` -> `hua1'er`），
+/// 避免误伤 r 开头音节（`sui1'ran2` 中的 `ran` 保持原样）。
+fn xdhyc_unretroflex(marked: &str) -> String {
+    let mut out = String::with_capacity(marked.len() + 2);
+    let mut chars = marked.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && matches!(chars.peek(), Some(&'r')) {
+            let after_r = chars.clone().nth(1);
+            if !matches!(after_r, Some(c) if c.is_ascii_alphabetic()) {
+                out.push_str("'er");
+                chars.next(); // 消费 r
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// 解析 xdhyc 文本镜像行（`词<TAB>拼音<TAB>序号`，拼音为带调数字 + 撇号分隔），
+/// 归一化为无调全拼并按标准音节表校验；返回 词 -> 拼音。
+///
+/// 词表版式归一化：
+/// - 异形词并列行 `甲;乙`（如 `年轻;年青`）拆为两条词，共享同一拼音；
+/// - 儿化 `hua1'r` 归一为 `hua1'er`（见 [`xdhyc_unretroflex`]）；
+/// - 顿号 `宁为玉碎,不为瓦全` 与间隔号 `一二·九运动` 合并为无分隔词形、
+///   拼音侧 `sui4',bu4` 合并音节为 `sui4'bu4`（顿号无语义，输入时由分词边界覆盖）；
+/// - 全角外来字符行 `阿Ｑ` 保留原词形（拼音音节与字符数对齐）。
+fn load_xdhyc(text: &str) -> Vec<(String, String)> {
+    let table = SyllableTable::standard();
+    let mut words = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let (Some(word), Some(marked)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        // 儿化 'r -> 'er（仅独立 r 音节）；顿号 ', -> '（合并音节分隔）
+        let syllables_marked = xdhyc_unretroflex(marked).replace("',", "'");
+        let Some(syllables) = split_pinyin_syllables(&syllables_marked) else {
+            continue;
+        };
+        if syllables.iter().any(|s| !table.is_complete_syllable(s)) {
+            continue;
+        }
+        for token in word.split(';') {
+            // 顿号/间隔号为无语义分隔符，去除后按词形校验
+            let clean = token.replace(['·', ',', '，'], "");
+            if !load_xdhyc_valid_word(&clean) || clean.chars().count() != syllables.len() {
+                continue;
+            }
+            words.push((clean, syllables.concat()));
+        }
+    }
+    words
+}
+
+/// xdhyc 词形校验：纯 CJK，或全角外来字符（ＱＯＫ）混排（`阿Ｑ`、`卡拉ＯＫ`）。
+fn load_xdhyc_valid_word(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch) || "ＱＯＫ".contains(ch))
+}
+
+/// 加载 CC-CEDICT：词 ->（无调全拼，首条可读译文）；一词多音保留首个。
+fn load_cedict_with_translation(text: &str) -> HashMap<String, (String, Option<String>)> {
+    let table = SyllableTable::standard();
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let Some((word, marked, translation)) = parse_cedict_line(line) else {
+            continue;
+        };
+        if !is_cjk_word(&word) {
+            continue;
+        }
+        let Some(syllables) = split_pinyin_syllables(&marked) else {
+            continue;
+        };
+        if syllables.len() != word.chars().count()
+            || syllables.iter().any(|s| !table.is_complete_syllable(s))
+        {
+            continue;
+        }
+        map.entry(word)
+            .or_insert_with(|| (syllables.concat(), translation));
+    }
+    map
+}
+
+/// build-base 统计（S-1 轨道的实测值来源）。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct BaseStats {
+    /// 骨架词（xdhyc 56,008）入包数。
+    pub skeleton_words: usize,
+    /// 骨架词中命中 wordfreq 主词频源的数量。
+    pub wordfreq_hits: usize,
+    /// 骨架词命中率 = wordfreq_hits / skeleton_words（验收标准 7.5 ≥70%）。
+    pub wordfreq_hit_pct: f64,
+    /// 仅由 jieba 扩充进入的词条数。
+    pub jieba_expansion: usize,
+    /// 由 CC-CEDICT 兜底注音进入的词条数（含译文）。
+    pub cedict_words: usize,
+    /// 规范字集（kTGHZ 8,102 字，约等于通用规范汉字表 8,105）中出现在 base 的字占比。
+    pub char_set_coverage_pct: f64,
+    /// 最终词条总数。
+    pub entry_count: usize,
+    /// 产物字节数（S-1：base ≤60MB）。
+    pub file_size: u64,
+    /// 产物内容 SHA-256（manifest 输入）。
+    pub sha256: String,
+}
+
+/// 构建基础包：骨架（xdhyc 全部）→ CEDICT 词级兜底 → jieba 扩充（纯 CJK、频率标定 ≥ min_score）。
+/// 词频：wordfreq 主源（zipf×1000）优先，未命中取 jieba 标定值，再未命中按 1。
+/// 输出 `data/artifacts/base.zyct`。
+pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
+    source_check(root)?;
+    let cache = root.join(CACHE_DIR);
+    let raw = root.join("data/raw");
+
+    let xdhyc_text = fs::read_to_string(cache.join("xdhyc-2008.txt"))
+        .map_err(|error| format!("读取 xdhyc 骨架失败: {error}"))?;
+    let skeleton = load_xdhyc(&xdhyc_text);
+
+    let wheel_bytes = fs::read(cache.join("wordfreq-3.1.1-py3-none-any.whl"))
+        .map_err(|error| format!("读取 wordfreq wheel 失败: {error}"))?;
+    let wordfreq = load_wordfreq_wheel_zh(&wheel_bytes)?;
+
+    let jieba_text = fs::read_to_string(cache.join("jieba-dict.txt"))
+        .map_err(|error| format!("读取 jieba 词表失败: {error}"))?;
+    let jieba = load_jieba_freq(&jieba_text);
+
+    let cedict_text = fs::read_to_string(raw.join("cedict_ts.u8"))
+        .map_err(|error| format!("读取 CC-CEDICT 失败: {error}"))?;
+    let cedict = load_cedict_with_translation(&cedict_text);
+    let ktghz_text = fs::read_to_string(cache.join("kTGHZ2013.txt"))
+        .map_err(|error| format!("读取注音底表失败: {error}"))?;
+    let tables = PinyinTables::from_texts(&cedict_text, &ktghz_text);
+
+    let frequency_of = |word: &str| -> u32 {
+        wordfreq.get(word).copied().unwrap_or_else(|| {
+            jieba
+                .get(word)
+                .map(|count| jieba_score(*count))
+                .unwrap_or(1)
+        })
+    };
+
+    // a) 骨架：全部入包，拼音取镜像自带（官方拼音）。
+    let mut merged: HashMap<String, (String, u32, Option<String>)> = HashMap::new();
+    for (word, pinyin) in &skeleton {
+        let frequency = frequency_of(word);
+        merged.insert(word.clone(), (pinyin.clone(), frequency, None));
+    }
+
+    // b) 骨架 + CEDICT 词条：保留 CEDICT 译文；已入包（骨架）的词不重复。
+    let mut cedict_words = 0usize;
+    for (word, (pinyin, translation)) in &cedict {
+        if merged.contains_key(word) {
+            continue;
+        }
+        let frequency = frequency_of(word);
+        merged.insert(
+            word.clone(),
+            (pinyin.clone(), frequency, translation.clone()),
+        );
+        cedict_words += 1;
+    }
+
+    // c) jieba 扩充：纯 CJK、拼音注音（CEDICT 词级 -> kTGHZ 字级）、标定频率 ≥ min_score。
+    let mut jieba_expansion = 0usize;
+    for (word, count) in &jieba {
+        if merged.contains_key(word) {
+            continue;
+        }
+        let score = jieba_score(*count);
+        if score < min_score {
+            continue;
+        }
+        if !is_cjk_word(word) {
+            continue;
+        }
+        let Some(pinyin) = tables.annotate(word) else {
+            continue;
+        };
+        merged.insert(word.clone(), (pinyin, score, None));
+        jieba_expansion += 1;
+    }
+
+    // 规范字集覆盖：以注音底表字集为基线（≈ 通用规范汉字表）。
+    let mut merged_chars: HashSet<char> = HashSet::new();
+    for (word, (_, _, _)) in &merged {
+        merged_chars.extend(word.chars());
+    }
+    let covered_chars = tables
+        .char_map_keys()
+        .filter(|ch| merged_chars.contains(ch))
+        .count();
+
+    let mut entries: Vec<DictionaryEntry> = Vec::with_capacity(merged.len());
+    for (word, (pinyin, frequency, translation)) in merged {
+        let mut entry = DictionaryEntry::new(word, pinyin, u64::from(frequency));
+        if let Some(translation) = translation {
+            entry = entry.with_translation(translation);
+        }
+        entries.push(entry);
+    }
+    let bytes = crate::build_v2(&entries, &[]).map_err(|error| error.to_string())?;
+
+    let output = root.join(ARTIFACTS_DIR).join("base.zyct");
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建输出目录失败: {error}"))?;
+    }
+    fs::write(&output, &bytes).map_err(|error| format!("写入 base 包失败: {error}"))?;
+
+    let skeleton_words = skeleton.len();
+    let wordfreq_hits = skeleton
+        .iter()
+        .filter(|(word, _)| wordfreq.contains_key(word))
+        .count();
+    let wordfreq_hit_pct = if skeleton_words == 0 {
+        0.0
+    } else {
+        wordfreq_hits as f64 / skeleton_words as f64 * 100.0
+    };
+    let char_set_coverage_pct = if tables.char_map_len() == 0 {
+        0.0
+    } else {
+        covered_chars as f64 / tables.char_map_len() as f64 * 100.0
+    };
+    let stats = BaseStats {
+        skeleton_words,
+        wordfreq_hits,
+        wordfreq_hit_pct,
+        jieba_expansion,
+        cedict_words,
+        char_set_coverage_pct,
+        entry_count: entries.len(),
+        file_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        sha256: sha256_hex(&bytes),
+    };
+    println!(
+        "base 包构建完成（data/artifacts/base.zyct）：词条 {}，大小 {:.1} MB",
+        stats.entry_count,
+        stats.file_size as f64 / 1_048_576.0
+    );
+    println!(
+        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，规范字集覆盖 {:.1}%",
+        stats.skeleton_words,
+        stats.wordfreq_hits,
+        stats.wordfreq_hit_pct,
+        stats.jieba_expansion,
+        stats.cedict_words,
+        stats.char_set_coverage_pct
+    );
+    println!("内容 SHA-256: {}", stats.sha256);
+    Ok(stats)
+}
+
 /// UTC 日期 `YYYY-MM-DD`（构建期确定性优先，时区差异不影响哈希/校验路径）。
 #[must_use]
 pub fn today() -> String {
@@ -647,5 +1004,73 @@ mod tests {
         assert!(verify_manifest(&manifest_path).is_err());
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn wordfreq_cbpack_解析与zipf标定() {
+        // 结构：[header, -1cB 词表, -2cB 词表(空), -3cB 词表]
+        let encoded: Vec<u8> = vec![
+            0x94, // fixarray(4)
+            0x82, // fixmap(2): header
+            0xa6, b'f', b'o', b'r', b'm', b'a', b't', 0xa2, b'c', b'B', // "format":"cB"
+            0xa7, b'v', b'e', b'r', b's', b'i', b'o', b'n', 0x01, // "version":1
+            0x91, 0xa3, 0xe7, 0x9a, 0x84, // [-1cB: ["的"]]
+            0x90, // [-2cB: []]
+            0x92, 0xa3, 0xe7, 0x9a, 0x84, 0xa6, 0xe4, 0xb8, 0xad, 0xe6, 0x96,
+            0x87, // [-3cB: ["的","中文"]]（fixstr(6)）
+        ];
+        let map = load_wordfreq_zh(&encoded).unwrap();
+        // -1cB 桶的"的"先插入，-3cB 桶覆盖为 8970（实际数据中词只出现在一个桶）
+        assert_eq!(map.get("的").copied(), Some(8970));
+        assert_eq!(map.get("中文").copied(), Some(8970));
+    }
+
+    #[test]
+    fn jieba_频次标定与词表解析() {
+        assert!(jieba_score(318_825) > 7400 && jieba_score(318_825) < 7600);
+        assert_eq!(jieba_score(0), 0);
+        let map = load_jieba_freq("的 318825 uj\n一 200000 m\n坏行\n");
+        assert_eq!(map.get("的").copied(), Some(318_825));
+        assert_eq!(map.len(), 2); // “坏行”缺频次行忽略
+    }
+
+    #[test]
+    fn xdhyc_行解析与音节校验() {
+        let text = "的\tde\t1\n是\tshi4\t2\n正方体\tzheng4'fang1'ti3\t56008\n坏行\tzheshi5buhefa\t0\n年轻;年青\tnian2'qing1\t697\n花儿\thua1'r\t10721\n虽然\tsui1'ran2\t1\n宁为玉碎,不为瓦全\tning2'wei2'yu4'sui4',bu4'wei2'wa3'quan2\t1\n一二·九运动\tyi1'er4'jiu3'yun4'dong4\t2\n阿Ｑ\ta1'qiu2\t3\n卡拉ＯＫ\tka3'la1'o1'kei1\t4\n";
+        let words = load_xdhyc(text);
+        assert_eq!(words.len(), 10);
+        assert_eq!(words[0], ("的".to_owned(), "de".to_owned()));
+        assert_eq!(words[1], ("是".to_owned(), "shi".to_owned()));
+        assert_eq!(words[2], ("正方体".to_owned(), "zhengfangti".to_owned()));
+        // 异形词行拆两条
+        assert!(words.contains(&("年轻".to_owned(), "nianqing".to_owned())));
+        assert!(words.contains(&("年青".to_owned(), "nianqing".to_owned())));
+        // 儿化归一（'r 后无字母才判儿化）
+        assert!(words.contains(&("花儿".to_owned(), "huaer".to_owned())));
+        // r 开头音节不受儿化规则误伤
+        assert!(words.contains(&("虽然".to_owned(), "suiran".to_owned())));
+        // 顿号行：词形去顿号、音节合并
+        assert!(words.contains(&(
+            "宁为玉碎不为瓦全".to_owned(),
+            "ningweiyusui".to_owned() + "buweiwaquan"
+        )));
+        // 间隔号行：词形去间隔号
+        assert!(words.contains(&("一二九运动".to_owned(), "yierjiuyundong".to_owned())));
+        // 全角外来字符行保留词形
+        assert!(words.contains(&("阿Ｑ".to_owned(), "aqiu".to_owned())));
+        // 卡拉ＯＫ 拼音含 kei1（非普通话标准音节）-> 按规则丢弃（已知排除项）
+        assert!(!words.iter().any(|(w, _)| w.contains("ＯＫ")));
+        // 音节数与字符数不匹配或音节非法 -> 丢弃
+        assert!(!words.iter().any(|(w, _)| w == "坏行"));
+    }
+
+    #[test]
+    fn cedict_带译文加载与一词多音首读优先() {
+        let text = "繁體 简体 [jian3 ti3] /simplified/\n繁體 简体 [fanti3] /variant/\n繁體 繁体 [fan2 ti3] /traditional/\n";
+        let map = load_cedict_with_translation(text);
+        assert_eq!(map.len(), 2);
+        let (pinyin, translation) = &map["简体"];
+        assert_eq!(pinyin, "jianti");
+        assert_eq!(translation.as_deref(), Some("simplified"));
     }
 }

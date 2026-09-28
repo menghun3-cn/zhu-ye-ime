@@ -10,12 +10,26 @@ M6 需要发布多个词典包（基础包、领域包、网络语包）供运�
 
 ## Decision
 
-`zhu-ye-dict` 新增四个 M6 子命令，全部实现在 `m6.rs`：
+`zhu-ye-dict` 新增五个 M6 子命令，全部实现在 `m6.rs`：
 
 - `source-check` — 读取全部 `data/pins/*.json`，对每个 pin 指向的缓存/快照文件做哈希校验；任一锁定哈希不匹配即构建失败。未锁定（缺 `sha256`）的 pin 只报告不失败。`build-pack` 先执行 `source-check`，源漂移永远不会静默进入构建。
 - `build-pack <it|med>` — 解析 `THUOCL_*.txt`（`词<TAB>DF`），仅保留纯 CJK 词形，注音，按 (词, 拼音) 去重，用 `build_v2` 编译并写入 `data/artifacts/<id>.zyct`。词频取 THUOCL DF（封顶 u32::MAX）；领域包不带译文（现有管线本就过滤空译文）。
+- `build-base [--min-score N]` — 合并骨架（XDHCY 56,008）、CC-CEDICT 词条（带译文）与 jieba 扩充为 `base.zyct`，并记录实测统计（骨架数、wordfreq 命中率、扩充数、字集覆盖、体积、SHA-256）。输出确定：同输入两次构建字节级一致（2026-09-28 实测验证）。
 - `build-manifest [目录] [--version V] [--min-engine V]` — 扫描产物目录内 `*.zyct`，写出 `manifest.json`（JSON schema 1），逐包含 `id/name/version/file/sha256/size/min_engine_version`，顶层含 `schema` 与 `published_at`。**本里程碑不签名；ed25519 签名在 M6-U 引入。** manifest 默认 `version` 为 UTC 构建日期，`min_engine_version` 默认 "0.1.0"。
 - `verify-manifest <manifest.json>` — 逐包校验：文件存在、内容 SHA-256 与字节大小和 manifest 一致；任一不一致即失败。
+
+### 基础包数据流
+
+D-010 官方 XDHCY PDF 是扫描图片版（页面内容流为 `/Im0` 图像，无文本层），因此 `build-base` 消费转录文本镜像（`liuxilu/Proofread-Modern-Chinese-Common-Lexicon` 的 `现代汉语常用词表.txt`，行格式 `词<TAB>拼音<TAB>序号`，带调数字拼音）；pin（`data/pins/xdhyc-2008.json`）把官方 PDF 哈希保留在 `legacy` 供溯源。行格式归一（`load_xdhyc`）：
+
+- 异形词并列行 `甲;乙`（如 `年轻;年青`）拆为两条词共享同一拼音；
+- 儿化 `hua1'r` 归一为 `hua1'er`，**仅当 `r` 后不再跟字母**（`sui1'ran2` 的 `ran` 保持原样）；
+- 顿号行（`宁为玉碎,不为瓦全`）与间隔号行（`一二·九运动`）去除分隔符，拼音侧 `sui4',bu4` 合并为 `sui4'bu4`；
+- 全角外来字符行保留词形（`阿Ｑ`）；已知排除《卡拉ＯＫ》（音节 `kei1` 非普通话标准音节，1/56,008）。
+
+词频合并（去重取 max）：wordfreq 为主源——wheel 内 `wordfreq/data/large_zh.msgpack.gz` 为 gzip → msgpack `[header, 0cB 词表, -1cB 词表, …]`（cBpack），第 k 桶放 −k cB 的词，`zipf = 9 − k/100`；存储为 `round(zipf×1000)`（u32）。wordfreq 未命中回退 jieba，标定到同尺度（`2000 + 1000·log10(频次)`，封顶 9000）；两源皆无按 1。注音：骨架用镜像自带官方拼音；CC-CEDICT 词级同时提供拼音与译文；jieba 扩充经 CC-CEDICT 词级 → kTGHZ 字级兜底注音。`--min-score` 为 jieba 扩充入口阈值（默认 2000），即 S-1 调参口。
+
+2026-09-28 实测：56,008 行全部加载 → 56,062 词形；wordfreq 命中 52,070（92.9%，≥70% 内部门槛）；CEDICT 词级 75,156（含译文）；jieba 扩充 247,423；378,312 词条，29,559,095 字节（28.2 MB，≤60 MB）；kTGHZ 字集覆盖 95.5%（未覆盖字多为生僻字，部分由 jieba 单字词承担）。`base.zyct` 已纳入 manifest（2026.09.28-p2，`verify-manifest` 5/5）。新增构建工具依赖：`flate2`、`rmpv`、`zip`（运行时 crate 不受影响）。
 
 ### 拼音注音策略
 
@@ -37,6 +51,6 @@ M6 需要发布多个词典包（基础包、领域包、网络语包）供运�
 ## Consequences
 
 - 收益：每次构建全程哈希门禁（pins → 注音 → v2 → manifest → verify）；领域包当下即可复现且体积受控；manifest schema 是 M6-U 签名 manifest 与 M6-R 运行时复合词典的稳定输入。
-- 成本：构建工具 crate 新增依赖（`serde`/`serde_json`/`sha2`），运行时 crate 不受影响；注音失败数需按源观察（医学包首建 74，见 `docs/数据清单.md` D-014 说明）。
-- 剩余 M6-P 拆为后续任务：`build-base`（XDHCY 草案 PDF 文本抽取、wordfreq 3.1.1 数据抽取、词频合并、S-1 体积/覆盖实测）与 `build-slang` 及 MDN glossary 正文抓取。
+- 成本：构建工具 crate 新增依赖（`serde`/`serde_json`/`sha2`，基础包另加 `flate2`/`rmpv`/`zip`），运行时 crate 不受影响；注音失败数需按源观察（医学包首建 74，见 `docs/数据清单.md` D-014 说明）。
+- 剩余 M6-P：`build-slang` 与 MDN glossary 正文抓取（T-045），以及 base 的 S-1 调参收敛（`--min-score` 扫描 + 首候选覆盖抽样，验收标准 7.5 回填数字正式定稿前执行）。
 - 不取代任何既有笔记；扩展 [数据源 pins 与获取脚本](2026-09-28-dictionary-source-pins-and-fetch-script.zh.md) 所述机制。v2 二进制格式不变（见 [v1 二进制格式](../../architecture/2026-09-19-dictionary-binary-format-v1.zh.md)）。

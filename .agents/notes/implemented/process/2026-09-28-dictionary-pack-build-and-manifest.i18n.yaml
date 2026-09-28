@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-09-28-dictionary-pack-build-and-manifest.md
 #   git hash-object 2026-09-28-dictionary-pack-build-and-manifest.zh.md
-2026-09-28-dictionary-pack-build-and-manifest.md: f37b98d114025dc8a428801f4af0dbc1a570926c
-2026-09-28-dictionary-pack-build-and-manifest.zh.md: fefa0f0b83104c2cec145b79779bdf792ba900f6
+2026-09-28-dictionary-pack-build-and-manifest.md: c592911254482c5e17032002e2e6ede02379f7fa
+2026-09-28-dictionary-pack-build-and-manifest.zh.md: 8d13ce45d9e2aa57c61e2b1297e66bd68ad7a7fd

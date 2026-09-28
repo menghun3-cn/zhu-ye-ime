@@ -1,14 +1,20 @@
 {
   "id": "xdhyc-2008",
-  "name": "现代汉语常用词表（草案）2008",
+  "name": "现代汉语常用词表（草案）2008（文本镜像）",
   "role": "base-authoritative",
   "kind": "url",
-  "url": "http://www.moe.gov.cn/ewebeditor/uploadfile/2015/01/13/20150113085920115.pdf",
-  "cache_file": "xdhyc-2008.pdf",
+  "url": "https://raw.githubusercontent.com/liuxilu/Proofread-Modern-Chinese-Common-Lexicon/master/现代汉语常用词表.txt",
+  "cache_file": "xdhyc-2008.txt",
   "license": "官方行政文件（依《著作权法》第 5 条不受著作权保护）",
-  "license_note": "教育部/国家语委 2008 发布；注明来源即可；官网页面存在 http/https 跳转，脚本需跟随重定向",
-  "sha256": "96AA708D549E7E9F80A0359557122F10F05450A4BA793B9AEFD4BBF2BB5A552B",
-  "size": 9341379,
-  "note": "56,008 词按常用度排序（草案版）；二期正式版（2017 前后）无官方公开文本，草案为骨架基线（需求 R4 常用词骨架）",
+  "license_note": "教育部/国家语委 2008 发布；官网 PDF（moe.gov.cn，20150113085920115.pdf）为扫描图片版，无法机器解析；改用 liuxilu/Proofread-Modern-Chinese-Common-Lexicon 的机械转录文本（同一年代草案，逐条校对，无 LICENSE 文件，内容为官方文件转录不受著作权保护）；原始 PDF 哈希保留于 数据清单 D-010 备注",
+  "sha256": "A9C3158FCB54FF2292A3A96DAAB87F3A7FDB19A24F1C56C91CB4BF36D976F605",
+  "size": 1422031,
+  "note": "56,008 词按常用度排序（草案版），行格式 `词<TAB>拼音<TAB>序号`，拼音为带调数字+撇号分隔（可复用现有音节解析）；二期正式版（2017 前后）无官方公开文本，草案为骨架基线（需求 R4 常用词骨架）；官方扫描 PDF 不作为构建输入",
+  "legacy": {
+    "official_pdf_url": "http://www.moe.gov.cn/ewebeditor/uploadfile/2015/01/13/20150113085920115.pdf",
+    "official_pdf_sha256": "96AA708D549E7E9F80A0359557122F10F05450A4BA793B9AEFD4BBF2BB5A552B",
+    "official_pdf_size": 9341379,
+    "official_pdf_note": "扫描图片版（页面内容为图像流 /Im0），不进入构建管线；保留哈希作溯源"
+  },
   "fetched_at": "2026-09-28"
 }

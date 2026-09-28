@@ -21,7 +21,9 @@ pub use import::{
 pub use import::{BigramStats, ImportStats};
 
 pub mod m6;
-pub use m6::{build_manifest, build_pack, source_check, today, verify_manifest, Manifest};
+pub use m6::{
+    build_base, build_manifest, build_pack, source_check, today, verify_manifest, Manifest,
+};
 
 /// 词典二进制格式版本。
 #[must_use]
