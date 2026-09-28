@@ -262,8 +262,9 @@ impl CandidateMetrics {
             header_height: dp(38.0),
             row_height: dp(36.0),
             row_gap: dp(2.0),
-            marker_width: dp(40.0),
-            translation_gap: dp(16.0),
+            // T-037：序号列收窄使候选词更贴近序号；译文紧随主文本间距减小。
+            marker_width: dp(26.0),
+            translation_gap: dp(8.0),
             corner_radius: dp(8.0),
             font_height: dp(16.0),
         }
@@ -345,35 +346,43 @@ impl CandidateMetrics {
         }
     }
 
-    /// 行内主文本矩形。
+    /// 行内按内容动态划分主文本与译文矩形（T-037）。
+    ///
+    /// 译文不再固定占用右侧 1/3 列，而是**紧跟主文本估算宽度之后**（含
+    /// `translation_gap` 间距）一直延伸到行尾：英文译文因此更靠左、可用宽度大
+    /// 幅增加（长词不易截断）。主文本宽度按 `estimate_text_width` 估算，
+    /// 有译文时上限保证译文区（含间距）至少占可用宽的 1/3；无译文时主文本
+    /// 可占满行。
     #[must_use]
-    pub fn text_rect(&self, row: UiRect) -> UiRect {
-        let left = (row.left + self.marker_width).min(row.right);
-        let translation_width = (row.width() - self.marker_width).max(0) / 3;
-        let right = row
-            .right
-            .saturating_sub(translation_width.saturating_add(self.translation_gap))
-            .max(left + 1);
-        UiRect {
-            left,
+    pub fn row_split(&self, row: UiRect, main: &str, translation: &str) -> (UiRect, UiRect) {
+        let marker_right = (row.left + self.marker_width).min(row.right);
+        let usable = (row.width() - self.marker_width).max(0);
+        let min_translation = if translation.is_empty() {
+            1
+        } else {
+            (usable / 3).max(1)
+        };
+        let max_main = (usable - min_translation - self.translation_gap).max(1);
+        let main_width = estimate_text_width(main, self.font_height).round().max(1.0) as i32;
+        let main_width = main_width.clamp(1, max_main);
+        let text = UiRect {
+            left: marker_right,
             top: row.top,
-            right,
+            right: marker_right + main_width,
             bottom: row.bottom,
-        }
-    }
-
-    /// 行内译文矩形（右侧弱化区）。
-    #[must_use]
-    pub fn translation_rect(&self, row: UiRect) -> UiRect {
-        let right = row.right;
-        let translation_width = (row.width() - self.marker_width).max(0) / 3;
-        let left = right.saturating_sub(translation_width).max(row.left);
-        UiRect {
-            left,
+        };
+        let translation_left = (text.right + self.translation_gap)
+            .min(row.right.saturating_sub(1))
+            .max(text.right);
+        let translation = UiRect {
+            left: translation_left,
             top: row.top,
-            right,
+            right: row.right,
             bottom: row.bottom,
-        }
+        };
+        // `translation` 参数为镜像绘制语义保留：主文本与译文区由间距隔开，
+        // 译文为空时布局同样成立（右侧留白，供后续按内容定制）。
+        (text, translation)
     }
 }
 
@@ -432,8 +441,9 @@ fn bgr_to_rgb(color: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        fit_text, index_marker, theme, theme_from_system_colors, CandidateMetrics, CandidateUiItem,
-        CandidateUiView, SystemColors, UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE,
+        estimate_text_width, fit_text, index_marker, theme, theme_from_system_colors,
+        CandidateMetrics, CandidateUiItem, CandidateUiView, SystemColors, UiColor, UiThemeKind,
+        BASE_DPI, DEFAULT_PAGE_SIZE,
     };
     use zhu_ye_core::candidate::CandidateSource;
 
@@ -535,15 +545,15 @@ mod tests {
             assert!(rect.width() > 0);
             assert!(rect.height() == metrics.row_height);
             previous_bottom = rect.bottom;
-            let text = metrics.text_rect(rect);
-            let translation = metrics.translation_rect(rect);
+            let (text, translation) = metrics.row_split(rect, "你好", "hello");
+            assert!(text.left == rect.left + metrics.marker_width);
             assert!(text.right <= translation.left);
             assert!(translation.right == rect.right);
         }
     }
 
     #[test]
-    fn 页眉输入串与提示不重叠且译文与主文本保留间距() {
+    fn 页眉输入串与提示不重叠且译文紧跟主文本() {
         let metrics = CandidateMetrics::new(96);
         let text = metrics.header_text_rect();
         let hint = metrics.header_hint_rect();
@@ -552,9 +562,40 @@ mod tests {
         assert!(hint.left < hint.right);
 
         let row = metrics.row_rect(0);
-        let main = metrics.text_rect(row);
-        let translation = metrics.translation_rect(row);
-        assert!(translation.left - main.right >= metrics.translation_gap);
+        let (main, translation) = metrics.row_split(row, "你好", "hello world");
+        // 译文紧跟主文本（恰为间距，而非旧的固定 1/3 右列）。
+        assert_eq!(translation.left - main.right, metrics.translation_gap);
+        assert!(main.left - row.left == metrics.marker_width);
+        // 序号列收窄于旧值（T-037 回归保护：候选词更贴近序号）。
+        assert!(metrics.marker_width < 34);
+    }
+
+    #[test]
+    fn 动态分栏译文紧跟主文本且保底宽度() {
+        let metrics = CandidateMetrics::new(96);
+        let row = metrics.row_rect(0);
+        let usable = row.width() - metrics.marker_width;
+        let min_translation = usable / 3;
+        let max_main = usable - min_translation - metrics.translation_gap;
+
+        // 短主文本：译文紧跟估算宽度之后。
+        let (main, translation) = metrics.row_split(row, "你好", "how are you");
+        assert!(
+            main.right - main.left <= estimate_text_width("你好", metrics.font_height) as i32 + 1
+        );
+        assert_eq!(translation.left - main.right, metrics.translation_gap);
+
+        // 超长主文本：主文本封顶，译文保底 1/3。
+        let long = "这是一个特别长的词条用于测试主文本宽度上限不会挤占译文区".repeat(3);
+        let (main, translation) = metrics.row_split(row, &long, "translation");
+        assert_eq!(main.width(), max_main);
+        assert!(translation.width() >= min_translation);
+        assert!(translation.right == row.right);
+
+        // 无译文：主文本可占满行（不再保留右侧留白）。
+        let (main, translation) = metrics.row_split(row, &long, "");
+        assert_eq!(translation.left - main.right, metrics.translation_gap);
+        assert!(translation.width() >= 1);
     }
 
     #[test]

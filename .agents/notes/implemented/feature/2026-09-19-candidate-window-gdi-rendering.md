@@ -37,7 +37,14 @@ longer follows `AppsUseLightTheme` (dark is only reachable through an explicit
 2026-09-25-candidate-window-light-default-and-empty-panel.md), `WM_THEMECHANGED` and `WM_SETTINGCHANGE` refresh the
 palette, and `WM_DPICHANGED` rebuilds metrics and the font. The candidate
 font face is SimSun since T-034 (see
-2026-09-25-candidate-window-font-simsun.md). Fonts, bitmaps,
+2026-09-25-candidate-window-font-simsun.md). Since T-037 the row layout is
+content-driven through `CandidateMetrics::row_split` (compact 26 dp marker
+column, translation hugging the candidate and running to the row end; see
+2026-09-25-candidate-window-row-layout-dynamic.md), and
+`paint_background` fills the client rectangle with the background brush
+before drawing the `RoundRect`, so the rounded corners show background
+color instead of uninitialized pixels (see
+2026-09-25-candidate-window-corner-black-pixels.md). Fonts, bitmaps,
 DCs, and the boxed state are released on every path, including window
 destruction.
 

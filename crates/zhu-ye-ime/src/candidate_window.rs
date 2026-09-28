@@ -376,13 +376,11 @@ impl CandidateWindowState {
             } else {
                 self.theme.foreground
             };
-            draw_text(hdc, main, self.metrics.text_rect(row_ui), text_color);
-            draw_text(
-                hdc,
-                secondary,
-                self.metrics.translation_rect(row_ui),
-                self.theme.secondary,
-            );
+            // T-037：动态分栏——译文紧跟主文本（不再固定右侧 1/3 列），
+            // 英文译文更靠左、可用宽度更大。
+            let (main_rect, translation_rect) = self.metrics.row_split(row_ui, main, secondary);
+            draw_text(hdc, main, main_rect, text_color);
+            draw_text(hdc, secondary, translation_rect, self.theme.secondary);
         }
 
         let header_text = if !self.view.composition.is_empty() {
@@ -718,6 +716,15 @@ fn paint_background(
         }
         let old_brush = SelectObject(hdc, brush.into());
         let old_pen = SelectObject(hdc, pen.into());
+        // T-037：先以背景色填满整个客户区，再画圆角矩形。此前只画圆角矩形，
+        // 圆角外侧四角从未填充——内存 DC 初始（黑/杂色）像素直接透出，
+        // 表现为四个角的黑点。垫底后四角为背景色。
+        let rect = RECT {
+            right: width,
+            bottom: height,
+            ..Default::default()
+        };
+        FillRect(hdc, &rect, brush);
         let diameter = radius.saturating_mul(2);
         let _ = RoundRect(hdc, 0, 0, width, height, diameter, diameter);
         SelectObject(hdc, old_brush);
