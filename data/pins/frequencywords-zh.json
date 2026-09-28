@@ -1,0 +1,15 @@
+{
+  "id": "frequencywords-zh",
+  "name": "FrequencyWords 中文词频（zh_cn_50k）",
+  "role": "legacy-baseline",
+  "kind": "url",
+  "url": "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/zh_cn/zh_cn_50k.txt",
+  "cache_rel": "data/raw/zh_cn_50k.txt",
+  "cache_file": "zh_cn_50k.txt",
+  "license": "内容 CC BY-SA 4.0；代码 MIT",
+  "license_note": "第一期已登记；R4 定稿后降级为对照基准，主词频源改为 wordfreq",
+  "sha256": "25599E00347B893E55C3058A748819B3FE19403291CD12F7C03AF128E7F3FE45",
+  "size": 565895,
+  "fetched_at": "2026-09-21",
+  "note": "第一期已入库基线源（数据清单 D-004）；字幕语料噪声大，仅作对照"
+}

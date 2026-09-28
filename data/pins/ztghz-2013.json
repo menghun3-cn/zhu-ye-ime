@@ -1,0 +1,14 @@
+{
+  "id": "ztghz-2013",
+  "name": "通用规范汉字表（2013）",
+  "role": "base-authoritative",
+  "kind": "url",
+  "url": "https://zh.wikisource.org/wiki/%E9%80%9A%E7%94%A8%E8%A7%84%E8%8C%83%E6%B1%89%E5%AD%97%E8%A1%A8?action=raw",
+  "cache_file": "ztghz-2013.txt",
+  "license": "官方文件（依《著作权法》第 5 条不受著作权保护）",
+  "license_note": "取维基文库页面文本（页面文本 CC BY-SA 4.0，原文为官方文件）；原文权威以教育部官网为准",
+  "sha256": "5BEA6EF13320798164BB1D74D755AA0707C902D12C43BEE0CD3F7282FC7CCCE5",
+  "size": 242747,
+  "note": "8,105 字（一级 3,500 / 二级 3,000 / 三级 1,605），作字集覆盖基线；仅单字，需在构建期组合成词或作过滤基线（需求 R4 常用词骨架）",
+  "fetched_at": "2026-09-28"
+}

@@ -1,0 +1,14 @@
+{
+  "id": "xdhyc-2008",
+  "name": "现代汉语常用词表（草案）2008",
+  "role": "base-authoritative",
+  "kind": "url",
+  "url": "http://www.moe.gov.cn/ewebeditor/uploadfile/2015/01/13/20150113085920115.pdf",
+  "cache_file": "xdhyc-2008.pdf",
+  "license": "官方行政文件（依《著作权法》第 5 条不受著作权保护）",
+  "license_note": "教育部/国家语委 2008 发布；注明来源即可；官网页面存在 http/https 跳转，脚本需跟随重定向",
+  "sha256": "96AA708D549E7E9F80A0359557122F10F05450A4BA793B9AEFD4BBF2BB5A552B",
+  "size": 9341379,
+  "note": "56,008 词按常用度排序（草案版）；二期正式版（2017 前后）无官方公开文本，草案为骨架基线（需求 R4 常用词骨架）",
+  "fetched_at": "2026-09-28"
+}

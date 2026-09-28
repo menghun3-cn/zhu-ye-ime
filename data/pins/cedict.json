@@ -1,0 +1,15 @@
+{
+  "id": "cedict",
+  "name": "CC-CEDICT（中英词条/拼音/译文，压缩包）",
+  "role": "legacy-baseline",
+  "kind": "url",
+  "url": "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz",
+  "cache_rel": "data/raw/cedict.ts.gz",
+  "cache_file": "cedict.ts.gz",
+  "license": "CC BY-SA 4.0",
+  "license_note": "派生词典数据文件按 CC BY-SA 4.0 发布",
+  "sha256": "850243FB1FA345822B5A9722FA94B9B72817841B763D9B8056308EEA33F7CE77",
+  "size": 3974945,
+  "fetched_at": "2026-09-21",
+  "note": "第一期已入库基线源（数据清单 D-001）；pin 用于统一核对，缓存路径沿用 data/raw（M6-P 迁移后统一入 data/cache）"
+}

@@ -2,7 +2,7 @@
 
 本文件记录项目使用到的所有第三方数据、词表、语料与工具，用于许可合规审查。新增数据源必须在此登记后才能进入数据管线。
 
-现状：D-001 CC-CEDICT、D-004 FrequencyWords 中文词频与 D-006 OPUS GlobalVoices 已于 2026-09-21 引入数据管线，用于离线导入真实词库；原始文件与生成产物保存在 `data/` 且不进入 git，派生说明见 `docs/数据清单.md`。ECDICT（D-002）仍待引入。
+现状：D-001 CC-CEDICT、D-004 FrequencyWords 中文词频与 D-006 OPUS GlobalVoices 已于 2026-09-21 引入数据管线，用于离线导入真实词库；原始文件与生成产物保存在 `data/` 且不进入 git，派生说明见 `docs/数据清单.md`。ECDICT（D-002）仍待引入。2026-09-28（M6）新增 D-007 至 D-013 七源，均由 `data/pins/` 锁定并校验。
 
 ## 数据源登记
 
@@ -14,6 +14,13 @@
 | D-004 | FrequencyWords 中文词频 | unigram 词频映射（真实词库） | 内容 CC BY-SA 4.0；代码 MIT | 2026-09-21 | 已引入：导入命中 28,130 词条；bigram 语料由 D-006 提供；清单见 [数据清单.md](./数据清单.md) |
 | D-005 | 自建演示种子 | T-006 演示词典（20 词条 + 10 bigram + 19 译文） | 自建数据 | 2026-09-19 | 已引入：`demo.rs` 种子与 `seed.zyct` 构建产物；不含第三方词表 |
 | D-006 | OPUS GlobalVoices 简体中文分词语料 | bigram 共现统计（真实词库） | 内容 CC BY 3.0（官网声明：This site is licensed as Creative Commons Attribution 3.0） | 2026-09-21 | 已引入：真实 bigram 820,368 词对；清单见 [数据清单.md](./数据清单.md) |
+| D-007 | jieba dict.txt | base 骨架扩充 + 第二词频源 | MIT | 2026-09-28 | 已引入（M6）：pins 锁定，清单见 [数据清单.md](./数据清单.md) |
+| D-008 | THUOCL_IT（清华开放中文词库 IT 类） | IT 领域包 | MIT | 2026-09-28 | 已引入（M6）：pins 锁定，清单见 [数据清单.md](./数据清单.md) |
+| D-009 | THUOCL_medical（医学类） | 医学领域包 | MIT | 2026-09-28 | 已引入（M6）：pins 锁定，清单见 [数据清单.md](./数据清单.md) |
+| D-010 | 现代汉语常用词表（草案）2008（教育部官网 PDF） | base 骨架 | 官方行政文件（依《著作权法》第 5 条不受著作权保护） | 2026-09-28 | 已引入（M6）：pins 锁定，清单见 [数据清单.md](./数据清单.md) |
+| D-011 | 通用规范汉字表（2013，维基文库页面文本） | 字集覆盖基线 | 官方文件（页面文本 CC BY-SA 4.0） | 2026-09-28 | 已引入（M6）：pins 锁定，清单见 [数据清单.md](./数据清单.md) |
+| D-012 | wordfreq 3.1.1（PyPI wheel） | 主词频源（zipf） | 代码 Apache-2.0；**数据 CC BY-SA 4.0** | 2026-09-28 | 已引入（M6）：pins 锁定；派生词典数据文件须按 CC BY-SA 4.0 发布并署名，与 CC-CEDICT 处理一致 |
+| D-013 | MDN zh-cn 术语表（glossary slug 快照） | IT 领域包补充 | **CC BY-SA 2.5+**（署名 Mozilla Contributors） | 2026-09-28 | 已引入（M6）：快照提交入库，清单见 [数据清单.md](./数据清单.md) |
 
 ## 使用规则
 
