@@ -13,8 +13,9 @@ use zhu_ye_core::dict_format::DictHeader;
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
-    build_real_bigrams, build_real_dictionary, build_v2, dict_schema_version, pipeline_status,
-    seed_bigrams, seed_entries,
+    build_manifest, build_pack, build_real_bigrams, build_real_dictionary, build_v2,
+    dict_schema_version, pipeline_status, seed_bigrams, seed_entries, source_check, today,
+    verify_manifest,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -44,6 +45,10 @@ fn run() -> Result<(), String> {
         Some("import") => import_command(&args),
         Some("inspect") => inspect_command(required_path(&args, 2)?),
         Some("verify") => verify_command(required_path(&args, 2)?),
+        Some("source-check") => source_check_command(),
+        Some("build-pack") => build_pack_command(args.get(2).map(String::as_str)),
+        Some("build-manifest") => build_manifest_command(&args),
+        Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
         _ => {
             print_usage();
             Ok(())
@@ -59,6 +64,83 @@ fn print_usage() {
     );
     println!("  inspect <文件>        打印词典头部元数据与内容哈希");
     println!("  verify <文件>         完整加载校验并核对种子词条/bigram/翻译");
+    println!("  source-check          核对 data/pins 全部源的缓存哈希（M6）");
+    println!(
+        "  build-pack <it|med>  构建领域词包（THUOCL + 词级/单字级注音，输出 data/artifacts/<id>.zyct）（M6）"
+    );
+    println!(
+        "  build-manifest [目录] [--version V] [--min-engine V]  扫描 *.zyct 生成 manifest.json（M6）"
+    );
+    println!("  verify-manifest <manifest.json>  逐包复核内容哈希与大小（M6）");
+}
+
+/// `source-check`：source_check 失败返回 Err（含逐源明细），帮助文本仍可读。
+fn source_check_command() -> Result<(), String> {
+    source_check(Path::new(".")).map(|stats| {
+        println!(
+            "核对完成：{} 个源，锁定一致 {}，未锁定 {}",
+            stats.checked, stats.locked_ok, stats.unlocked
+        );
+    })
+}
+
+/// `build-pack <it|med>`：构建领域词包并打印内容哈希。
+fn build_pack_command(pack_id: Option<&str>) -> Result<(), String> {
+    let pack_id = pack_id.ok_or_else(|| "缺少包 id（支持：it / med）".to_owned())?;
+    let stats = build_pack(pack_id, Path::new("."))?;
+    println!("内容 SHA-256: {}", stats.sha256);
+    Ok(())
+}
+
+/// `build-manifest [目录] [--version V] [--min-engine V]`：
+/// 扫描目录内 `*.zyct` 生成 `manifest.json`（未签名，签名在 M6-U）。
+fn build_manifest_command(args: &[String]) -> Result<(), String> {
+    let mut dir = PathBuf::from("data/artifacts");
+    let mut version = None;
+    let mut min_engine_version = None;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--version" => {
+                index += 1;
+                version = Some(
+                    args.get(index)
+                        .ok_or_else(|| "--version 缺少版本号".to_owned())?,
+                );
+            }
+            "--min-engine" => {
+                index += 1;
+                min_engine_version = Some(
+                    args.get(index)
+                        .ok_or_else(|| "--min-engine 缺少版本号".to_owned())?,
+                );
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                dir = PathBuf::from(&args[index]);
+            }
+        }
+        index += 1;
+    }
+    let version = version.cloned().unwrap_or_else(today);
+    let min_engine = min_engine_version
+        .cloned()
+        .unwrap_or_else(|| "0.1.0".to_owned());
+    let manifest = build_manifest(&dir, &version, &min_engine)?;
+    let output = dir.join("manifest.json");
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("序列化 manifest 失败: {error}"))?;
+    std::fs::write(&output, json)
+        .map_err(|error| format!("写入 manifest 失败（{}）: {error}", output.display()))?;
+    println!("已写入: {}", output.display());
+    Ok(())
+}
+
+/// `verify-manifest <文件>`：逐包复核内容哈希与大小。
+fn verify_manifest_command(path: PathBuf) -> Result<(), String> {
+    verify_manifest(&path).map(|_| ())
 }
 
 fn required_path(args: &[String], index: usize) -> Result<PathBuf, String> {

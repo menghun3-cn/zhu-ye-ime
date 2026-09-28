@@ -1,11 +1,13 @@
 //! 词典数据管线。
 //!
 //! 本 crate 负责把受控种子/清洗后的词表编译为 v2 二进制词典包，并提供
-//! `build` / `inspect` / `verify` 三个 CLI 命令。字节布局、哈希与加载器
-//! 全部由 `zhu-ye-core` 统一承载，避免构建方与加载方出现两套格式。
+//! `build` / `inspect` / `verify` / `source-check` / `build-pack` /
+//! `build-manifest` / `verify-manifest` 等 CLI 命令。字节布局、哈希与
+//! 加载器全部由 `zhu-ye-core` 统一承载，避免构建方与加载方出现两套格式。
 //!
 //! `import` 命令负责把 CC-CEDICT 与开放词频语料清洗为真实词条，
 //! 数据来源与许可证见 `docs/数据清单.md` 与 `docs/licenses.md`。
+//! 第二期（M6）多词包与 manifest 逻辑见 [`m6`] 模块。
 
 pub use zhu_ye_core::demo::{seed_bigrams, seed_entries};
 pub use zhu_ye_core::dict_builder::build_v2;
@@ -18,6 +20,9 @@ pub use import::{
 };
 pub use import::{BigramStats, ImportStats};
 
+pub mod m6;
+pub use m6::{build_manifest, build_pack, source_check, today, verify_manifest, Manifest};
+
 /// 词典二进制格式版本。
 #[must_use]
 pub const fn dict_schema_version() -> u32 {
@@ -27,7 +32,7 @@ pub const fn dict_schema_version() -> u32 {
 /// 返回当前数据管线状态，供自检使用。
 #[must_use]
 pub fn pipeline_status() -> &'static str {
-    "v2 格式构建/检查可用：build、inspect、verify、import（CC-CEDICT + 词频）"
+    "v2 格式构建/检查可用：build、inspect、verify、import；M6：source-check、build-pack、build-manifest、verify-manifest"
 }
 
 #[cfg(test)]

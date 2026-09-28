@@ -327,6 +327,9 @@ dependencies = [
 name = "zhu-ye-dict"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
  "zhu-ye-core",
 ]
 

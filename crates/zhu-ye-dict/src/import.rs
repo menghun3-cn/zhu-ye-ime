@@ -122,7 +122,7 @@ pub fn normalize_pinyin(marked: &str) -> Option<String> {
 
 /// 按 CC-CEDICT 的空白/撇号分界拆分音节，并逐个归一化。
 /// 返回每个音节的无调连续全拼；任一分界片段含非法字符时返回 `None`。
-fn split_pinyin_syllables(marked: &str) -> Option<Vec<String>> {
+pub(crate) fn split_pinyin_syllables(marked: &str) -> Option<Vec<String>> {
     let mut syllables = Vec::new();
     for part in marked.split([' ', '\'']) {
         let part = part.trim();
@@ -139,7 +139,7 @@ fn split_pinyin_syllables(marked: &str) -> Option<Vec<String>> {
 }
 
 /// 检查简体词是否只由 CJK 统一表意文字组成。
-fn is_cjk_word(word: &str) -> bool {
+pub(crate) fn is_cjk_word(word: &str) -> bool {
     !word.is_empty()
         && word
             .chars()
