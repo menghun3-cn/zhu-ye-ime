@@ -269,11 +269,11 @@ impl CandidateMetrics {
         }
     }
 
-    /// 面板总尺寸；`rows` 为页面预留行数。
+    /// 面板总尺寸；`rows` 为页面预留行数，0 表示无候选（只显示页眉条）。
     #[must_use]
     pub fn panel_size(&self, rows: usize) -> (i32, i32) {
-        let rows = i32::try_from(rows).unwrap_or(i32::MAX).max(1);
-        let rows_height = rows * self.row_height + (rows - 1) * self.row_gap;
+        let rows = i32::try_from(rows).unwrap_or(i32::MAX).max(0);
+        let rows_height = rows * self.row_height + (rows - 1).max(0) * self.row_gap;
         (
             self.panel_width,
             self.header_height + rows_height + self.padding_y * 2,
@@ -433,7 +433,7 @@ fn bgr_to_rgb(color: u32) -> u32 {
 mod tests {
     use super::{
         fit_text, index_marker, theme, theme_from_system_colors, CandidateMetrics, CandidateUiItem,
-        CandidateUiView, SystemColors, UiColor, UiThemeKind, DEFAULT_PAGE_SIZE,
+        CandidateUiView, SystemColors, UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE,
     };
     use zhu_ye_core::candidate::CandidateSource;
 
@@ -509,6 +509,20 @@ mod tests {
         assert_eq!(scaled.font_height, base.font_height * 2);
         assert_eq!(scaled.panel_size(9).1, base.panel_size(9).1 * 2);
         assert_eq!(scaled.panel_size(9).0, base.panel_size(9).0 * 2);
+    }
+
+    #[test]
+    fn 零行面板只含页眉条() {
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        let (width, height) = metrics.panel_size(0);
+        assert_eq!(width, metrics.panel_width);
+        assert_eq!(height, metrics.header_height + metrics.padding_y * 2);
+        // 一行面板比零行面板恰好多一个整行（单行无行距）。
+        let (_, one) = metrics.panel_size(1);
+        assert_eq!(one - height, metrics.row_height);
+        // 与既有九行尺寸一致（回归保护）。
+        assert_eq!(metrics.panel_size(9).1, 398);
+        assert_eq!(metrics.panel_size(9).0, 360);
     }
 
     #[test]

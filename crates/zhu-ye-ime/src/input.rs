@@ -417,7 +417,7 @@ impl InputEngine {
         }
         // items 必须携带当前层**全部**候选：`CandidateUiView::visible_items()`
         // 会再按 `page` 切片一次；若这里只放当前页，翻页后切片越界变空，
-        // 候选窗会被误判为“无候选”而隐藏（VM 验收翻页时复现）。
+        // 页面上将看不到余下候选（VM 验收翻页时复现）。
         CandidateUiView {
             composition: self.composing.clone(),
             pinyin_hint: pinyin_hints(&self.composing),

@@ -90,7 +90,16 @@ cap truncation, determinism) and merging (dedup keeps group 2), in-memory and
 file-backed prefix queries, and ime behavior (residual drop on selection,
 Backspace recompute, no candidates for `z`/`zh`); host-e2e gained prefix
 assertions. The VM drill on v0.1.1 with the seed dictionary passed every
-scene: `nih` shows 3 candidates with the window visible, `zh` shows none,
-Backspace recomputes to `ni`, digit 3 commits 你 and discards the residual h,
-and the saved file bytes (GBK `C4 E3 BA C3 C4 E3 C4 E3`) spell 你好你你.
-Screenshots (shots6) are archived for human review.
+scene: `nih` shows 3 candidates with the window visible, `zh` shows no
+candidate words, Backspace recomputes to `ni`, digit 3 commits 你 and discards
+the residual h, and the saved file bytes (GBK `C4 E3 BA C3 C4 E3 C4 E3`) spell
+你好你你. Screenshots (shots6) are archived for human review. A follow-up
+drill on the real dictionary (30 MB, v2) re-confirmed parity on v0.1.1:
+`zhidao` lists 7 candidates with 知道 first, `nih` shows the prefix groups
+(你好 first) plus the completed 你, and `wo` commits 我; screenshots (shots7)
+archived. The real-dictionary smoke (`host-e2e --real-smoke`) gained
+`zhidao`-first and prefix-parity assertions so seed-vs-real dictionary
+regressions cannot hide behind the tiny demo wordlist. Since T-031 the
+candidate window stays visible while the composition is non-empty even when
+both groups are empty, showing only the header bar (see
+2026-09-25-candidate-window-light-default-and-empty-panel.md).

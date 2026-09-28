@@ -9,9 +9,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{
-    COLORREF, ERROR_SUCCESS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
-};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetDIBits,
@@ -24,10 +22,6 @@ use windows::Win32::Graphics::Gdi::{
     OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
-    REG_VALUE_TYPE,
-};
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -95,9 +89,10 @@ impl CandidateWindow {
         }
     }
 
-    /// 更新候选视图；无候选时隐藏窗口，有候选且窗口未创建时创建并显示。
+    /// 更新候选视图；组合串为空时隐藏窗口，否则创建（如未创建）并显示。
+    /// 无候选词时也显示——只画页眉条（组合串与拼音提示），见 T-031。
     pub fn update(&mut self, view: CandidateUiView, placement: Option<CandidateWindowPlacement>) {
-        if view.visible_items().is_empty() {
+        if view.composition.is_empty() {
             self.hide();
             return;
         }
@@ -165,7 +160,7 @@ impl CandidateWindow {
                 initial_dpi,
                 false,
             ));
-            if state.view.visible_items().is_empty() {
+            if state.view.composition.is_empty() {
                 return;
             }
             let (width, height) = state.metrics.panel_size(state.view.panel_rows());
@@ -938,13 +933,8 @@ fn resolve_theme(pref: ThemePreference) -> CandidateUiTheme {
     let high_contrast = system_high_contrast_on();
     let kind = match pref {
         ThemePreference::Auto if high_contrast => UiThemeKind::HighContrast,
-        ThemePreference::Auto => {
-            if apps_use_light_theme() {
-                UiThemeKind::Light
-            } else {
-                UiThemeKind::Dark
-            }
-        }
+        // T-030：默认固定浅色，不再跟随系统深浅色（深色仅经显式设置使用）。
+        ThemePreference::Auto => UiThemeKind::Light,
         ThemePreference::Light => UiThemeKind::Light,
         ThemePreference::Dark => UiThemeKind::Dark,
         ThemePreference::HighContrast => UiThemeKind::HighContrast,
@@ -983,38 +973,6 @@ fn system_colors() -> SystemColors {
             highlight_text: GetSysColor(COLOR_HIGHLIGHTTEXT),
             btn_face: GetSysColor(COLOR_BTNFACE),
         }
-    }
-}
-
-fn apps_use_light_theme() -> bool {
-    unsafe {
-        let path =
-            to_utf16_null("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
-        let value = to_utf16_null("AppsUseLightTheme");
-        let mut key = HKEY::default();
-        let status = RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(path.as_ptr()),
-            None,
-            KEY_READ,
-            &mut key,
-        );
-        if status != ERROR_SUCCESS {
-            return true;
-        }
-        let mut value_type = REG_VALUE_TYPE::default();
-        let mut data = 0u32;
-        let mut size = std::mem::size_of::<u32>() as u32;
-        let status = RegQueryValueExW(
-            key,
-            PCWSTR(value.as_ptr()),
-            None,
-            Some(&mut value_type),
-            Some(std::ptr::addr_of_mut!(data).cast()),
-            Some(&mut size),
-        );
-        let _ = RegCloseKey(key);
-        status == ERROR_SUCCESS && value_type == REG_DWORD && size == 4 && data != 0
     }
 }
 

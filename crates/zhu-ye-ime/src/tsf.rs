@@ -542,10 +542,13 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
 }
 
 /// 用引擎最新状态刷新候选窗。`edit` 提供编辑会话内的上下文以计算组合区坐标。
+///
+/// T-031：组合串非空即显示候选窗；无候选词时只画页眉条（组合串与拼音提示），
+/// 仅当组合串为空（上屏/取消后）才隐藏窗口。
 fn refresh_candidate_window(state: &Rc<Mutex<EngineState>>, edit: Option<(&ITfContext, u32)>) {
     let view = state.lock().unwrap().engine.candidate_ui_view();
-    if view.visible_items().is_empty() {
-        debug_log("zhu-ye: cand-hide (no items)");
+    if view.composition.is_empty() {
+        debug_log("zhu-ye: cand-hide (no composition)");
         state.lock().unwrap().candidate_window.hide();
         return;
     }
