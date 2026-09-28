@@ -17,9 +17,10 @@ use windows::Win32::Graphics::Gdi::{
     RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
     COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET, DEFAULT_GUI_FONT,
-    DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
+    DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, LOGFONTW, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY,
+    TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -388,6 +389,17 @@ impl CandidateWindowState {
         } else {
             self.view.pinyin_hint.as_str()
         };
+        // T-040：页脚 m/n 翻页指示（总页数 >1 时在面板底部右端显示）。
+        if page_rows > 0 {
+            if let Some(label) = self.view.footer_label() {
+                draw_text_right(
+                    hdc,
+                    &label,
+                    self.metrics.footer_rect(page_rows),
+                    self.theme.secondary,
+                );
+            }
+        }
         draw_text(
             hdc,
             header_text,
@@ -781,6 +793,25 @@ fn draw_text(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
             &mut wide,
             &mut rect,
             DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
+}
+
+/// 右对齐绘制一行文本（T-040 页脚页码用；不做省略截断）。
+fn draw_text_right(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
+    if text.is_empty() || rect.width() <= 0 || rect.height() <= 0 {
+        return;
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = to_win_rect(rect);
+    unsafe {
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(color.to_colorref()));
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut rect,
+            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT,
         );
     }
 }

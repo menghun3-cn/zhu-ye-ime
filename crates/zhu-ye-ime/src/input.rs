@@ -439,6 +439,7 @@ impl InputEngine {
                 pinyin_hint: pinyin_hints(&self.composing),
                 page: self.page.min(self.page_count().saturating_sub(1)),
                 page_size,
+                page_count: 1,
                 selected: 0,
                 translation_mode: self.layer == CandidateLayer::Translation,
                 items: Vec::new(),
@@ -452,6 +453,7 @@ impl InputEngine {
             pinyin_hint: pinyin_hints(&self.composing),
             page: self.page.min(self.page_count().saturating_sub(1)),
             page_size,
+            page_count: self.page_count(),
             selected: self.selected_on_page,
             translation_mode: self.layer == CandidateLayer::Translation,
             items: self

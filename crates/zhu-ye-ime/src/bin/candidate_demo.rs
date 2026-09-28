@@ -109,6 +109,7 @@ fn demo_view(translation_mode: bool) -> CandidateUiView {
         pinyin_hint: "ni hao".to_owned(),
         page: 0,
         page_size: DEFAULT_PAGE_SIZE,
+        page_count: 1,
         selected: 0,
         translation_mode,
         items: vec![

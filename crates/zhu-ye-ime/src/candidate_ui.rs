@@ -33,6 +33,8 @@ pub struct CandidateUiView {
     pub page: usize,
     /// 每页最大条数。
     pub page_size: usize,
+    /// 候选总页数（页脚 m/n 指示用，T-040）。
+    pub page_count: usize,
     /// 当前页中选中序号，从 0 开始。
     pub selected: usize,
     /// 是否处于译文层；译文层以译文作为主文本。
@@ -75,6 +77,12 @@ impl CandidateUiView {
         } else {
             self.page_size.max(1)
         }
+    }
+
+    /// 页脚翻页指示文本 `m/n`；总页数 ≤1 时无指示（T-040）。
+    #[must_use]
+    pub fn footer_label(&self) -> Option<String> {
+        page_footer_label(self.page, self.page_count)
     }
 }
 
@@ -241,6 +249,8 @@ pub struct CandidateMetrics {
     pub marker_width: i32,
     /// 主文本与译文分栏间距。
     pub translation_gap: i32,
+    /// 页脚高度（m/n 翻页指示条）；无候选页（仅页眉条）时不占空间。
+    pub footer_height: i32,
     /// 圆角半径。
     pub corner_radius: i32,
     /// 字体像素高度。
@@ -265,20 +275,38 @@ impl CandidateMetrics {
             // T-037：序号列收窄使候选词更贴近序号；译文紧随主文本间距减小。
             marker_width: dp(26.0),
             translation_gap: dp(8.0),
+            // T-040：页脚 m/n 翻页指示条。
+            footer_height: dp(20.0),
             corner_radius: dp(8.0),
             font_height: dp(16.0),
         }
     }
 
     /// 面板总尺寸；`rows` 为页面预留行数，0 表示无候选（只显示页眉条）。
+    /// 有候选行时底部追加页脚条（T-040）。
     #[must_use]
     pub fn panel_size(&self, rows: usize) -> (i32, i32) {
         let rows = i32::try_from(rows).unwrap_or(i32::MAX).max(0);
         let rows_height = rows * self.row_height + (rows - 1).max(0) * self.row_gap;
+        let footer = if rows > 0 { self.footer_height } else { 0 };
         (
             self.panel_width,
-            self.header_height + rows_height + self.padding_y * 2,
+            self.header_height + rows_height + footer + self.padding_y * 2,
         )
+    }
+
+    /// 页脚矩形（m/n 翻页指示条，T-040）；位于最后一行下方、底部内边距
+    /// 之上，右对齐绘制页码。`rows` 为当前面板候选行数（0 时无意义）。
+    #[must_use]
+    pub fn footer_rect(&self, rows: usize) -> UiRect {
+        let (_, panel_height) = self.panel_size(rows);
+        let bottom = panel_height - self.padding_y;
+        UiRect {
+            left: self.padding_x,
+            top: bottom - self.footer_height,
+            right: self.panel_width - self.padding_x,
+            bottom,
+        }
     }
 
     /// 页眉矩形。
@@ -392,6 +420,16 @@ pub fn index_marker(index: usize) -> String {
     format!("{}", index + 1)
 }
 
+/// 页脚翻页指示 `m/n`（当前页+1 / 总页数）；总页数 ≤1 时返回 `None`（T-040）。
+#[must_use]
+pub fn page_footer_label(page: usize, page_count: usize) -> Option<String> {
+    if page_count <= 1 {
+        return None;
+    }
+    let page = page.min(page_count.saturating_sub(1));
+    Some(format!("{}/{}", page + 1, page_count))
+}
+
 /// 估算文本像素宽度：ASCII 约为 0.55 倍字高，CJK 与其他字符约 1 倍字高。
 #[allow(dead_code)] // 供后续候选窗精确排版与 T-013 文本测量使用。
 #[must_use]
@@ -441,9 +479,9 @@ fn bgr_to_rgb(color: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        estimate_text_width, fit_text, index_marker, theme, theme_from_system_colors,
-        CandidateMetrics, CandidateUiItem, CandidateUiView, SystemColors, UiColor, UiThemeKind,
-        BASE_DPI, DEFAULT_PAGE_SIZE,
+        estimate_text_width, fit_text, index_marker, page_footer_label, theme,
+        theme_from_system_colors, CandidateMetrics, CandidateUiItem, CandidateUiView, SystemColors,
+        UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE,
     };
     use zhu_ye_core::candidate::CandidateSource;
 
@@ -453,6 +491,7 @@ mod tests {
             pinyin_hint: "ni hao".to_owned(),
             page: 0,
             page_size: DEFAULT_PAGE_SIZE,
+            page_count: 1,
             selected: 0,
             translation_mode: false,
             items: (0..items)
@@ -527,12 +566,17 @@ mod tests {
         let (width, height) = metrics.panel_size(0);
         assert_eq!(width, metrics.panel_width);
         assert_eq!(height, metrics.header_height + metrics.padding_y * 2);
-        // 一行面板比零行面板恰好多一个整行（单行无行距）。
+        // 一行面板比零行面板多一个整行 + 页脚条（有候选行才显示页脚，T-040）。
         let (_, one) = metrics.panel_size(1);
-        assert_eq!(one - height, metrics.row_height);
-        // 与既有九行尺寸一致（回归保护）。
-        assert_eq!(metrics.panel_size(9).1, 398);
+        assert_eq!(one - height, metrics.row_height + metrics.footer_height);
+        // 与既有九行尺寸一致（回归保护）；T-040 起含页脚条。
+        assert_eq!(metrics.panel_size(9).1, 398 + metrics.footer_height);
         assert_eq!(metrics.panel_size(9).0, 360);
+        // 零行面板不占页脚空间（T-031 页眉条行为保持）。
+        assert_eq!(
+            metrics.panel_size(0).1,
+            metrics.panel_size(1).1 - metrics.row_height - metrics.footer_height
+        );
     }
 
     #[test]
@@ -596,6 +640,37 @@ mod tests {
         let (main, translation) = metrics.row_split(row, &long, "");
         assert_eq!(translation.left - main.right, metrics.translation_gap);
         assert!(translation.width() >= 1);
+    }
+
+    #[test]
+    fn 页脚页码指示仅在多页时显示且格式为mn() {
+        // 单页无指示。
+        assert_eq!(page_footer_label(0, 1), None);
+        // 多页：当前页 +1 / 总页数。
+        assert_eq!(page_footer_label(0, 2).as_deref(), Some("1/2"));
+        assert_eq!(page_footer_label(1, 2).as_deref(), Some("2/2"));
+        assert_eq!(page_footer_label(1, 3).as_deref(), Some("2/3"));
+        // 页码越界时收敛到末页。
+        assert_eq!(page_footer_label(9, 3).as_deref(), Some("3/3"));
+        // 视图快照联动。
+        let mut view = view_with(20);
+        assert_eq!(view.footer_label(), None);
+        view.page_count = 3;
+        view.page = 1;
+        assert_eq!(view.footer_label().as_deref(), Some("2/3"));
+    }
+
+    #[test]
+    fn 页脚矩形位于最后一行下方且不与行重叠() {
+        let metrics = CandidateMetrics::new(96);
+        for rows in [1usize, 5, 9] {
+            let last_row = metrics.row_rect(rows - 1);
+            let footer = metrics.footer_rect(rows);
+            assert!(footer.top >= last_row.bottom, "rows={rows}");
+            assert!(footer.bottom <= metrics.panel_size(rows).1 - metrics.padding_y);
+            assert!(footer.left < footer.right);
+            assert!(footer.height() == metrics.footer_height);
+        }
     }
 
     #[test]
