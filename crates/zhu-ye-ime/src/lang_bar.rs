@@ -29,7 +29,7 @@ use windows::Win32::Foundation::{E_NOINTERFACE, E_NOTIMPL, E_POINTER, POINT, REC
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW, DeleteDC,
     DeleteObject, DrawTextW, GetDC, GetStockObject, ReleaseDC, SelectObject, SetBkMode,
-    SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+    SetTextColor, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS,
     DEFAULT_CHARSET, DEFAULT_GUI_FONT, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CENTER, DT_NOPREFIX,
     DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, HBITMAP, HFONT, LOGFONTW, OUT_DEFAULT_PRECIS,
     TRANSPARENT,
@@ -49,10 +49,10 @@ pub const LANG_BAR_ITEM_GUID: GUID = GUID::from_u128(0x8C4E3F2A_1D9B_4E57_A6C0_2
 
 /// 语言栏图标物理尺寸（小图标，与 `SM_CXSMICON` 一致，不随 DPI 缩放）。
 const ICON_PX: i32 = 16;
-/// 中文模式图标底色（品牌蓝 #1E88E5，BGR 字节序）。
-const BG_COLOR_CHINESE: u32 = 0x00E5_881E;
-/// 英文模式图标底色（中性灰 #757575，BGR 字节序）。
-const BG_COLOR_ENGLISH: u32 = 0x0075_7575;
+/// 中文模式图标底色（品牌蓝 #1E88E5；32bpp 像素 0xAABBGGRR，最高字节 alpha=0xFF 不透明）。
+const BG_COLOR_CHINESE: u32 = 0xFFE5_881E;
+/// 英文模式图标底色（中性灰 #757575；同上，alpha=0xFF 不透明）。
+const BG_COLOR_ENGLISH: u32 = 0xFF75_7575;
 
 // ---------------------------------------------------------------------------
 // ITfSource 胶水接口（windows 0.61 未绑定，按 crate 惯例补定义）
@@ -275,7 +275,9 @@ fn render_mode_icon(bg_bgr: u32, glyph: &str) -> Result<ModeIcon> {
                 lfCharSet: DEFAULT_CHARSET,
                 lfOutPrecision: OUT_DEFAULT_PRECIS,
                 lfClipPrecision: CLIP_DEFAULT_PRECIS,
-                lfQuality: CLEARTYPE_QUALITY,
+                // 灰度抗锯齿：在 32bpp DIB 上可靠写入 alpha（CLEARTYPE 的
+                // 次像素渲染在透明底上可能留下 alpha=0 的不可见图元）。
+                lfQuality: ANTIALIASED_QUALITY,
                 lfPitchAndFamily: FF_DONTCARE.0 | DEFAULT_PITCH.0,
                 lfFaceName: face,
                 ..Default::default()
@@ -304,6 +306,14 @@ fn render_mode_icon(bg_bgr: u32, glyph: &str) -> Result<ModeIcon> {
                 &mut rect,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
             );
+            // GDI 文本在 32bpp DIB 上只写 RGB 不写 alpha（命中字形区域的像素
+            // alpha 落到 0x00）；图标的透明由 alpha 决定，因此把这些"区别于
+            // 底色"的像素显式置为不透明，白字才可见。
+            for p in pixels.iter_mut() {
+                if (*p >> 24) & 0xFF == 0 && *p & 0x00FF_FFFF != bg_bgr {
+                    *p |= 0xFF00_0000;
+                }
+            }
             SelectObject(mem, old_font);
             if !font_is_stock {
                 let _ = DeleteObject(font.into());
@@ -540,6 +550,7 @@ impl LangBarHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Graphics::Gdi::GetDIBits;
     use windows::Win32::UI::TextServices::ITfLangBarItemSink_Impl;
     use windows::Win32::UI::WindowsAndMessaging::GetIconInfo;
     /// 桩 sink：记录收到的 OnUpdate 标志位。
@@ -557,6 +568,37 @@ mod tests {
 
     fn new_button(mode: InputMode) -> ComObject<LangBarModeButton> {
         ComObject::new(LangBarModeButton::new(mode))
+    }
+
+    /// 经 GetDIBits 把图标颜色位图按 32bpp 自顶向下回读为像素（0xAABBGGRR）。
+    fn read_bitmap_pixels(hbm: HBITMAP) -> Vec<u32> {
+        let hdc = unsafe { GetDC(None) };
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: ICON_PX,
+                biHeight: -ICON_PX,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            bmiColors: [Default::default()],
+        };
+        let mut buf = vec![0u32; (ICON_PX * ICON_PX) as usize];
+        unsafe {
+            GetDIBits(
+                hdc,
+                hbm,
+                0,
+                ICON_PX as u32,
+                Some(buf.as_mut_ptr().cast()),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+            let _ = ReleaseDC(None, hdc);
+        }
+        buf
     }
 
     fn new_fake_sink() -> (ComObject<FakeSink>, ITfLangBarItemSink) {
@@ -678,16 +720,40 @@ mod tests {
         assert_eq!(info.szDescription[0], '竹' as u16);
     }
 
-    /// 图标可渲染：中/英两枚图标都能创建成功（句柄有效，位图可回读）。
+    /// 图标可渲染：中/英两枚图标创建成功，且像素级校验——底色
+    /// alpha=0xFF（托盘上不隐身）、存在白色字形像素（"中"/"英"可见）。
     #[test]
     fn 中英图标可渲染() {
         let icons = &mode_icons().expect("图标应能在桌面会话中创建");
-        for set in [&icons.chinese, &icons.english] {
+        let expect_bg = [
+            BG_COLOR_CHINESE & 0x00FF_FFFF,
+            BG_COLOR_ENGLISH & 0x00FF_FFFF,
+        ];
+        for (set, bg_rgb) in [&icons.chinese, &icons.english].into_iter().zip(expect_bg) {
             let mut info = ICONINFO::default();
             assert!(
                 unsafe { GetIconInfo(set.icon, &mut info) }.is_ok(),
                 "GetIconInfo 应成功"
             );
+            let pixels = read_bitmap_pixels(info.hbmColor);
+            assert_eq!(pixels.len(), 256, "应为 16×16 像素回读");
+            // 背景色（取四角）：alpha 必须为 0xFF（不透明），RGB 必须命中底色。
+            for idx in [0usize, 15, 240, 255] {
+                let p = pixels[idx];
+                assert_eq!((p >> 24) & 0xFF, 0xFF, "四角像素 alpha 必须不透明");
+                assert_eq!(p & 0x00FF_FFFF, bg_rgb, "四角像素底色应精确匹配");
+            }
+            // 字形：白（RGB 全 ≥ 180）且 alpha ≥ 200 的像素应成片存在。
+            let white = pixels
+                .iter()
+                .filter(|&&p| {
+                    (p >> 24) & 0xFF >= 200
+                        && p & 0xFF >= 180
+                        && (p >> 8) & 0xFF >= 180
+                        && (p >> 16) & 0xFF >= 180
+                })
+                .count();
+            assert!(white >= 5, "应存在白色字形像素，实际 {white} 个");
             // GetIconInfo 返回的位图是新拷贝，用完必须删除以免句柄泄漏。
             let _ = unsafe { DeleteObject(info.hbmColor.into()) };
             let _ = unsafe { DeleteObject(info.hbmMask.into()) };
