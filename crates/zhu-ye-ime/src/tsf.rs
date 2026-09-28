@@ -31,8 +31,8 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_MENU,
-    VK_OEM_MINUS, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_Z,
+    GetKeyState, VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU,
+    VK_OEM_MINUS, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
@@ -89,6 +89,10 @@ enum KeyAction {
     PageUp,
     /// 句号下翻页。
     PageDown,
+    /// 上方向键移动页内选中行（T-039）。
+    SelectUp,
+    /// 下方向键移动页内选中行（T-039）。
+    SelectDown,
 }
 
 impl KeyAction {
@@ -399,6 +403,9 @@ fn classify_key(wparam: WPARAM, lparam: LPARAM) -> Option<KeyAction> {
         // 同时覆盖 Shift+`=` 的 `+`），替换原 `,`（上翻）与 `.`（下翻）。
         code if code == VK_OEM_MINUS.0 => Some(KeyAction::PageUp),
         code if code == VK_OEM_PLUS.0 => Some(KeyAction::PageDown),
+        // T-039：上下方向键移动页内选中行。
+        code if code == VK_UP.0 => Some(KeyAction::SelectUp),
+        code if code == VK_DOWN.0 => Some(KeyAction::SelectDown),
         _ => None,
     }
 }
@@ -465,7 +472,9 @@ fn apply_action(
         KeyAction::ToggleMode
         | KeyAction::ToggleLayer
         | KeyAction::PageUp
-        | KeyAction::PageDown => {
+        | KeyAction::PageDown
+        | KeyAction::SelectUp
+        | KeyAction::SelectDown => {
             sync_engine(state, action);
             refresh_candidate_window(state, Some((context, ec)));
             return Ok(());
@@ -542,6 +551,12 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
         }
         KeyAction::PageDown => {
             engine.next_page();
+        }
+        KeyAction::SelectUp => {
+            engine.select_up();
+        }
+        KeyAction::SelectDown => {
+            engine.select_down();
         }
     }
 }
@@ -1114,6 +1129,15 @@ mod tests {
             classify_key(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0)),
             None
         );
+        // T-039：上下方向键移动页内选中行。
+        assert_eq!(
+            classify_key(WPARAM(VK_UP.0 as usize), LPARAM(0)),
+            Some(KeyAction::SelectUp)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_DOWN.0 as usize), LPARAM(0)),
+            Some(KeyAction::SelectDown)
+        );
     }
 
     #[test]
@@ -1141,6 +1165,11 @@ mod tests {
             plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, &state),
             None
         );
+        // T-039：无组合时方向键放行给宿主（不干扰光标移动）。
+        assert_eq!(
+            plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), false, &state),
+            None
+        );
 
         // T-033：组合进行中 Shift 不切换模式（`+` 翻页时 Shift 只是修饰键），
         // Tab 与 `=`/`+` 翻页照常吃下。
@@ -1161,6 +1190,34 @@ mod tests {
             plan_action(WPARAM(VK_OEM_MINUS.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::PageUp)
         );
+        // T-039：组合活跃时方向键吃下并移动选中行；无组合时放行给宿主。
+        assert_eq!(
+            plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::SelectDown)
+        );
+        assert_eq!(
+            plan_action(WPARAM(VK_UP.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::SelectUp)
+        );
+        // 修饰键按下时放行（方向键不参与系统组合，这里保证 Ctrl/Alt 场景不吞键）。
+        assert_eq!(
+            plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), true, &state),
+            None
+        );
+    }
+
+    #[test]
+    fn 上下键推进页内选中行() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        sync_engine(&state, KeyAction::Letter('n'));
+        sync_engine(&state, KeyAction::Letter('i'));
+        sync_engine(&state, KeyAction::Letter('h'));
+        sync_engine(&state, KeyAction::Letter('a'));
+        sync_engine(&state, KeyAction::Letter('o'));
+        sync_engine(&state, KeyAction::SelectDown);
+        assert_eq!(state.lock().unwrap().engine.selected_on_page(), 1);
+        sync_engine(&state, KeyAction::SelectUp);
+        assert_eq!(state.lock().unwrap().engine.selected_on_page(), 0);
     }
 
     #[test]

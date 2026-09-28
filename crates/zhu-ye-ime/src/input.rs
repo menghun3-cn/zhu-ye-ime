@@ -64,6 +64,8 @@ pub struct InputEngine {
     ranking: Arc<dyn RankingModel>,
     /// 当前候选页码，从 0 开始。
     page: usize,
+    /// 当前层当前页内选中序号，从 0 开始；上下键移动，翻页后保持。
+    selected_on_page: usize,
     /// 当前候选层：中文候选或译文。
     layer: CandidateLayer,
     /// 每页候选数；默认与 `CANDIDATE_PAGE_SIZE` 一致。
@@ -102,6 +104,7 @@ impl InputEngine {
             user_store: None,
             ranking: Arc::new(StaticRankingModel::default()),
             page: 0,
+            selected_on_page: 0,
             layer: CandidateLayer::default(),
             page_size: CANDIDATE_PAGE_SIZE,
             cached_translation_candidates: Vec::new(),
@@ -224,6 +227,23 @@ impl InputEngine {
         self.page
     }
 
+    /// 当前层当前页内选中序号，从 0 开始。
+    #[must_use]
+    pub fn selected_on_page(&self) -> usize {
+        self.selected_on_page
+    }
+
+    /// 上移页内选中行；已到页首则保持不动（T-039）。
+    pub fn select_up(&mut self) {
+        self.selected_on_page = self.selected_on_page.saturating_sub(1);
+    }
+
+    /// 下移页内选中行；已到页尾（当前页最后一项）则保持不动（T-039）。
+    pub fn select_down(&mut self) {
+        let max = self.visible_candidates().len().saturating_sub(1);
+        self.selected_on_page = self.selected_on_page.saturating_add(1).min(max);
+    }
+
     /// 当前层当前页可见候选；译文中没有译文的词不会出现。
     #[must_use]
     pub fn visible_candidates(&self) -> &[Candidate] {
@@ -283,12 +303,16 @@ impl InputEngine {
         true
     }
 
-    /// 空格提交当前层第一候选；无候选时按设计上屏拼音原文。
+    /// 空格提交当前选中行候选（T-039：上下键移动选中行后回车/空格跟随后者）；
+    /// 无候选时按设计上屏拼音原文。
     pub fn handle_space(&mut self) -> Option<String> {
         if !self.is_active() {
             return None;
         }
-        let Some(candidate) = self.visible_candidates().first() else {
+        let index = self
+            .selected_on_page
+            .min(self.visible_candidates().len().saturating_sub(1));
+        let Some(candidate) = self.visible_candidates().get(index) else {
             return self.commit_raw(self.composing.clone());
         };
         self.commit_candidate(candidate_owned(candidate))
@@ -325,16 +349,17 @@ impl InputEngine {
         self.commit_candidate(candidate_owned(candidate))
     }
 
-    /// 下翻一页；末页回卷到第一页。
+    /// 下翻一页；末页回卷到第一页。页内选中序号保持不变（按新页候选数封顶）。
     pub fn next_page(&mut self) {
         let mut page = self.page.saturating_add(1);
         if page >= self.page_count() {
             page = 0;
         }
         self.page = page;
+        self.clamp_selected();
     }
 
-    /// 上翻一页；首页回卷到最后一页。
+    /// 上翻一页；首页回卷到最后一页。页内选中序号保持不变（按新页候选数封顶）。
     pub fn previous_page(&mut self) {
         let count = self.page_count();
         let mut page = self.page.checked_sub(1).unwrap_or(count - 1);
@@ -342,6 +367,7 @@ impl InputEngine {
             page = 0;
         }
         self.page = page;
+        self.clamp_selected();
     }
 
     /// 切换中文候选层与译文层；无译文候选时保持中文层，避免出现空白页。
@@ -365,12 +391,15 @@ impl InputEngine {
         self.clear_composition();
     }
 
-    /// 为 TSF 层提供提交预览：空格应上屏的文本。
+    /// 为 TSF 层提供提交预览：空格应上屏的当前选中行候选。
     #[must_use]
     pub fn preview_space(&self) -> Option<String> {
         self.is_active().then(|| {
+            let index = self
+                .selected_on_page
+                .min(self.visible_candidates().len().saturating_sub(1));
             self.visible_candidates()
-                .first()
+                .get(index)
                 .map(|c| self.display_text(c))
                 .unwrap_or_else(|| self.composing.clone())
         })
@@ -417,13 +446,13 @@ impl InputEngine {
         }
         // items 必须携带当前层**全部**候选：`CandidateUiView::visible_items()`
         // 会再按 `page` 切片一次；若这里只放当前页，翻页后切片越界变空，
-        // 页面上将看不到余下候选（VM 验收翻页时复现）。
+        // 页面上将看不到余下候选（VM 验收翻页时复现）。选中行取引擎页内序号。
         CandidateUiView {
             composition: self.composing.clone(),
             pinyin_hint: pinyin_hints(&self.composing),
             page: self.page.min(self.page_count().saturating_sub(1)),
             page_size,
-            selected: 0,
+            selected: self.selected_on_page,
             translation_mode: self.layer == CandidateLayer::Translation,
             items: self
                 .current_layer_candidates()
@@ -483,6 +512,13 @@ impl InputEngine {
     fn clamp_page(&mut self) {
         let max = self.page_count().saturating_sub(1);
         self.page = self.page.min(max);
+        self.clamp_selected();
+    }
+
+    /// 页内选中序号按当前页可见候选数封顶（翻页/切层后保持行位）。
+    fn clamp_selected(&mut self) {
+        let max = self.visible_candidates().len().saturating_sub(1);
+        self.selected_on_page = self.selected_on_page.min(max);
     }
 
     fn translation_candidates(&self) -> Vec<Candidate> {
@@ -498,6 +534,7 @@ impl InputEngine {
         self.candidates.clear();
         self.cached_translation_candidates.clear();
         self.page = 0;
+        self.selected_on_page = 0;
         self.layer = CandidateLayer::Chinese;
     }
 
@@ -529,6 +566,8 @@ impl InputEngine {
             .filter(|c| c.translation.as_deref().is_some_and(|s| !s.is_empty()))
             .cloned()
             .collect();
+        // 输入串变化后选中行回到第一行。
+        self.selected_on_page = 0;
         self.clamp_page();
     }
 
@@ -922,6 +961,78 @@ mod tests {
         assert_eq!(engine.preview_selection(0).as_deref(), Some("尼好"));
         assert_eq!(engine.handle_space().as_deref(), Some("尼好"));
         assert!(!engine.is_active());
+    }
+
+    #[test]
+    fn 上下键在页内移动选中行并在边界停住() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao"); // 你好、尼好
+        engine.select_down();
+        assert_eq!(engine.selected_on_page(), 1);
+        engine.select_down();
+        assert_eq!(engine.selected_on_page(), 1); // 页尾停住
+        engine.select_up();
+        assert_eq!(engine.selected_on_page(), 0);
+        engine.select_up();
+        assert_eq!(engine.selected_on_page(), 0); // 页首停住
+    }
+
+    #[test]
+    fn 选中行决定空格提交内容() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao");
+        engine.select_down();
+        assert_eq!(engine.preview_space().as_deref(), Some("尼好"));
+        assert_eq!(engine.handle_space().as_deref(), Some("尼好"));
+    }
+
+    #[test]
+    fn 输入变化后选中行回到第一行() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao");
+        engine.select_down();
+        assert_eq!(engine.selected_on_page(), 1);
+        engine.handle_backspace();
+        assert_eq!(engine.selected_on_page(), 0);
+        engine.handle_letter('o');
+        assert_eq!(engine.selected_on_page(), 0);
+    }
+
+    #[test]
+    fn 翻页保持选中行且末页不足时封顶() {
+        let dictionary = zhu_ye_core::dict::InMemoryDictionary::from_entries(vec![
+            zhu_ye_core::DictionaryEntry::new("词一", "nihao", 100),
+            zhu_ye_core::DictionaryEntry::new("词二", "nihao", 80),
+            zhu_ye_core::DictionaryEntry::new("词三", "nihao", 60),
+            zhu_ye_core::DictionaryEntry::new("词四", "nihao", 40),
+            zhu_ye_core::DictionaryEntry::new("词五", "nihao", 20),
+        ]);
+        let mut engine = InputEngine::new(Arc::new(dictionary));
+        type_text(&mut engine, "nihao");
+        engine.page_size = 2;
+        assert_eq!(engine.page_count(), 3);
+        engine.select_down(); // 页 0 第 2 项
+        assert_eq!(engine.selected_on_page(), 1);
+        engine.next_page(); // 页 1 有两项，行位保持
+        assert_eq!(engine.page(), 1);
+        assert_eq!(engine.selected_on_page(), 1);
+        engine.next_page(); // 页 2 仅一项，封顶回第一行
+        assert_eq!(engine.page(), 2);
+        assert_eq!(engine.selected_on_page(), 0);
+        engine.previous_page(); // 返回页 1，行位保持
+        assert_eq!(engine.page(), 1);
+        assert_eq!(engine.selected_on_page(), 0);
+    }
+
+    #[test]
+    fn 选中行同步到视图快照高亮() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao");
+        engine.select_down();
+        let view = engine.candidate_ui_view();
+        assert_eq!(view.selected, 1);
+        assert_eq!(view.selected_on_page(), Some(1));
+        assert_eq!(view.visible_items()[1].text, "尼好");
     }
 
     #[test]
