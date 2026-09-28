@@ -332,13 +332,14 @@ impl CandidateWindowState {
         );
 
         for index in 0..page_rows {
-            let row = to_win_rect(self.metrics.row_rect(index));
             let is_selected = selected == Some(index);
             if is_selected {
                 // 搜狗风选中块：圆角浅蓝块（与窗口圆角一致的半径）。
+                // T-043：改用贴面板左右边框的整行高亮矩形，序号仍按内容行
+                // 布局，摆脱"序号贴高亮块左缘"的局促观感。
                 fill_round_rect(
                     hdc,
-                    row,
+                    to_win_rect(self.metrics.highlight_rect(index)),
                     self.theme.highlight_background,
                     self.metrics.corner_radius,
                 );

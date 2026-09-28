@@ -3,7 +3,7 @@
 ## 维护规则
 
 - 状态三态：`待办` / `进行中` / `已完成`
-- 编号规则：`T-xxx` 全局唯一，增量递增；当前已用至 `T-042`
+- 编号规则：`T-xxx` 全局唯一，增量递增；当前已用至 `T-043`
 - FR 关联：任务必须关联需求规格说明书中的需求编号
 - 周期任务：到期后登记观察结论并追加到 todos-done，不迁移、不删除任务本体
 - 提交前校验：任务状态与实现进度一致，未完成不得标记已完成
@@ -51,6 +51,7 @@
 | T-040 | 已完成 | 候选框页脚 m/n 翻页指示 | FR-001、FR-009 | M5 | 用户需求②：数字选词已具备（补验收证据），新增页脚页码指示。实施：① `CandidateMetrics.footer_height`（20dp），面板有候选行时底部追加页脚条（单页/无候选页眉条不占空间，T-031 行为保持）；② 新增 `page_footer_label` 纯函数（总页数 ≤1 返回 None，格式 `m/n`=当前页+1/总页数，页码越界收敛末页）+ `CandidateUiView.page_count` 字段（引擎两分支与 demo 填充）；③ `paint()` 页脚右端灰色次要色绘制，新增 `draw_text_right`（DT_RIGHT）；页脚矩形位于最后一行与底部内边距之间，不与行重叠。测试：页脚格式/单页无指示/越界收敛、页脚矩形与行区不重叠、既有面板尺寸断言按页脚更新（零行面板不含页脚）。验收：VM v0.1.9——shi 双页 pA `1/2`、`=` 翻页 pB `2/2`、`-` 回翻 pC `1/2` 页脚区右端灰色文字（x535-563，底部 y 区）持续存在；nihao 单页 pD 页脚区 0 像素；数字键 `1/3/9` → Select(0/2/8) 日志 + 上屏第 1/3/9 候选（1=是/CA C7 与空格一致、3=事/CA B1 与 ↓↓ 空格一致）；shots14 留档 |
 | T-041 | 已完成 | 数据源 pins 落库 + 获取脚本（M6-D） | FR-015 至 FR-022 | M6-D | `data/pins/` 10 条机器可读锁（新 7 源：jieba dict / THUOCL_IT / THUOCL_medical / 现代汉语常用词表草案 PDF / 通用规范汉字表 / wordfreq 3.1.1 wheel / MDN zh-cn 术语快照 601 slug；既有 3 源 cedict/frequencywords/globalvoices 核对）；`scripts/fetch-sources.ps1`（PS5.1+UTF-8 BOM：下载→SHA-256 校验→`data/cache` 缓存，`-WritePins` 首跑回填锁定、`-Force` 重下、`-DryRun` 预览、哈希漂移即失败退出 1）；2026-09-28 首跑 10/10 下载回填成功，幂等重跑全绿；验收标准 7.5 S-7 已回填（wordfreq wheel sha `4B1C6E...`）；数据清单 D-007~D-013 与 licenses.md 登记；Agent Note 见 [process/2026-09-28-dictionary-source-pins-and-fetch-script](../.agents/notes/implemented/process/2026-09-28-dictionary-source-pins-and-fetch-script.md) |
 | T-042 | 待办 | 词典构建管线（M6-P） | FR-015 至 FR-022 | M6-P | `zhu-ye-dict` 新增子命令：source-check / build-base（S-1 词频裁剪实测回填：≤60MB 且覆盖≥75%）/ build-pack it\|med / build-slang（把关过滤 + 缩写词条 + 负面清单）/ build-manifest / verify-manifest；`scripts/update-dict.ps1` 一键构建；消费 `data/cache` 与 `data/raw`，pins 为版本权威，数据清单自动登记；MDN 按 slug 抓取正文；回填验收标准 7.5 |
+| T-043 | 已完成 | 候选选中块贴面板左右边框（序号留内边距） | FR-009 | M5 | 用户反馈：选中态高亮块（Pill）左右内边距过小——外边缘距面板左右边框太远、距左侧序号太近，视觉局促、比例失调。实施：① `CandidateMetrics` 新增 `highlight_inset_x`（固定 1 物理像素、不随 DPI 缩放，保留 1px 边框线不被高亮覆盖）与 `highlight_rect(index)`（上下同 `row_rect`，左右从 1 延伸到 `panel_width-1`）；② `paint()` 选中块改用 `highlight_rect`，序号/主文本/译文仍按 `row_rect` 布局（12dp 内容内边距不变）。测试：新增 `选中块贴面板左右边框且序号留内边距`（贴边/包住整行/序号列起点距高亮左缘 ≥10px），DPI 测试增 `highlight_inset_x` 非缩放断言；fmt/clippy -D warnings/单测全绿。验收：渲染截图像素取证——96dpi 浅色高亮块距边框 12/13px→1/2px（贴边）、序号距高亮块左缘 2px→13px；192dpi 深色同验（1/2px）；截图留档 target/candidate-current.bmp（前）与 candidate-after.bmp（后）；Agent Note 见 [feature/2026-09-28-candidate-window-highlight-flush-borders](../.agents/notes/implemented/feature/2026-09-28-candidate-window-highlight-flush-borders.md) |
 
 ## 周期任务登记
 
