@@ -35,7 +35,7 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_1, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU,
+    GetKeyState, VIRTUAL_KEY, VK_0, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU,
     VK_OEM_MINUS, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
@@ -76,6 +76,8 @@ static SERVER_LOCKS: AtomicUsize = AtomicUsize::new(0);
 enum KeyAction {
     /// 小写英文字母进入组合。
     Letter(char),
+    /// 数字进入组合串（T-049）：仅当它是某含数字缩写键的组成部分。
+    Digit(char),
     /// 退格删除组合末尾字母。
     Backspace,
     /// 空格提交第一候选或拼音原文。
@@ -106,6 +108,7 @@ impl KeyAction {
         matches!(
             self,
             KeyAction::Letter(_)
+                | KeyAction::Digit(_)
                 | KeyAction::Backspace
                 | KeyAction::Space
                 | KeyAction::Enter
@@ -417,8 +420,9 @@ fn classify_key(wparam: WPARAM, lparam: LPARAM) -> Option<KeyAction> {
         code if code == VK_SPACE.0 => Some(KeyAction::Space),
         code if code == VK_RETURN.0 => Some(KeyAction::Enter),
         code if code == VK_ESCAPE.0 => Some(KeyAction::Escape),
-        code if (VK_1.0..=VK_9.0).contains(&code) => {
-            Some(KeyAction::Select(usize::from(code - VK_1.0)))
+        code if (VK_0.0..=VK_9.0).contains(&code) => {
+            // T-049：数字键先归类为"数字"，由 `plan_action` 决定它是选词还是进组合串。
+            char::from_u32(u32::from(b'0') + u32::from(code - VK_0.0)).map(KeyAction::Digit)
         }
         code if code == VK_SHIFT.0 && !is_repeat(lparam) => Some(KeyAction::ToggleMode),
         code if code == VK_TAB.0 => Some(KeyAction::ToggleLayer),
@@ -468,11 +472,41 @@ fn plan_action(
     let engine = &state.lock().unwrap().engine;
     match action {
         KeyAction::Letter(_) => (engine.mode() == InputMode::Chinese).then_some(action),
+        // T-049：数字键在中文模式下先判断是否为"含数字缩写键"的组成部分
+        // （如 `996`/`u1s1`），是则进组合串；否则回落原有语义——
+        // 有候选时选词（FR-006），无组合无候选时放行给宿主直出数字。
+        KeyAction::Digit(digit) => {
+            if engine.mode() != InputMode::Chinese {
+                return None;
+            }
+            if should_compose_digit(engine, digit) {
+                return Some(KeyAction::Digit(digit));
+            }
+            let index = usize::from(digit as u8).checked_sub(usize::from(b'1'));
+            match index {
+                Some(index) if engine.is_active() => Some(KeyAction::Select(index)),
+                _ => None,
+            }
+        }
         KeyAction::ToggleMode if !engine.is_active() => Some(action),
         KeyAction::ToggleMode => None,
         _ if engine.is_active() => Some(action),
         _ => None,
     }
+}
+
+/// 判断数字键是否应进入组合串而非选词（T-049）。
+///
+/// 两种情况进入组合：① 组合串接上该数字后仍是某个含数字缩写键的前缀；
+/// ② 组合串本身已是一串纯数字（用户正在输入电话号码/日期等），继续累积。
+/// 其余情况返回 `false`，由调用方回落到选词或直出。
+fn should_compose_digit(engine: &InputEngine, digit: char) -> bool {
+    let candidate = format!("{}{digit}", engine.composing());
+    if engine.is_abbreviation_prefix(&candidate) {
+        return true;
+    }
+    let composing = engine.composing();
+    !composing.is_empty() && composing.chars().all(|c| c.is_ascii_digit())
 }
 
 /// 应用一次输入动作：先写 TSF 组合/提交文本，再同步引擎状态。
@@ -484,7 +518,7 @@ fn apply_action(
     action: KeyAction,
 ) -> Result<()> {
     match action {
-        KeyAction::Letter(_) | KeyAction::Backspace => {
+        KeyAction::Letter(_) | KeyAction::Digit(_) | KeyAction::Backspace => {
             let text = compose_text(state, action);
             update_composition(state, context, sink, ec, &text)?;
         }
@@ -513,7 +547,9 @@ fn compose_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
     let text = {
         let engine = &mut state.lock().unwrap().engine;
         match action {
-            KeyAction::Letter(c) => format!("{}{}", engine.composing(), c),
+            KeyAction::Letter(c) | KeyAction::Digit(c) => {
+                format!("{}{}", engine.composing(), c)
+            }
             KeyAction::Backspace => engine.preview_after_backspace().unwrap_or_default(),
             _ => String::new(),
         }
@@ -563,6 +599,9 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
     match action {
         KeyAction::Letter(c) => {
             let _ = engine.handle_letter(c);
+        }
+        KeyAction::Digit(c) => {
+            let _ = engine.handle_digit(c);
         }
         KeyAction::Backspace => {
             let _ = engine.handle_backspace();
@@ -970,7 +1009,7 @@ pub fn paired_core_version() -> &'static str {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_0, VK_OEM_COMMA, VK_OEM_PERIOD};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_0, VK_1, VK_OEM_COMMA, VK_OEM_PERIOD};
     use windows::Win32::UI::TextServices::{ITfTextInputProcessor, ITfThreadMgr};
 
     /// 生命周期计数是全局状态；测试并行运行时互斥，避免相互干扰。
@@ -1040,13 +1079,16 @@ mod tests {
         );
         assert_eq!(
             classify_key(WPARAM(VK_1.0 as usize), LPARAM(0)),
-            Some(KeyAction::Select(0))
+            Some(KeyAction::Digit('1'))
         );
         assert_eq!(
             classify_key(WPARAM(VK_9.0 as usize), LPARAM(0)),
-            Some(KeyAction::Select(8))
+            Some(KeyAction::Digit('9'))
         );
-        assert_eq!(classify_key(WPARAM(VK_0.0 as usize), LPARAM(0)), None);
+        assert_eq!(
+            classify_key(WPARAM(VK_0.0 as usize), LPARAM(0)),
+            Some(KeyAction::Digit('0'))
+        );
         assert_eq!(classify_key(WPARAM(0x00A0), LPARAM(0)), None);
     }
 
@@ -1078,6 +1120,61 @@ mod tests {
         assert_eq!(
             plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
             Some(KeyAction::Select(0))
+        );
+    }
+
+    /// T-049：数字键在"非缩写键前缀"场景保持原有语义——有候选时选词、
+    /// 无组合无候选时放行给宿主直出数字。
+    #[test]
+    fn 数字键非缩写前缀时保持选词与直出语义() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        // 空组合、无候选：放行给宿主，数字直出（不被输入法吞掉）。
+        assert_eq!(
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            None
+        );
+        // 有候选：数字仍是选词（FR-006 不回归）。
+        state.lock().unwrap().engine.handle_letter('n');
+        state.lock().unwrap().engine.handle_letter('i');
+        assert_eq!(
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::Select(0))
+        );
+        // 英文模式下数字一律放行。
+        state.lock().unwrap().engine.toggle_mode();
+        assert_eq!(
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            None
+        );
+    }
+
+    /// T-049：当数字是某含数字缩写键的组成部分时进入组合串，而非选词。
+    #[test]
+    fn 数字键为缩写前缀时进入组合串() {
+        let mut state = EngineState::new();
+        state.engine = InputEngine::new(Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(
+            vec![
+                zhu_ye_core::DictionaryEntry::new("九九六", "996", 5000),
+                zhu_ye_core::DictionaryEntry::new("有一说一", "u1s1", 5000),
+            ],
+        )));
+        let state = Rc::new(Mutex::new(state));
+
+        // `9` 是 `996` 的前缀：进组合串而非选词。
+        assert_eq!(
+            plan_action(WPARAM(VK_9.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::Digit('9'))
+        );
+        // `u` 是 `u1s1` 的前缀：字母照常进入组合。
+        assert_eq!(
+            plan_action(WPARAM(0x55), LPARAM(0), false, &state),
+            Some(KeyAction::Letter('u'))
+        );
+        state.lock().unwrap().engine.handle_letter('u');
+        // 组合 `u` 之后按 `1`：仍是 `u1s1` 前缀，进组合串。
+        assert_eq!(
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::Digit('1'))
         );
     }
 

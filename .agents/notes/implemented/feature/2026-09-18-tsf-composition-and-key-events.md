@@ -20,8 +20,13 @@ any composition, clears engine state, and unadvises the sink. An empty thread ma
 is accepted so lifecycle unit tests and self-checks can run without a TSF host.
 
 Key events map to a small `KeyAction` set: a-z become letters, Backspace deletes from
-the composition, and Space/Enter/Esc/1-9 commit or cancel only while a composition is
-active. `OnTestKeyDown` reports whether the IME wants the key; `OnKeyDown` requests a
+the composition, and Space/Enter/Esc commit or cancel only while a composition is
+active. Digits 0-9 are classified as `KeyAction::Digit` and resolved in `plan_action`
+by a composition-aware rule: they enter the composition when they prefix a
+digit-bearing abbreviation key, and otherwise fall back to candidate selection or
+literal release (see the
+[digit abbreviation key note](../../implemented/bug-fix/2026-09-29-digit-abbreviation-key.md)).
+`OnTestKeyDown` reports whether the IME wants the key; `OnKeyDown` requests a
 synchronous read-write edit session with `TF_ES_SYNC | TF_ES_READWRITE`. If the edit
 session cannot be granted, the engine is still advanced so later keystrokes are not
 based on drifted state.

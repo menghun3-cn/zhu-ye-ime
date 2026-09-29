@@ -12,7 +12,7 @@ Status: implemented
 
 `TextService` 实现 `ITfTextInputProcessorEx`、`ITfKeyEventSink` 与 `ITfCompositionSink`。`Activate` 时从线程管理器解析 `ITfSource` 并注册按键事件 sink，持有 sink cookie；`Deactivate` 结束当前组合、清空引擎状态并取消订阅。允许空线程管理器，使生命周期单元测试与自检无需 TSF 宿主也能运行。
 
-按键映射为小型 `KeyAction` 集合：a-z 进入组合，Backspace 删除组合末尾；空格、回车、Esc 与 1-9 仅在已有组合时提交或取消。`OnTestKeyDown` 报告输入法是否要吃键；`OnKeyDown` 请求使用 `TF_ES_SYNC | TF_ES_READWRITE` 的同步读写编辑会话。若编辑会话无法获得，仍推进引擎状态，避免后续按键基于漂移状态继续。
+按键映射为小型 `KeyAction` 集合：a-z 进入组合，Backspace 删除组合末尾；空格、回车、Esc 仅在已有组合时提交或取消。数字 0-9 由 `classify_key` 归为 `KeyAction::Digit`，在 `plan_action` 中按组合感知规则裁决——是含数字缩写键的前缀时进入组合串，否则回落为候选选择或放行直出（见[数字缩写键笔记](../../implemented/bug-fix/2026-09-29-digit-abbreviation-key.zh.md)）。`OnTestKeyDown` 报告输入法是否要吃键；`OnKeyDown` 请求使用 `TF_ES_SYNC | TF_ES_READWRITE` 的同步读写编辑会话。若编辑会话无法获得，仍推进引擎状态，避免后续按键基于漂移状态继续。
 
 在编辑会话内，`ITfEditSession::DoEditSession` 执行一次 `apply_action` 回调。字母/Backspace 更新以只读（query-only）模式经 `ITfInsertAtSelection` 定位插入点，再经 `ITfContextComposition::StartComposition` 与 `ITfRange::SetText` 写入；空格、回车、Esc 与数字通过 `EndComposition` 结束组合，或在没有组合时直接插入提交文本。TSF 文本写入后再同步引擎。刻意不使用 `InsertAtSelection` 的**写入**分支——见[写入路径崩溃笔记](../../implemented/bug-fix/2026-09-23-tsf-insert-at-selection-write-path-crash.zh.md)。
 
