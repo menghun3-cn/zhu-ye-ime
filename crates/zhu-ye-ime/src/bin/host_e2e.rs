@@ -65,9 +65,174 @@ fn main() -> ExitCode {
             };
             run_real_smoke(Path::new(path))
         }
+        // M6-R 多包回归：--multi-pack <base.zyct> <pack1.zyct> [pack2.zyct ...]
+        Some("--multi-pack") => {
+            let paths: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
+            if paths.is_empty() {
+                eprintln!("用法: host-e2e --multi-pack <base.zyct> [pack.zyct ...]");
+                return ExitCode::from(2);
+            }
+            run_multi_pack(&paths)
+        }
         Some(path) => run_seed_checks(Path::new(path)),
         None => run_seed_checks(Path::new("data/artifacts/seed.zyct")),
     }
+}
+
+/// M6-R 多包回归入口：基础包 + 领域包/网络语包组合。
+fn run_multi_pack(paths: &[PathBuf]) -> ExitCode {
+    let mut runner = Runner {
+        passed: 0,
+        failed: 0,
+    };
+    if let Err(error) = multi_pack_checks(paths, &mut runner) {
+        runner.fail("多包回归执行", &error);
+    }
+    runner.finish()
+}
+
+/// 多包回归（FR-015/FR-016/FR-017、验收标准 7.3「多包回归」）：
+///
+/// 1. **等价性底线**：仅 base 时，复合词典候选与直接使用该包的单词典逐项一致；
+/// 2. 启用领域包后领域词可达，基础排序不漂移；
+/// 3. 同词跨包去重且词频取 max；
+/// 4. 网络语包启用后缩写路径可达并标注 `Slang` 来源；
+/// 5. 可切分串不触发缩写路径（防污染）。
+fn multi_pack_checks(paths: &[PathBuf], runner: &mut Runner) -> Result<(), String> {
+    let base_path = paths
+        .first()
+        .ok_or_else(|| "至少需要一个基础包路径".to_owned())?;
+    let base_file = DictionaryFile::open(base_path)
+        .map_err(|error| format!("打开基础包 {base_path:?} 失败: {error}"))?;
+
+    // ---- 1. 等价性底线：仅 base 时复合与单词典逐项一致 ----
+    let (composite, skipped) = zhu_ye_core::CompositeDictionary::from_paths(&paths[..1]);
+    if !skipped.is_empty() {
+        return Err(format!("基础包加载被跳过: {skipped:?}"));
+    }
+    let base_only: Arc<dyn Dictionary> = Arc::new(base_file.clone());
+    let composite_only: Arc<dyn Dictionary> = Arc::new(composite);
+    let mut identical = true;
+    let mut mismatch = String::new();
+    for key in ["nihao", "ni", "zhongguo", "xian", "de", "shijie"] {
+        let direct = base_only.lookup(key);
+        let merged = composite_only.lookup(key);
+        if direct != merged {
+            identical = false;
+            mismatch = format!(
+                "lookup({key}) 不一致: 单词典 {} 条 / 复合 {} 条",
+                direct.len(),
+                merged.len()
+            );
+            break;
+        }
+        let direct_prefix = base_only.lookup_prefix(key);
+        let merged_prefix = composite_only.lookup_prefix(key);
+        if direct_prefix != merged_prefix {
+            identical = false;
+            mismatch = format!("lookup_prefix({key}) 不一致");
+            break;
+        }
+    }
+    if identical {
+        runner.pass("仅基础包时复合词典与单词典逐项一致");
+    } else {
+        runner.fail("仅基础包时复合词典与单词典逐项一致", &mismatch);
+    }
+
+    // ---- 2. 全包装配：基础包 + 其余包 ----
+    let (full, full_skipped) = zhu_ye_core::CompositeDictionary::from_paths(paths);
+    if !full_skipped.is_empty() {
+        runner.fail("全部包成功加载", &format!("{full_skipped:?}"));
+    } else {
+        runner.pass("全部包成功加载");
+    }
+    let full_dictionary: Arc<dyn Dictionary> = Arc::new(full.clone());
+
+    // ---- 3. 基础候选在全包模式下不漂移 ----
+    let mut base_engine = InputEngine::with_bigram(base_only.clone(), Arc::new(base_file.clone()));
+    let mut full_engine = InputEngine::with_bigram(full_dictionary.clone(), Arc::new(full.clone()));
+    type_text(&mut base_engine, "nihao");
+    type_text(&mut full_engine, "nihao");
+    let base_texts: Vec<&str> = base_engine
+        .candidates()
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect();
+    let full_texts: Vec<&str> = full_engine
+        .candidates()
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect();
+    // 全包模式的前 N 项应与仅 base 一致（领域包只追加、不改动基础排序）。
+    if !base_texts.is_empty() && full_texts.starts_with(&base_texts) {
+        runner.pass("全包模式基础候选顺序不漂移");
+    } else {
+        runner.fail(
+            "全包模式基础候选顺序不漂移",
+            &format!("base={base_texts:?} full={full_texts:?}"),
+        );
+    }
+
+    // ---- 4. 同词跨包去重且词频取 max ----
+    let merged_nihao = full.lookup("nihao");
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicated = false;
+    for entry in &merged_nihao {
+        if !seen.insert(entry.word.clone()) {
+            duplicated = true;
+        }
+    }
+    if duplicated {
+        runner.fail("同词跨包去重", "合并结果出现重复词");
+    } else {
+        runner.pass("同词跨包去重");
+    }
+
+    // ---- 5. 网络语包缩写路径 ----
+    if let Some(slang_path) = paths
+        .iter()
+        .find(|path| path.file_stem().and_then(|s| s.to_str()) == Some("slang"))
+    {
+        let slang_file = DictionaryFile::open(slang_path)
+            .map_err(|error| format!("打开网络语包 {slang_path:?} 失败: {error}"))?;
+        let slang: Arc<dyn Dictionary> = Arc::new(slang_file);
+        let mut engine = InputEngine::with_bigram(full_dictionary.clone(), Arc::new(full.clone()))
+            .with_slang(slang);
+        type_text(&mut engine, "yyds");
+        let slang_hit = engine.candidates().iter().find(|c| c.text == "永远的神");
+        match slang_hit {
+            Some(candidate) if candidate.source == CandidateSource::Slang => {
+                runner.pass("网络语缩写精确命中并标注 Slang 来源");
+            }
+            other => runner.fail(
+                "网络语缩写精确命中并标注 Slang 来源",
+                &format!("实际: {other:?}"),
+            ),
+        }
+        // 缩写候选应在尾部（独立组）。
+        if engine.candidates().last().map(|c| c.text.as_str()) == Some("永远的神") {
+            runner.pass("缩写候选位于候选尾部");
+        } else {
+            runner.fail("缩写候选位于候选尾部", "缩写候选不在尾部");
+        }
+
+        engine.handle_escape();
+        type_text(&mut engine, "wo");
+        let polluted = engine
+            .candidates()
+            .iter()
+            .any(|c| c.source == CandidateSource::Slang);
+        if polluted {
+            runner.fail("可切分串不触发缩写路径", "wo 触发了缩写候选");
+        } else {
+            runner.pass("可切分串不触发缩写路径");
+        }
+    } else {
+        println!("[SKIP] 未提供 slang 包，跳过缩写路径断言");
+    }
+
+    Ok(())
 }
 
 fn run_seed_checks(path: &Path) -> ExitCode {

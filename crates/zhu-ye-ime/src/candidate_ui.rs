@@ -86,6 +86,24 @@ impl CandidateUiView {
     }
 }
 
+/// 网络语候选的标注文本（M6-R，方案设计 11.4）。
+pub const SLANG_LABEL: &str = "[网络]";
+
+/// 候选主文本的展示形式：网络语缩写候选追加 `[网络]` 标注。
+///
+/// 标注并入主文本而非独立列，因此 `row_split` 的宽度估算天然把它算进去，
+/// 不会与译文区重叠。译文层展示译文本身，不加标注。
+#[must_use]
+pub fn display_main_text(item: &CandidateUiItem, translation_mode: bool) -> String {
+    if translation_mode && !item.translation.is_empty() {
+        return item.translation.clone();
+    }
+    if item.source == CandidateSource::Slang {
+        return format!("{} {}", item.text, SLANG_LABEL);
+    }
+    item.text.clone()
+}
+
 /// ARGB-24 颜色，使用 `0xRRGGBB` 表示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiColor(pub u32);
@@ -503,9 +521,9 @@ fn bgr_to_rgb(color: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        estimate_text_width, fit_text, index_marker, page_footer_label, theme,
+        display_main_text, estimate_text_width, fit_text, index_marker, page_footer_label, theme,
         theme_from_system_colors, CandidateMetrics, CandidateUiItem, CandidateUiView, SystemColors,
-        UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE,
+        UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE, SLANG_LABEL,
     };
     use zhu_ye_core::candidate::CandidateSource;
 
@@ -530,6 +548,52 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn slang_item(text: &str, translation: &str) -> CandidateUiItem {
+        CandidateUiItem {
+            text: text.to_owned(),
+            translation: translation.to_owned(),
+            source: CandidateSource::Slang,
+        }
+    }
+
+    #[test]
+    fn 网络语候选主文本追加标注() {
+        let item = slang_item("永远的神", "");
+        assert_eq!(
+            display_main_text(&item, false),
+            format!("永远的神 {SLANG_LABEL}")
+        );
+    }
+
+    #[test]
+    fn 静态候选不加标注() {
+        let item = CandidateUiItem {
+            text: "你好".to_owned(),
+            translation: "hello".to_owned(),
+            source: CandidateSource::Static,
+        };
+        assert_eq!(display_main_text(&item, false), "你好");
+        // 用户词同样不加标注。
+        let user = CandidateUiItem {
+            source: CandidateSource::User,
+            ..item.clone()
+        };
+        assert_eq!(display_main_text(&user, false), "你好");
+    }
+
+    #[test]
+    fn 译文层展示译文不加网络标注() {
+        let item = slang_item("永远的神", "GOAT");
+        // 译文层以译文为主文本，不应追加标注。
+        assert_eq!(display_main_text(&item, true), "GOAT");
+        // 译文层但无译文时回落中文文本并保留标注。
+        let no_translation = slang_item("永远的神", "");
+        assert_eq!(
+            display_main_text(&no_translation, true),
+            format!("永远的神 {SLANG_LABEL}")
+        );
     }
 
     #[test]

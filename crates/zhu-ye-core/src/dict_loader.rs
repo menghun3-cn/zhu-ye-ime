@@ -25,6 +25,8 @@ use crate::{Error, Result};
 pub struct DictionaryFile {
     map: Arc<Mmap>,
     header: crate::dict_format::DictHeader,
+    /// 来源路径；仅用于日志与自检，不参与查询。内存构造时为 `None`。
+    path: Option<Arc<std::path::PathBuf>>,
 }
 
 impl fmt::Debug for DictionaryFile {
@@ -53,7 +55,9 @@ impl DictionaryFile {
             .map_err(|error| Error::Dictionary(format!("打开词典文件失败: {error}")))?;
         let map = unsafe { MmapOptions::new().map(&file) }
             .map_err(|error| Error::Dictionary(format!("内存映射失败: {error}")))?;
-        Self::from_map(map)
+        let mut mapped = Self::from_map(map)?;
+        mapped.path = Some(Arc::new(path.to_path_buf()));
+        Ok(mapped)
     }
 
     fn from_map(map: Mmap) -> Result<Self> {
@@ -67,9 +71,22 @@ impl DictionaryFile {
         let file = Self {
             map: Arc::new(map),
             header,
+            path: None,
         };
         file.validate_layout()?;
         Ok(file)
+    }
+
+    /// 返回来源路径；内存构造的实例返回 `None`。
+    #[must_use]
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref().map(std::path::PathBuf::as_path)
+    }
+
+    /// 返回词条总数，供自检与多包装配日志使用。
+    #[must_use]
+    pub fn entry_count(&self) -> u64 {
+        u64::from(self.header.entry_count)
     }
 
     /// 返回解析后的头部元数据，供检查与日志使用。

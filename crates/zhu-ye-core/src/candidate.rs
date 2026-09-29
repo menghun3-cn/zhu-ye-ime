@@ -19,6 +19,8 @@ pub enum CandidateSource {
     User,
     /// AI 建议（第一版不启用）。
     Ai,
+    /// 网络语缩写路径候选（M6-R）；UI 以 `[网络]` 标注。
+    Slang,
 }
 
 /// 输入法候选。
@@ -201,6 +203,93 @@ fn candidate_from_entry(entry: &DictionaryEntry) -> Candidate {
     candidate
 }
 
+/// 缩写路径的最小触发长度（S-2 定稿：≥2 位，防单字母泛滥）。
+pub const ABBREVIATION_MIN_LEN: usize = 2;
+
+/// 判断输入串是否应进入缩写路径（M6-R，方案设计 11.4）。
+///
+/// 必须**全部**满足：
+/// 1. 长度 ≥ `ABBREVIATION_MIN_LEN`（按字符计，数字缩写如 `88` 同样满足）；
+/// 2. 仅由 ASCII 小写字母或数字组成（大小写不敏感由调用方归一）；
+/// 3. 整串**完全无法切分为标准拼音**（`segment_all` 为空）——可切分串
+///    （如 `wo`、`emo`）绝不进入缩写路径，防止污染正常拼音候选。
+#[must_use]
+pub fn is_abbreviation_input(table: &SyllableTable, input: &str) -> bool {
+    if input.chars().count() < ABBREVIATION_MIN_LEN {
+        return false;
+    }
+    if !input
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return false;
+    }
+    segment_all(table, input).is_empty()
+}
+
+/// 缩写候选组（M6-R）：整串直查 + 前缀补全，标注 `Slang` 来源。
+///
+/// 只在 `is_abbreviation_input` 为真时调用。返回的候选**不参与默认排序竞争**，
+/// 由调用方追加到候选尾部（方案设计 11.4）。
+#[must_use]
+pub fn abbreviation_candidates(
+    table: &SyllableTable,
+    slang: &dyn Dictionary,
+    input: &str,
+    completion_cap: usize,
+) -> Vec<Candidate> {
+    if !is_abbreviation_input(table, input) {
+        return Vec::new();
+    }
+    let mut collected: Vec<Candidate> = slang
+        .lookup(input)
+        .iter()
+        .map(|entry| candidate_from_entry(entry).with_source(CandidateSource::Slang))
+        .collect();
+    // 前缀补全：`yy` → yyds；整串直查命中的词条不去重丢弃（下面统一去重）。
+    let completions: Vec<Candidate> = slang
+        .lookup_prefix(input)
+        .into_iter()
+        .map(|entry| candidate_from_entry(&entry).with_source(CandidateSource::Slang))
+        .collect();
+    let mut seen: std::collections::HashSet<String> = collected
+        .iter()
+        .map(|candidate| candidate.text.clone())
+        .collect();
+    for candidate in completions.into_iter().take(completion_cap.max(1)) {
+        if seen.insert(candidate.text.clone()) {
+            collected.push(candidate);
+        }
+    }
+    // 组内按词频降序、同频按文本升序，保证确定性。
+    collected.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.text.cmp(&b.text)));
+    collected
+}
+
+/// 把缩写组追加到主候选尾部（M6-R，方案设计 11.4）。
+///
+/// 网络语包同时参与拼音路径（纯中文网络词如「内卷」走正常排序），因此缩写键
+/// 可能已经被主路径查到。此时**以缩写组为准**：把主组里的同文本候选移除，
+/// 改用缩写组版本追加到尾部——这样 `[网络]` 标注与"独立组排尾"同时成立，
+/// 且不产生重复候选。
+#[must_use]
+pub fn append_abbreviation_group(main: Vec<Candidate>, slang: Vec<Candidate>) -> Vec<Candidate> {
+    if slang.is_empty() {
+        return main;
+    }
+    let slang_texts: std::collections::HashSet<&str> = slang
+        .iter()
+        .map(|candidate| candidate.text.as_str())
+        .collect();
+    // 主组中与缩写组同文本的候选让位给缩写组版本。
+    let mut merged: Vec<Candidate> = main
+        .into_iter()
+        .filter(|candidate| !slang_texts.contains(candidate.text.as_str()))
+        .collect();
+    merged.extend(slang);
+    merged
+}
+
 fn deduplicate_and_sort(candidates: Vec<Candidate>) -> Vec<Candidate> {
     let mut by_text: HashMap<String, Candidate> = HashMap::new();
     for candidate in candidates {
@@ -360,9 +449,13 @@ mod tests {
 
     use crate::bigram::InMemoryBigramModel;
     use crate::candidate::{
-        generate_candidates, generate_prefix_candidates, merge_candidate_groups, Candidate,
-        CandidateSorter, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+        abbreviation_candidates, append_abbreviation_group, generate_candidates,
+        generate_prefix_candidates, is_abbreviation_input, merge_candidate_groups, Candidate,
+        CandidateSorter, CandidateSource, RankingConfig, RankingContext, RankingModel,
+        StaticRankingModel,
     };
+    use crate::dict::{DictionaryEntry, InMemoryDictionary};
+    use crate::pinyin::SyllableTable;
     use crate::user_dict::UserDictionary;
 
     fn rank_with(
@@ -372,6 +465,125 @@ mod tests {
         candidates: Vec<Candidate>,
     ) -> Vec<Candidate> {
         model.rank(candidates, &RankingContext::new(previous, user))
+    }
+
+    // ---- 缩写输入路径（M6-R）----
+
+    fn slang_dictionary() -> InMemoryDictionary {
+        InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("永远的神", "yyds", 5000),
+            DictionaryEntry::new("笑死我了", "xswl", 5000),
+            DictionaryEntry::new("有一说一", "u1s1", 5000),
+            DictionaryEntry::new("九九六", "996", 5000),
+            DictionaryEntry::new("内卷", "neijuan", 5000),
+        ])
+    }
+
+    #[test]
+    fn 缩写输入判定要求不可切分且长度达标() {
+        let table = SyllableTable::standard();
+        // 不可切分的字母/数字串进入缩写路径。
+        assert!(is_abbreviation_input(&table, "yyds"));
+        assert!(is_abbreviation_input(&table, "u1s1"));
+        assert!(is_abbreviation_input(&table, "996"));
+        assert!(is_abbreviation_input(&table, "88"));
+        // 单字母不触发（防泛滥）。
+        assert!(!is_abbreviation_input(&table, "y"));
+        assert!(!is_abbreviation_input(&table, "9"));
+        // 可切分串绝不进入缩写路径（防污染）。
+        assert!(!is_abbreviation_input(&table, "wo"));
+        assert!(!is_abbreviation_input(&table, "ni"));
+        assert!(!is_abbreviation_input(&table, "neijuan"));
+        // 非小写字母/数字不进入。
+        assert!(!is_abbreviation_input(&table, "YYDS"));
+        assert!(!is_abbreviation_input(&table, "中国"));
+        assert!(!is_abbreviation_input(&table, ""));
+    }
+
+    #[test]
+    fn 缩写精确命中并标注网络来源() {
+        let table = SyllableTable::standard();
+        let slang = slang_dictionary();
+        let found = abbreviation_candidates(&table, &slang, "yyds", 32);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "永远的神");
+        assert_eq!(found[0].source, CandidateSource::Slang);
+    }
+
+    #[test]
+    fn 缩写前缀补全命中() {
+        let table = SyllableTable::standard();
+        let slang = slang_dictionary();
+        let found = abbreviation_candidates(&table, &slang, "yy", 32);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "永远的神");
+        assert_eq!(found[0].source, CandidateSource::Slang);
+    }
+
+    #[test]
+    fn 缩写数字键可达() {
+        let table = SyllableTable::standard();
+        let slang = slang_dictionary();
+        let found = abbreviation_candidates(&table, &slang, "996", 32);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "九九六");
+        let mixed = abbreviation_candidates(&table, &slang, "u1s1", 32);
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0].text, "有一说一");
+    }
+
+    #[test]
+    fn 可切分串不产生缩写候选() {
+        let table = SyllableTable::standard();
+        let slang = slang_dictionary();
+        assert!(abbreviation_candidates(&table, &slang, "wo", 32).is_empty());
+        assert!(abbreviation_candidates(&table, &slang, "y", 32).is_empty());
+    }
+
+    #[test]
+    fn 缩写组追加尾部且同文本以缩写组为准() {
+        let main = vec![Candidate::new("你好", 100)];
+        let slang = vec![
+            Candidate::new("你好", 5000).with_source(CandidateSource::Slang),
+            Candidate::new("永远的神", 5000).with_source(CandidateSource::Slang),
+        ];
+        let merged = append_abbreviation_group(main, slang);
+        // 主组的「你好」被缩写组同文本候选取代，整体只剩两条且顺序为
+        // 缩写组内部顺序（词频同分按文本定序：你好 < 永远的神）。
+        assert_eq!(merged.len(), 2, "同文本候选应去重");
+        assert!(merged.iter().all(|c| c.source == CandidateSource::Slang));
+        assert_eq!(
+            merged.iter().filter(|c| c.text == "你好").count(),
+            1,
+            "不得出现重复候选"
+        );
+        assert!(merged.iter().any(|c| c.text == "永远的神"));
+    }
+
+    #[test]
+    fn 缩写组不与主组重复且标注保留() {
+        let main = vec![
+            Candidate::new("你好", 100),
+            Candidate::new("永远的神", 9000),
+            Candidate::new("世界", 80),
+        ];
+        let slang = vec![Candidate::new("永远的神", 5000).with_source(CandidateSource::Slang)];
+        let merged = append_abbreviation_group(main, slang);
+        let texts: Vec<&str> = merged.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["你好", "世界", "永远的神"]);
+        assert_eq!(merged.last().unwrap().source, CandidateSource::Slang);
+        assert_eq!(
+            merged.iter().filter(|c| c.text == "永远的神").count(),
+            1,
+            "不得出现重复候选"
+        );
+    }
+
+    #[test]
+    fn 空缩写组不改变主组() {
+        let main = vec![Candidate::new("你好", 100)];
+        let merged = append_abbreviation_group(main.clone(), Vec::new());
+        assert_eq!(merged, main);
     }
 
     #[test]

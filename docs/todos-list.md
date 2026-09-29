@@ -3,7 +3,7 @@
 ## 维护规则
 
 - 状态三态：`待办` / `进行中` / `已完成`
-- 编号规则：`T-xxx` 全局唯一，增量递增；当前已用至 `T-047`
+- 编号规则：`T-xxx` 全局唯一，增量递增；当前已用至 `T-050`
 - FR 关联：任务必须关联需求规格说明书中的需求编号
 - 周期任务：到期后登记观察结论并追加到 todos-done，不迁移、不删除任务本体
 - 提交前校验：任务状态与实现进度一致，未完成不得标记已完成
@@ -58,6 +58,8 @@
 | T-047 | 已完成 | 工作分支 → PR 合入 develop 的开发流程约束 | FR-014 | M0-流程 | 用户要求：所有新功能、bug 修复、优化等先从 develop 切分支，开发完成后提 PR 合入 develop，之后才走 release → main 的发布 PR 流程。实施：`AGENTS.md` 新增 5.2 节（分支命名 `<type>/T-xxx-<描述>`、门禁 → 推送 → 目标 develop 的 PR → 合并后删分支；工作分支不得直接向 main 提 PR），第 6 节分支模型同步；git-publish 技能约定说明补充发布前提；本任务自身即走 `chore/T-047-feature-branch-pr-flow` 分支 + PR。Agent Note 见 [process/2026-09-29-work-branch-pr-flow](../.agents/notes/implemented/process/2026-09-29-work-branch-pr-flow.md) |
 | T-048 | 已完成 | 新词典四包 VM 部署实测（M6-P 第四批） | FR-015 至 FR-022 | M6-P | 用户要求把新词典全部部署到 VM 实测。障碍与绕过：`install.ps1` 因 DLL 被 ctfmon/conhost 占用而中止（版本化 DLL 无法覆盖同名在用文件），且运行时尚不支持多包；改用引擎内置 `ZHU_YE_DICT_PATH` 环境变量（`tsf.rs` 中优先级最高）指定包路径，四包并存于 VM `C:\zhu-ye-vm\packs\` 逐包切换。实测（TSF 日志 `dict-ok path=` 确认加载）：base 8/8、it 8/8、med 10/10、slang 8/8 首位候选全部命中预期词。缩写键：纯字母键可达（yyds/xswl/zqsg/dbq/yysy/awsl/gkd），含数字键 10/10 不可达（发现缺陷，转 T-049）。顺带修复取证链路编码缺陷：`vm-ui-lib.ps1` 与验收脚本读无 BOM 的 UTF-8 TSF 日志未指定编码，中文候选词末字丢失，已统一加 `-Encoding UTF8`。VM 侧为跑交互式计划任务配置了 AutoAdminLogon（测试用）。结论：多包并存仍需 M6-R。详见 [数据清单](../docs/数据清单.md) |
 | T-049 | 已完成 | 含数字缩写键不可达修复（数字键语义） | FR-002、FR-006、FR-016 | M6-P | T-048 实测发现：`handle_letter` 只接受 `is_ascii_lowercase`，数字键被丢弃，含数字缩写键 10 个（`u1s1`/`996`/`520`/`1314`/`886`/`88`/`233`/`666`/`555`/`7456`）全部不可达；词典侧正常（直接查 `slang.zyct` 确认键值正确入库，词频 5000）。语义冲突：数字 1-9 已绑定候选选择（FR-006、T-040 已验收），与含数字缩写键无法用"逐键放行"区分，经用户决策采用"前缀判定"。实施：`InputEngine` 新增 `handle_digit`（数字入组合，英文模式拒绝）与 `is_abbreviation_prefix`（词典存在以该串开头且拼音键含 ASCII 数字的词条）；`classify_key` 数字 0-9 统一归 `KeyAction::Digit`；`plan_action` 判定"组合串+数字是含数字缩写键前缀"则进组合串，否则回落原语义（有候选选词、无组合无候选放行直出）；`compose_text`/`sync_engine`/`apply_action` 接 `Digit` 分支。测试：新增 5 项单测（缩写前缀识别与不误判拼音词、数字入组合查缩写词、英文模式与非法字符拒绝、TSF 层选词/直出语义保持、缩写前缀进组合串），zhu-ye-ime 54 项全绿；门禁 fmt / clippy -D warnings / workspace 238 项 / host-e2e 19 项全过。Agent Note 见 [bug-fix/2026-09-29-digit-abbreviation-key](../.agents/notes/implemented/bug-fix/2026-09-29-digit-abbreviation-key.md) |
+
+| T-050 | 已完成 | 运行时复合词典与缩写路径（M6-R） | FR-015、FR-016、FR-017、FR-022 | M6-R | 用户要求继续 M6-R。实施：① `zhu_ye_core::CompositeDictionary`（持 N 个 `DictionaryFile`，实现 `Dictionary`+`BigramModel`+`Translator`；同「拼音+词」去重、词频取 max（S-6）、bigram 取 max、译文取首个非空；坏包跳过并记诊断不阻断输入）；**热路径快速通道**：只有一个来源返回非空时跳过合并——`bench` 实测多包查询 9.69µs→2.30µs（单包 2.26µs）；② `zhu_ye_core::pack_config`（`config.json` 解析：`enabled_packs`/`online_update` 默认 false/`last_check`；未知 id 过滤记日志、损坏回退默认仅 base、`plan_packs` 区分"未知"与"配置了但缺失"；原子保存）；③ 缩写路径（`is_abbreviation_input` 三重门槛：长度 ≥2 + 仅小写字母/数字 + `segment_all` 为空；`abbreviation_candidates` 精确+前缀补全、标注 `CandidateSource::Slang`；`append_abbreviation_group` 追加尾部，**同文本以缩写组为准**——多包回归发现主组会先命中导致标注丢失，已修正）；④ `[网络]` 标注（`candidate_ui::display_main_text`，并入主文本使宽度估算自然计入）；⑤ 装配（`create_engine` 读配置→规划包→复合→`with_slang`；`resolve_base_dir` 取代单文件路径解析，保留 T-022 优先级但产出目录；每步记日志便于 VM 诊断）。测试：core +32（12 复合/13 配置/7 缩写）、ime +7 引擎层与标注、host-e2e 新增 `--multi-pack` 7 项（等价性底线/不漂移/去重/缩写标注/排尾/防污染）、`bench` 新增 `ZYDT_PACKS` 多包场景；工作区 288 项、host-e2e 种子 19/19 + 多包 7/7、fmt/clippy/diff-check 全绿。Agent Note 见 [architecture/2026-09-29-composite-dictionary-and-abbreviation-path](../.agents/notes/implemented/architecture/2026-09-29-composite-dictionary-and-abbreviation-path.md) |
 
 ## 周期任务登记
 
