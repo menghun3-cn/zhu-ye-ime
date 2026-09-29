@@ -42,7 +42,13 @@ the rest in `m6.rs`:
   measured stats (skeleton count, wordfreq hit rate, expansions, char-set
   coverage, size, SHA-256). Output is deterministic: two builds of the same
   inputs are byte-identical (entries are built from a merged map and compiled
-  with a stable order; verified on 2026-09-28).
+  with a stable order; verified on 2026-09-29, SHA `7f389214…`).
+- `audit-coverage [--sample N] [--base 文件]` — samples the skeleton top-N,
+  generates candidates with each word's pinyin, reports two metrics: target-word
+  first-candidate rate (capped by homophone collisions) and group-winner rate
+  (first candidate = the skeleton's most-frequent word for that pinyin). Gates:
+  coverage ≥98% and group-winner ≥90%. Added in T-044 (2026-09-29); see the
+  [base-pack coverage tuning note](2026-09-29-base-pack-coverage-tuning.md).
 - `build-manifest [dir] [--version V] [--min-engine V]` — scans `*.zyct` in
   the artifacts directory and writes `manifest.json` (JSON schema 1) with per
   pack `id/name/version/file/sha256/size/min_engine_version` plus top-level
@@ -79,16 +85,33 @@ list, -1cB list, …]` (cBpack), where bucket index k holds words at −k cB and
 `zipf = 9 − k/100`; stored as `round(zipf×1000)` (u32). Words missing from
 wordfreq fall back to jieba scaled to the same scale
 (`2000 + 1000·log10(频次)`, capped at 9000); anything else scores 1.
+The `frequency_of` closure encodes this priority and is used in **all three
+merge stages** (skeleton, CEDICT, jieba expansion). Prior to T-044 the jieba
+expansion stage bypassed `frequency_of` and stored raw `jieba_score`, which
+inflated CEDICT-sourced words to the higher jieba scale and let them outrank
+skeleton words (e.g. `垸` wordfreq 2450 stored as jieba 5690 > `元` 5600).
 Pinyin: skeleton uses the mirror's own official pinyin; CC-CEDICT word tier
 covers both pinyin and translations; jieba expansions annotate via the
 CC-CEDICT word tier then kTGHZ char tier. The `--min-score` flag is the jieba
 expansion cutoff (default 2000) and is the S-1 tuning knob.
 
-Measured on 2026-09-28: 56,008 rows loaded → 56,062 word forms; wordfreq hits
-52,070 (92.9% ≥ 70% internal gate); CEDICT tier 75,156 with translations;
-jieba expansion 247,423; 378,312 entries, 29,559,095 bytes (28.2 MB
-≤ 60 MB); kTGHZ char-set coverage 95.5% (remaining chars are rare, covered in
-part by jieba single-char words). `base.zyct` is included in the manifest
+**Polyphone disambiguation (T-044 fix):** the skeleton has multiple rows for
+the same word (e.g. `了` has `le` rank 590 and `liao3` rank 2542). `load_xdhyc_ranked`
+preserves the third-column rank, and `build_base` keeps the entry with the
+lowest rank (most frequent reading). Prior to T-044, `build_base` inserted
+into a `HashMap` by word in file order, so the later row silently overwrote
+the common reading — `了` lost `le` and landed under `liao`, while the `le`
+group was left with only rare characters.
+
+Measured on 2026-09-29 (post-T-044 fixes): 56,008 rows loaded → 56,062 word
+forms; wordfreq hits 52,070 (92.9% ≥ 70% internal gate); CEDICT tier 75,156
+with translations; jieba expansion 156,263; 287,152 entries, ~23.1 MB
+(≤ 60 MB); kTGHZ char-set coverage 94.8%. The T-044 fixes reduced the jieba
+expansion from 247,423 to 156,263 because `frequency_of` yields lower values
+than raw `jieba_score` for CEDICT-sourced words, filtering more of them out
+at the `--min-score 2000` gate. `base.zyct` SHA-256
+`7f38921408e289a1b245e9e8afd9dd41ad48775353a368de5e1355088c6d1b85`.
+`base.zyct` is included in the manifest
 (2026.09.28-p3 with the slang pack, `verify-manifest` 6/6). New build-tool deps: `flate2`,
 `rmpv`, `zip` (runtime crate unaffected).
 
@@ -139,9 +162,8 @@ purely additive step in M6-U.
   pack `flate2`, `rmpv`, `zip`) sit in the build-tool crate only — the runtime
   crate is unaffected; annotation failures must be watched per-source (74 in
   medical on first build; documented in `docs/数据清单.md` D-014 note).
-- Remaining M6-P work: S-1 tuning convergence for the base pack (`--min-score` sweep plus a
-  sampling spot-check of first-candidate coverage before the acceptance
-  criteria 7.5 numbers are declared final).
+- Remaining M6-P work: none. The base-pack S-1 tuning has been finalized
+  (T-044, 2026-09-29), and acceptance criteria 7.5 numbers are filled in.
 - Supersedes nothing; extends the pins/fetch mechanism documented in
   [dictionary source pins and fetch script](2026-09-28-dictionary-source-pins-and-fetch-script.md).
   The v2 binary format is unchanged (see
