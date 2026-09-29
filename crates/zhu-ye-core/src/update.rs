@@ -83,10 +83,17 @@ pub fn verify_release(
     downloads: &BTreeMap<String, Vec<u8>>,
     engine_version: &str,
 ) -> Result<Vec<String>, UpdateError> {
+    // 签名针对**完整** manifest 校验：调用方必须传原始 manifest，
+    // 不能先裁剪包列表（那会改变规范化字节，使签名失效）。
     verify_signature_with_key(manifest, trusted_key).map_err(UpdateError::Signature)?;
 
     let mut ready = Vec::new();
     for pack in &manifest.packs {
+        // 只校验本次实际下载的包；未下载的包（基础包、开发产物、
+        // 已是最新而跳过的包）不参与内容校验。
+        if !downloads.contains_key(&pack.id) {
+            continue;
+        }
         if !version_at_least(engine_version, &pack.min_engine_version) {
             // 版本门槛不足：跳过该包（不算失败，其余包照常处理）。
             continue;
@@ -493,14 +500,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 未下载的包不参与校验（调用方只传本次实际下载的包）；
+    /// 空下载集对应"无可更新包"，是正常结果而非错误。
     #[test]
-    fn 下载内容缺失报错() {
+    fn 未下载的包不参与校验() {
         let bytes: &[u8] = b"pack";
         let manifest =
             sign_manifest(&manifest_with(vec![("it", bytes)], "0.1.0"), &[7u8; 32]).unwrap();
         let empty: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let ready =
+            verify_release(&manifest, &test_key().verifying_key(), &empty, "0.1.0").unwrap();
+        assert!(ready.is_empty(), "未下载任何包时应返回空清单");
+    }
+
+    /// 下载了但内容与 manifest 声明不符（半包/篡改）必须报错。
+    #[test]
+    fn 下载内容与声明不符报错() {
+        let declared: &[u8] = b"pack";
+        let manifest =
+            sign_manifest(&manifest_with(vec![("it", declared)], "0.1.0"), &[7u8; 32]).unwrap();
+        let mut dl: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        dl.insert("it".to_owned(), b"truncated".to_vec());
         let error =
-            verify_release(&manifest, &test_key().verifying_key(), &empty, "0.1.0").unwrap_err();
+            verify_release(&manifest, &test_key().verifying_key(), &dl, "0.1.0").unwrap_err();
         assert!(matches!(error, UpdateError::Content(_)));
     }
 

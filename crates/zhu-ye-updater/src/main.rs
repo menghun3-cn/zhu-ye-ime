@@ -181,10 +181,14 @@ fn check_command(apply: bool) -> Result<(), String> {
 
     let engine_version = zhu_ye_core::core_version();
     let packs_dir = packs_dir()?;
-    let outdated = find_outdated(&manifest, &packs_dir);
+    // 只考虑可分发包：基础包随安装只读交付，real/seed 是开发产物，都不在更新范围。
+    let outdated: Vec<String> = find_outdated(&manifest, &packs_dir)
+        .into_iter()
+        .filter(|id| zhu_ye_core::is_distributable_pack(id))
+        .collect();
 
     if outdated.is_empty() {
-        println!("所有包均为最新，无需更新。");
+        println!("所有可更新包均为最新，无需更新。");
         return Ok(());
     }
     println!("可用更新: {outdated:?}");
@@ -220,6 +224,8 @@ fn check_command(apply: bool) -> Result<(), String> {
         return Ok(());
     }
 
+    // 传**原始** manifest：签名是对完整清单计算的，裁剪包列表会让验签失败。
+    // `apply_release` 内部只校验本次下载的包。
     let outcome = apply_release(&manifest, &key, &downloads, &packs_dir, engine_version)
         .map_err(|error| error.to_string())?;
     println!("已应用: {:?}", outcome.applied);

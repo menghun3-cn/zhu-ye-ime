@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use zhu_ye_core::dict::DictionaryEntry;
@@ -492,28 +492,9 @@ pub fn build_pack(pack_id: &str, root: &Path) -> Result<PackStats, String> {
 // manifest：生成与复核
 // ---------------------------------------------------------------------------
 
-/// manifest schema 版本（方案设计 11.7）。
-pub const MANIFEST_SCHEMA: u32 = 1;
-
-/// 单个词典包的发布元数据。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PackMeta {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub file: String,
-    pub sha256: String,
-    pub size: u64,
-    pub min_engine_version: String,
-}
-
-/// 发布 manifest（签名在 M6-U 引入，M6-P 产出未签名 JSON）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Manifest {
-    pub schema: u32,
-    pub published_at: String,
-    pub packs: Vec<PackMeta>,
-}
+// manifest 类型统一定义在 `zhu-ye-core`（M6-U 起含可选签名块）：
+// 构建侧与运行时侧共用同一结构，避免两处定义漂移。
+pub use zhu_ye_core::manifest::{Manifest, PackMeta, MANIFEST_SCHEMA};
 
 /// 生成 manifest：扫描目录内 `*.zyct`，计算每包内容 SHA-256 与大小。
 pub fn build_manifest(
@@ -564,6 +545,7 @@ pub fn build_manifest(
         schema: MANIFEST_SCHEMA,
         published_at: today(),
         packs,
+        signature: None,
     };
     println!("manifest 生成完毕：共 {} 个包", manifest.packs.len());
     Ok(manifest)

@@ -28,6 +28,19 @@ pub const PACKS_DIR_NAME: &str = "packs";
 /// 已知领域包 id（用于过滤未知 id；新增包需同步此处与文档）。
 pub const KNOWN_PACK_IDS: &[&str] = &["base", "it", "med", "slang", "real", "seed"];
 
+/// 可通过在线更新分发的包 id（方案设计 11.7）。
+///
+/// 基础包随安装/发版只读交付，不在更新范围内；`real`/`seed` 是开发期构建产物，
+/// 从不发布。更新器只应下载并应用此列表内的包——否则会去拉取根本不存在的
+/// 发布文件（实测会得到 404）。
+pub const DISTRIBUTABLE_PACK_IDS: &[&str] = &["it", "med", "slang"];
+
+/// 判断某个包 id 是否属于在线更新分发范围。
+#[must_use]
+pub fn is_distributable_pack(pack_id: &str) -> bool {
+    DISTRIBUTABLE_PACK_IDS.contains(&pack_id)
+}
+
 /// 磁盘上的配置格式。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigFile {
@@ -208,6 +221,26 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn 分发范围只含领域包不含基础包与开发产物() {
+        // 在线更新只覆盖可写的领域包。
+        assert!(super::is_distributable_pack("it"));
+        assert!(super::is_distributable_pack("med"));
+        assert!(super::is_distributable_pack("slang"));
+        // 基础包随安装只读交付，不参与在线更新。
+        assert!(!super::is_distributable_pack("base"));
+        // 开发期产物从不发布。
+        assert!(!super::is_distributable_pack("real"));
+        assert!(!super::is_distributable_pack("seed"));
+        // 分发范围必须是已知包的子集。
+        for id in super::DISTRIBUTABLE_PACK_IDS {
+            assert!(
+                super::KNOWN_PACK_IDS.contains(id),
+                "{id} 在分发范围内但不在已知包列表"
+            );
+        }
     }
 
     #[test]

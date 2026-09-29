@@ -2,7 +2,7 @@
 
 本文件记录项目使用到的所有第三方数据、词表、语料与工具，用于许可合规审查。新增数据源必须在此登记后才能进入数据管线。
 
-现状：D-001 CC-CEDICT、D-004 FrequencyWords 中文词频与 D-006 OPUS GlobalVoices 已于 2026-09-21 引入数据管线，用于离线导入真实词库；原始文件与生成产物保存在 `data/` 且不进入 git，派生说明见 `docs/数据清单.md`。ECDICT（D-002）仍待引入。2026-09-28（M6）新增 D-007 至 D-015 九个外部源，均由 `data/pins/` 锁定并校验；D-016/D-017 为项目自有数据，随 git 版本管理。
+现状：D-001 CC-CEDICT、D-004 FrequencyWords 中文词频与 D-006 OPUS GlobalVoices 已于 2026-09-21 引入数据管线，用于离线导入真实词库；原始文件与生成产物保存在 `data/` 且不进入 git，派生说明见 `docs/数据清单.md`。ECDICT（D-002）仍待引入。2026-09-28（M6）新增 D-007 至 D-015 九个外部源，均由 `data/pins/` 锁定并校验；D-016/D-017 为项目自有数据，随 git 版本管理。2026-09-29（M6-U）新增代码依赖登记一节，登记 `ed25519-dalek`（manifest 签名，BSD-3-Clause）。
 
 ## 数据源登记
 
@@ -25,6 +25,23 @@
 | D-015 | MDN zh-cn 术语表正文（按 slug 打包） | IT 领域包补充（术语标题） | **CC BY-SA 2.5+**（署名 Mozilla Contributors） | 2026-09-28 | 已引入（M6-P）：锁定 commit 打包 + pins 哈希；派生的 it.zyct 须按 CC BY-SA 发布并署名 Mozilla Contributors |
 | D-016 | 网络语种子表 | slang 包词源 | 项目自有 | 2026-09-28 | 已引入（M6-P）：提交入库，逐行带来源注释 |
 | D-017 | 把关负面清单与抽查样例 | 构建期内容把关 | 项目自有 | 2026-09-28 | 已引入（M6-P）：仅构建期输入，**不进任何发行物** |
+
+## 代码依赖登记
+
+Rust 第三方 crate 依赖；新增依赖必须在此登记后才能进入构建。全部为宽松许可（MIT / Apache-2.0 / BSD），与项目 `MIT OR Apache-2.0` 兼容。
+
+| crate | 用途 | 许可证 | 引入 |
+| --- | --- | --- | --- |
+| memmap2 | 词典只读 mmap 加载 | MIT OR Apache-2.0 | T-006 |
+| serde / serde_json | 配置、用户词与 manifest 序列化 | MIT OR Apache-2.0 | T-006 |
+| sha2 | 词典内容 SHA-256 校验 | MIT OR Apache-2.0 | T-006 |
+| windows / windows-core | TSF 与 Win32 COM 绑定（仅 zhu-ye-ime） | MIT OR Apache-2.0 | T-010 |
+| **ed25519-dalek 2.2** | manifest 签名与验签（M6-U 更新分发信任链） | **BSD-3-Clause** | T-051 |
+
+说明：
+- `ed25519-dalek` 传递依赖 `curve25519-dalek`（BSD-3-Clause）、`fiat-crypto`（MIT OR Apache-2.0）等，均为宽松许可；不在仓库内 vendor，由 Cargo 按 `Cargo.lock` 锁定版本获取。
+- 发布私钥**不入库**：签名工具从环境变量 `ZHU_YE_RELEASE_SECRET_KEY` 读取，客户端只内置公钥。
+- 更新器下载使用系统自带 `curl.exe`（Windows 10+），因此不引入 HTTP/TLS 依赖栈。
 
 ## 使用规则
 

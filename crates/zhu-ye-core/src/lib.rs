@@ -38,8 +38,9 @@ pub use manifest::{
     ManifestSignature, PackMeta, SignatureError, MANIFEST_SCHEMA, SIGNATURE_ALGORITHM,
 };
 pub use pack_config::{
-    load_config, plan_packs, save_config, ConfigFile, PackPlan, BASE_PACK_FILE_NAME,
-    CONFIG_FORMAT_VERSION, KNOWN_PACK_IDS, PACKS_DIR_NAME,
+    is_distributable_pack, load_config, plan_packs, save_config, ConfigFile, PackPlan,
+    BASE_PACK_FILE_NAME, CONFIG_FORMAT_VERSION, DISTRIBUTABLE_PACK_IDS, KNOWN_PACK_IDS,
+    PACKS_DIR_NAME,
 };
 pub use pinyin::{segment_all, valid_prefix, FullPinyinScheme, PinyinScheme, SyllableTable};
 pub use translate::{InMemoryTranslator, TranslationDirection, Translator};
