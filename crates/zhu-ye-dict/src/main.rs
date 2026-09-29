@@ -13,8 +13,9 @@ use zhu_ye_core::dict_format::DictHeader;
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
-    build_real_bigrams, build_real_dictionary, build_v2, dict_schema_version, pipeline_status,
-    seed_bigrams, seed_entries,
+    build_base, build_manifest, build_pack, build_real_bigrams, build_real_dictionary, build_slang,
+    build_v2, dict_schema_version, pipeline_status, seed_bigrams, seed_entries, source_check,
+    today, verify_manifest,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -44,6 +45,12 @@ fn run() -> Result<(), String> {
         Some("import") => import_command(&args),
         Some("inspect") => inspect_command(required_path(&args, 2)?),
         Some("verify") => verify_command(required_path(&args, 2)?),
+        Some("source-check") => source_check_command(),
+        Some("build-pack") => build_pack_command(args.get(2).map(String::as_str)),
+        Some("build-base") => build_base_command(&args),
+        Some("build-slang") => build_slang_command(),
+        Some("build-manifest") => build_manifest_command(&args),
+        Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
         _ => {
             print_usage();
             Ok(())
@@ -59,6 +66,151 @@ fn print_usage() {
     );
     println!("  inspect <文件>        打印词典头部元数据与内容哈希");
     println!("  verify <文件>         完整加载校验并核对种子词条/bigram/翻译");
+    println!("  source-check          核对 data/pins 全部源的缓存哈希（M6）");
+    println!(
+        "  build-pack <it|med>  构建领域词包（THUOCL + 词级/单字级注音，输出 data/artifacts/<id>.zyct）（M6）"
+    );
+    println!(
+        "  build-base [--min-score N]  构建基础包（xdhyc 骨架 + wordfreq 词频 + jieba 扩充，N 默认 2000）（M6）"
+    );
+    println!(
+        "  build-slang           构建网络语包（种子表 + 把关抽查，输出 slang.zyct 与 slang.gate.json）（M6）"
+    );
+    println!(
+        "  build-manifest [目录] [--version V] [--min-engine V]  扫描 *.zyct 生成 manifest.json（M6）"
+    );
+    println!("  verify-manifest <manifest.json>  逐包复核内容哈希与大小（M6）");
+}
+
+/// `source-check`：source_check 失败返回 Err（含逐源明细），帮助文本仍可读。
+fn source_check_command() -> Result<(), String> {
+    source_check(Path::new(".")).map(|stats| {
+        println!(
+            "核对完成：{} 个源，锁定一致 {}，未锁定 {}",
+            stats.checked, stats.locked_ok, stats.unlocked
+        );
+    })
+}
+
+/// `build-pack <it|med>`：构建领域词包并打印内容哈希。
+fn build_pack_command(pack_id: Option<&str>) -> Result<(), String> {
+    let pack_id = pack_id.ok_or_else(|| "缺少包 id（支持：it / med）".to_owned())?;
+    let stats = build_pack(pack_id, Path::new("."))?;
+    println!("内容 SHA-256: {}", stats.sha256);
+    Ok(())
+}
+
+/// `build-slang`：把关抽查通过后构建网络语包并打印把关摘要。
+fn build_slang_command() -> Result<(), String> {
+    let report = build_slang(Path::new("."))?;
+    let audit = &report.audit;
+    println!(
+        "把关表 {}：负例 {}/{} 拦截（漏放 0），正例误杀 {}/{}（{:.1}%）",
+        report.blocklist_version,
+        audit.negative_blocked,
+        audit.negative_total,
+        audit.positive_killed.len(),
+        audit.positive_total,
+        audit.false_kill_rate * 100.0
+    );
+    for killed in &audit.positive_killed {
+        println!(
+            "  误杀：{}（{}：{}）",
+            killed.text, killed.category, killed.pattern
+        );
+    }
+    println!(
+        "网络语包（slang.zyct）构建完成：种子 {} 行，纯中文词 {}，缩写 {}，把关拦截 {}，排除 {}，词条 {}，大小 {} 字节",
+        report.seed_rows,
+        report.word_entries,
+        report.abbreviation_entries,
+        report.gate_blocked.len(),
+        report.excluded.len(),
+        report.entry_count,
+        report.file_size
+    );
+    for item in report.gate_blocked.iter().chain(&report.excluded) {
+        println!("  排除：{} [{}]（{}）", item.word, item.key, item.reason);
+    }
+    println!("内容 SHA-256: {}", report.sha256);
+    Ok(())
+}
+
+/// `build-base [--min-score N]`：构建基础包（骨架 + 词频 + 扩充）。
+fn build_base_command(args: &[String]) -> Result<(), String> {
+    let mut min_score = 2000u32;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--min-score" => {
+                index += 1;
+                min_score = args
+                    .get(index)
+                    .ok_or_else(|| "--min-score 缺少数值".to_owned())?
+                    .parse::<u32>()
+                    .map_err(|error| format!("--min-score 解析失败: {error}"))?;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                return Err(format!("多余参数：{}", args[index]));
+            }
+        }
+        index += 1;
+    }
+    build_base(Path::new("."), min_score).map(|_| ())
+}
+
+/// `build-manifest [目录] [--version V] [--min-engine V]`：
+/// 扫描目录内 `*.zyct` 生成 `manifest.json`（未签名，签名在 M6-U）。
+fn build_manifest_command(args: &[String]) -> Result<(), String> {
+    let mut dir = PathBuf::from("data/artifacts");
+    let mut version = None;
+    let mut min_engine_version = None;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--version" => {
+                index += 1;
+                version = Some(
+                    args.get(index)
+                        .ok_or_else(|| "--version 缺少版本号".to_owned())?,
+                );
+            }
+            "--min-engine" => {
+                index += 1;
+                min_engine_version = Some(
+                    args.get(index)
+                        .ok_or_else(|| "--min-engine 缺少版本号".to_owned())?,
+                );
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                dir = PathBuf::from(&args[index]);
+            }
+        }
+        index += 1;
+    }
+    let version = version.cloned().unwrap_or_else(today);
+    let min_engine = min_engine_version
+        .cloned()
+        .unwrap_or_else(|| "0.1.0".to_owned());
+    let manifest = build_manifest(&dir, &version, &min_engine)?;
+    let output = dir.join("manifest.json");
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("序列化 manifest 失败: {error}"))?;
+    std::fs::write(&output, json)
+        .map_err(|error| format!("写入 manifest 失败（{}）: {error}", output.display()))?;
+    println!("已写入: {}", output.display());
+    Ok(())
+}
+
+/// `verify-manifest <文件>`：逐包复核内容哈希与大小。
+fn verify_manifest_command(path: PathBuf) -> Result<(), String> {
+    verify_manifest(&path).map(|_| ())
 }
 
 fn required_path(args: &[String], index: usize) -> Result<PathBuf, String> {

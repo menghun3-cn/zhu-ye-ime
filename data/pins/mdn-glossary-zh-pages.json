@@ -1,0 +1,16 @@
+{
+  "id": "mdn-glossary-zh-pages",
+  "name": "MDN zh-cn 术语表正文（按 slug 打包）",
+  "role": "domain-it",
+  "kind": "bundle",
+  "fetch_script": "scripts/fetch-mdn-glossary.ps1",
+  "url_template": "https://raw.githubusercontent.com/mdn/translated-content/{commit}/files/zh-cn/glossary/{slug}/index.md",
+  "commit": "ab4c33f8fb839efe3af48349f54d1c989ce15a5e",
+  "cache_file": "mdn-glossary-zh-pages.txt",
+  "license": "CC BY-SA 2.5+",
+  "license_note": "MDN 内容署名 Mozilla Contributors；派生词条（术语标题）随 it.zyct 按 CC BY-SA 发布并署名",
+  "sha256": "4FF79919FE919F875E99BFFB540D74895206EC985998E8532169595D01EBDDF3",
+  "size": 702504,
+  "note": "slug 列表取自 mdn-glossary-zh.snapshot.json；正文锁定到 mdn/translated-content 指定 commit（2026-09-28 main HEAD），由 fetch-mdn-glossary.ps1 打包",
+  "fetched_at": "2026-09-29"
+}

@@ -31,7 +31,7 @@
 
 ### 3.2 编号与状态规则
 
-- 编号：`T-xxx`，全局递增；新任务编号紧跟最新已用编号（当前已用至 `T-020`），不得重复或复用
+- 编号：`T-xxx`，全局递增；新任务编号紧跟最新已用编号（当前已用至 `T-047`），不得重复或复用
 - 状态：仅允许 `待办` / `进行中` / `已完成`，不得自定义第四态
 - 每项任务必须关联需求编号（FR 关联）
 - 未通过验收的任务不得标记为已完成
@@ -80,6 +80,15 @@
 - 推送后 CI 为 pending 时如实报告 pending，不得声称通过
 - 受保护分支（main、develop）不允许直推，发布走 release 分支 + PR（见 git-publish 技能）
 
+### 5.2 分支与合并流程（T-047）
+
+- 所有新功能、bug 修复、优化、重构、文档与流程变更，一律先从最新 `develop` 切工作分支开发，禁止直接在 `develop` / `main` 上提交
+- 工作分支命名：`<type>/T-xxx-<英文短描述>`，type 与提交信息一致（如 `feat/T-045-slang-pack`、`fix/T-043-candidate-border`）
+- 开发完成后：通过第 5 节提交前门禁 → 推送工作分支 → 创建目标为 `develop` 的 PR（标题沿用提交格式，正文列出改动、验证证据与关联 T 编号）→ 合并入 `develop`
+- 合入 `develop` 后才进入发布流程：`develop` → `release/vX.Y.Z` → PR 合入 `main` → 打 tag → 同步回 `develop`（见第 6 节与 git-publish 技能）；工作分支不得直接向 `main` 提 PR
+- PR 合并后删除远程与本地工作分支，本地切回并更新 `develop`
+- 一个工作分支对应一个任务（或一个里程碑批次）；分支内可多次提交，保持每个提交可独立通过门禁
+
 ## 6. 发布代码规范
 
 - 发布前执行验收标准"发布检查清单"
@@ -89,7 +98,7 @@
 - 版本号以根 `Cargo.toml` 的 `workspace.package.version` 为唯一主版本源，发布时所有 crate 版本随 workspace 同步
 - CHANGELOG 使用 Keep a Changelog 中文格式维护在 `CHANGELOG.md`；发布流程执行 `.agents/skills/git-publish/SKILL.md`
 - 发布前在 Windows 上运行 `.agents/skills/git-publish/scripts/pre-publish-check.ps1` 校验版本与 CHANGELOG
-- 分支模型：develop 为集成分支、main 为生产分支；发布走 release/vX.Y.Z，合入 main 后打 vX.Y.Z tag，再同步回 develop（T-019）
+- 分支模型：工作分支 → PR 合入 develop（集成分支，见 5.2）→ release/vX.Y.Z → PR 合入 main（生产分支）后打 vX.Y.Z tag，再同步回 develop（T-019、T-047）
 
 ## 7. 文档规范
 

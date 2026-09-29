@@ -1,0 +1,13 @@
+{
+  "id": "mdn-glossary-zh",
+  "name": "MDN zh-cn 术语表（glossary 快照）",
+  "role": "domain-it",
+  "kind": "snapshot",
+  "snapshot_file": "data/pins/mdn-glossary-zh.snapshot.json",
+  "license": "CC BY-SA 2.5+",
+  "license_note": "MDN 内容署名 Mozilla Contributors；API 目录（名称列表）作为 PDF 式来源记录；构建期逐条抓取内容时保留署名与许可声明",
+  "sha256": "6B770EDA997DBDCF425F6CBDD4C63D1C4B0E263D04ADD914EBAEDEB083B7B363",
+  "size": 11593,
+  "fetched_at": "2026-09-28",
+  "note": "快照 = 2026-09-28 从 GitHub API 抓取的 files/zh-cn/glossary 子目录名（601 个 slug），提交入库以锁定构建输入；M6-P 按 slug 从 raw.githubusercontent.com/mdn/translated-content/main/files/zh-cn/glossary/<slug>/index.md 抓取正文"
+}

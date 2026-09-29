@@ -1,0 +1,14 @@
+{
+  "id": "wordfreq-3.1.1",
+  "name": "wordfreq 3.1.1 zh 词频（多语料加权 zipf）",
+  "role": "frequency-primary",
+  "kind": "url",
+  "url": "https://files.pythonhosted.org/packages/24/61/62835c475d69872d30689f284497853fe33fe1d6dd18f57346d13305861d/wordfreq-3.1.1-py3-none-any.whl",
+  "cache_file": "wordfreq-3.1.1-py3-none-any.whl",
+  "license": "代码 Apache-2.0；内置数据 CC BY-SA 4.0",
+  "license_note": "NOTICE.md 明示数据许可；派生数据文件（词典产物）须按 CC BY-SA 4.0 发布并署名，与现有 CC-CEDICT 处理一致（发布检查清单核验）",
+  "sha256": "4B1C6ECFFC6198BE3396D5CF871C4423CA71C907C231348D352DD54D62B97473",
+  "size": 56834549,
+  "note": "wheel 内含 data_zip（词表 zipf 频率）；zh 词表约 33.4 万词（调研实测 top_n_list 500000）；主词频源（需求 R4-P10），版本锁定 3.1.1，抽取方式与数据文件哈希在 M6-P 登记（验收标准 7.5 S-7）",
+  "fetched_at": "2026-09-28"
+}

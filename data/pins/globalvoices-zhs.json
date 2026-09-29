@@ -1,0 +1,15 @@
+{
+  "id": "globalvoices-zhs",
+  "name": "OPUS GlobalVoices 简体中文分词语料（bigram）",
+  "role": "legacy-baseline",
+  "kind": "url",
+  "url": "https://object.pouta.csc.fi/OPUS-GlobalVoices/v2018q4/mono/zhs.tok.gz",
+  "cache_rel": "data/raw/globalvoices_zhs.tok.gz",
+  "cache_file": "globalvoices_zhs.tok.gz",
+  "license": "内容 CC BY 3.0（OPUS 再分发）",
+  "license_note": "第一期已登记（数据清单 D-006）",
+  "sha256": "D5EB00F1D52145A7149AA50C232D1D336F529111C58AA8328E938460817C8BCB",
+  "size": 8360712,
+  "fetched_at": "2026-09-21",
+  "note": "第一期已入库基线源；bigram 共现统计语料"
+}

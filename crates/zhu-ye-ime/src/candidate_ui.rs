@@ -249,6 +249,12 @@ pub struct CandidateMetrics {
     pub marker_width: i32,
     /// 主文本与译文分栏间距。
     pub translation_gap: i32,
+    /// 选中块相对面板左右边框的内缩量（T-043）。
+    ///
+    /// 固定为 1 物理像素、不做 DPI 缩放：面板边框线由 GDI 1px 笔画绘制，
+    /// 任何 DPI 下都恰好占最外圈一像素；选中块内缩 1px 即可贴边同时保留
+    /// 边框线不被高亮块覆盖。
+    pub highlight_inset_x: i32,
     /// 页脚高度（m/n 翻页指示条）；无候选页（仅页眉条）时不占空间。
     pub footer_height: i32,
     /// 圆角半径。
@@ -275,6 +281,8 @@ impl CandidateMetrics {
             // T-037：序号列收窄使候选词更贴近序号；译文紧随主文本间距减小。
             marker_width: dp(26.0),
             translation_gap: dp(8.0),
+            // T-043：选中块贴面板左右边框（仅保留 1px 边框线内缩）。
+            highlight_inset_x: 1,
             // T-040：页脚 m/n 翻页指示条。
             footer_height: dp(20.0),
             corner_radius: dp(8.0),
@@ -360,6 +368,22 @@ impl CandidateMetrics {
             top,
             right: self.panel_width - self.padding_x,
             bottom: top + self.row_height,
+        }
+    }
+
+    /// 选中行高亮块矩形（T-043）。
+    ///
+    /// 上下与 `row_rect` 一致；左右只内缩 `highlight_inset_x`（1 物理像素），
+    /// 即高亮块几乎贴满面板左右边框（搜狗风整行选中块），而序号/文本等行
+    /// 内容仍按 `row_rect` 布局，序号因此相对高亮块左缘保留足量内边距。
+    #[must_use]
+    pub fn highlight_rect(&self, index: usize) -> UiRect {
+        let row = self.row_rect(index);
+        UiRect {
+            left: self.highlight_inset_x,
+            top: row.top,
+            right: self.panel_width - self.highlight_inset_x,
+            bottom: row.bottom,
         }
     }
 
@@ -558,6 +582,13 @@ mod tests {
         assert_eq!(scaled.font_height, base.font_height * 2);
         assert_eq!(scaled.panel_size(9).1, base.panel_size(9).1 * 2);
         assert_eq!(scaled.panel_size(9).0, base.panel_size(9).0 * 2);
+        // T-043：选中块内缩量固定 1 物理像素（对齐 1px 边框线），不随 DPI 缩放。
+        assert_eq!(scaled.highlight_inset_x, base.highlight_inset_x);
+        assert_eq!(scaled.highlight_rect(0).left, 1);
+        assert_eq!(
+            scaled.highlight_rect(0).right,
+            scaled.panel_width - scaled.highlight_inset_x
+        );
     }
 
     #[test]
@@ -593,6 +624,38 @@ mod tests {
             assert!(text.left == rect.left + metrics.marker_width);
             assert!(text.right <= translation.left);
             assert!(translation.right == rect.right);
+        }
+    }
+
+    #[test]
+    fn 选中块贴面板左右边框且序号留内边距() {
+        let metrics = CandidateMetrics::new(96);
+        for index in 0..DEFAULT_PAGE_SIZE {
+            let row = metrics.row_rect(index);
+            let highlight = metrics.highlight_rect(index);
+            // 上下与行一致。
+            assert_eq!(highlight.top, row.top);
+            assert_eq!(highlight.bottom, row.bottom);
+            // 左右几乎与面板边框齐平（仅保留 1px 边框线内缩），且比内容行更靠边框。
+            assert_eq!(highlight.left, metrics.highlight_inset_x);
+            assert_eq!(
+                highlight.right,
+                metrics.panel_width - metrics.highlight_inset_x
+            );
+            assert!(
+                highlight.left < row.left,
+                "高亮块左缘应比内容行左缘更靠边框"
+            );
+            assert!(
+                highlight.right > row.right,
+                "高亮块右缘应比内容行右缘更靠边框"
+            );
+            // 序号列相对高亮块左缘保留足量内边距（不再贴高亮块边缘）。
+            let marker = metrics.marker_rect(row);
+            assert!(
+                marker.left - highlight.left >= 10,
+                "序号列起点相对高亮块左缘应至少留 10px"
+            );
         }
     }
 

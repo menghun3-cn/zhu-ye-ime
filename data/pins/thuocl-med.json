@@ -1,0 +1,14 @@
+{
+  "id": "thuocl-med",
+  "name": "THUOCL_medical（清华开放中文词库 医学类）",
+  "role": "domain-med",
+  "kind": "url",
+  "url": "https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_medical.txt",
+  "cache_file": "THUOCL_medical.txt",
+  "license": "MIT",
+  "license_note": "README 声明免费开放、可用于研究与商业；保留版权声明",
+  "sha256": "A01F39F1677AF0B6A620BBC68BF293E8E436F06248B74ADB625CD61D9AD7BBCD",
+  "size": 308805,
+  "note": "README 公布 18,749 词，带 DF 文档频率值；数据 2016-2017 年，医学词汇相对稳定可作基线（需求 R4-P07）",
+  "fetched_at": "2026-09-28"
+}

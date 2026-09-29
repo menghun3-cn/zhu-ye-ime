@@ -7,6 +7,10 @@
 //! - `ITfEditSession` 在 TSF 编辑会话内写入组合文本或提交文本；
 //! - `ITfCompositionSink` 在宿主终止组合时同步清理输入引擎状态。
 //!
+//! T-046：`Activate` 时经 `ITfLangBarItemMgr::AddItem` 注册语言栏中英模式
+//! 图标（见 [`crate::lang_bar`]），`Deactivate` 时注销；`sync_engine` 的
+//! `ToggleMode` 分支在引擎锁外通知语言栏刷新图标。
+//!
 //! TSF 注册表写入与清理由 `scripts/` 下的安装/卸载脚本完成，本模块不直接改注册表。
 
 use std::ffi::c_void;
@@ -47,6 +51,7 @@ use zhu_ye_core::{core_version, BigramModel, Dictionary, DictionaryFile, UserDic
 
 use crate::candidate_window::{CandidateWindow, CandidateWindowPlacement};
 use crate::input::{m1_seed_dictionary, InputEngine, InputMode};
+use crate::lang_bar::LangBarHandle;
 
 /// 输入法 TIP 的 CLSID，与 `scripts/ime-identity.ps1` 中的 `TipClsid` 保持一致。
 pub const CLSID_ZHU_YE_TIP: windows::core::GUID =
@@ -118,6 +123,8 @@ struct EngineState {
     keystroke_mgr: Option<ITfKeystrokeMgr>,
     composition: Option<ITfComposition>,
     candidate_window: CandidateWindow,
+    /// 语言栏中英模式图标（T-046）；仅在激活且有线程管理器时存在。
+    lang_bar: Option<LangBarHandle>,
 }
 
 impl EngineState {
@@ -128,6 +135,7 @@ impl EngineState {
             keystroke_mgr: None,
             composition: None,
             candidate_window: CandidateWindow::new(),
+            lang_bar: None,
         }
     }
 
@@ -138,6 +146,7 @@ impl EngineState {
             keystroke_mgr: None,
             composition: None,
             candidate_window: CandidateWindow::new(),
+            lang_bar: None,
         }
     }
 }
@@ -224,6 +233,15 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
                 state.tid = tid;
                 state.keystroke_mgr = Some(keystroke_mgr);
                 debug_log(&format!("zhu-ye: Activate tid={tid} key-sink ok"));
+                // T-046：注册语言栏中英模式图标。语言栏/ctfmon 不可用时
+                // 不阻断激活（图标属增强反馈，缺了不影响输入闭环）。
+                match LangBarHandle::register(&thread_mgr, state.engine.mode()) {
+                    Ok(handle) => {
+                        state.lang_bar = Some(handle);
+                        debug_log("zhu-ye: langbar added");
+                    }
+                    Err(err) => debug_log(&format!("zhu-ye: langbar skip {err:?}")),
+                }
                 Ok(())
             }
             Err(err) => {
@@ -240,6 +258,11 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         state.engine.cancel_input();
         state.candidate_window.hide();
 
+        // T-046：注销语言栏项目（消耗句柄持有），优先于按键 sink 清理。
+        if let Some(handle) = state.lang_bar.take() {
+            handle.unregister();
+            debug_log("zhu-ye: langbar removed");
+        }
         if let Some(keystroke_mgr) = state.keystroke_mgr.take() {
             let _ = unsafe { keystroke_mgr.UnadviseKeyEventSink(state.tid) };
         }
@@ -520,6 +543,22 @@ fn commit_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
 
 /// 将引擎状态推进到动作后的实际状态。
 fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
+    // T-046：模式切换额外需要把新模式同步到语言栏图标。语言栏接口
+    // 与引擎状态分属不同锁域，切换动作在锁内完成、通知在锁外发送，
+    // 避免在 ctfmon 回调线程上持锁等待语言栏。
+    if action == KeyAction::ToggleMode {
+        let (mode, lang_bar) = {
+            let mut guard = state.lock().unwrap();
+            guard.engine.toggle_mode();
+            let mode = guard.engine.mode();
+            (mode, guard.lang_bar.clone())
+        };
+        if let Some(handle) = lang_bar {
+            handle.set_mode(mode);
+        }
+        return;
+    }
+
     let engine = &mut state.lock().unwrap().engine;
     match action {
         KeyAction::Letter(c) => {
@@ -541,7 +580,8 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
             let _ = engine.select_index(index);
         }
         KeyAction::ToggleMode => {
-            engine.toggle_mode();
+            // 已在上方专门分支处理，这里不可达。
+            unreachable!("ToggleMode 在 sync_engine 入口已拦截");
         }
         KeyAction::ToggleLayer => {
             let _ = engine.toggle_translation_layer();
