@@ -46,8 +46,11 @@ the rest in `m6.rs`:
 - `build-manifest [dir] [--version V] [--min-engine V]` — scans `*.zyct` in
   the artifacts directory and writes `manifest.json` (JSON schema 1) with per
   pack `id/name/version/file/sha256/size/min_engine_version` plus top-level
-  `schema` and `published_at`. **Unsigned at this milestone; ed25519 signing
-  lands in M6-U.** Manifest default `version` is the UTC build date and
+  `schema` and `published_at`. The manifest types come from `zhu-ye-core`, so the
+  build side and the runtime side share one wire format; `sign-manifest` adds an
+  ed25519 signature block (see the
+  [update trust chain note](../architecture/2026-09-29-dictionary-update-trust-chain.md)).
+  Manifest default `version` is the UTC build date and
   `min_engine_version` defaults to "0.1.0".
 - `verify-manifest <manifest.json>` — per package: file exists, content
   SHA-256 and byte size match the manifest; any mismatch fails.

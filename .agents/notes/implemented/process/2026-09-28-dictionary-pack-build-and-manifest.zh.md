@@ -15,7 +15,7 @@ M6 需要发布多个词典包（基础包、领域包、网络语包）供运�
 - `source-check` — 读取全部 `data/pins/*.json`，对每个 pin 指向的缓存/快照文件做哈希校验；任一锁定哈希不匹配即构建失败。未锁定（缺 `sha256`）的 pin 只报告不失败。`build-pack` 先执行 `source-check`，源漂移永远不会静默进入构建。
 - `build-pack <it|med>` — 解析 `THUOCL_*.txt`（`词<TAB>DF`），仅保留纯 CJK 词形，注音，按 (词, 拼音) 去重，用 `build_v2` 编译并写入 `data/artifacts/<id>.zyct`。词频取 THUOCL DF（封顶 u32::MAX）；领域包不带译文（现有管线本就过滤空译文）。`it` 包另并入 MDN zh-cn 术语表标题（D-015，`kind: bundle` 类 pin，由 `scripts/fetch-mdn-glossary.ps1` 按 slug 从锁定 commit 抓取）：`parse_mdn_titles` 取每页 front matter 的 `title:`，去引号与括注的英文/缩写，按 `、` 与 `/` 拆分，保留 ≥2 字纯汉字术语；统一词频 500（THUOCL_IT DF 中位数 441）。
 - `build-base [--min-score N]` — 合并骨架（XDHCY 56,008）、CC-CEDICT 词条（带译文）与 jieba 扩充为 `base.zyct`，并记录实测统计（骨架数、wordfreq 命中率、扩充数、字集覆盖、体积、SHA-256）。输出确定：同输入两次构建字节级一致（2026-09-28 实测验证）。
-- `build-manifest [目录] [--version V] [--min-engine V]` — 扫描产物目录内 `*.zyct`，写出 `manifest.json`（JSON schema 1），逐包含 `id/name/version/file/sha256/size/min_engine_version`，顶层含 `schema` 与 `published_at`。**本里程碑不签名；ed25519 签名在 M6-U 引入。** manifest 默认 `version` 为 UTC 构建日期，`min_engine_version` 默认 "0.1.0"。
+- `build-manifest [目录] [--version V] [--min-engine V]` — 扫描产物目录内 `*.zyct`，写出 `manifest.json`（JSON schema 1），逐包含 `id/name/version/file/sha256/size/min_engine_version`，顶层含 `schema` 与 `published_at`。manifest 类型定义在 `zhu-ye-core`，构建侧与运行时侧共用同一传输格式；`sign-manifest` 追加 ed25519 签名块（见[更新信任链笔记](../architecture/2026-09-29-dictionary-update-trust-chain.zh.md)）。manifest 默认 `version` 为 UTC 构建日期，`min_engine_version` 默认 "0.1.0"。
 - `verify-manifest <manifest.json>` — 逐包校验：文件存在、内容 SHA-256 与字节大小和 manifest 一致；任一不一致即失败。
 
 ### 基础包数据流

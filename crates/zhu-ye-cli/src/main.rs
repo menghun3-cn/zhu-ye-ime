@@ -39,7 +39,57 @@ fn print_usage() {
     println!("  user reset         清空用户词库");
     println!("  dict <文件> [拼]   加载 v2 词典并查询词条");
     println!("  dict <文件> -r 英文  加载 v2 词典并通过译文反查中文");
+    println!("  dict update [check|apply|status]  触发词典更新器（M6-U，S-5）");
     println!("  rank <文件> <拼音> [前词]  加载 v2 词典并按上下文输出排序候选");
+}
+
+/// `dict update` 子命令（M6-U，S-5）：触发独立更新器 exe。
+///
+/// 更新器是唯一联网组件；本命令只做进程转发，TSF DLL 侧不参与网络。
+/// 找不到更新器时给出明确提示而不是静默失败。
+fn dict_update_command(args: &[String]) {
+    let sub = args.get(3).map(String::as_str).unwrap_or("status");
+    let exe = updater_path();
+    let Some(exe) = exe else {
+        eprintln!(
+            "未找到更新器 zhu-ye-updater.exe；请先构建（cargo build --release -p zhu-ye-updater）"
+        );
+        eprintln!("或把更新器放到 PATH / 与 zhu-ye-cli 同目录。");
+        std::process::exit(1);
+    };
+    println!("调用更新器: {} {sub}", exe.display());
+    let status = std::process::Command::new(&exe).arg(sub).status();
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("更新器退出码: {status}");
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        Err(error) => {
+            eprintln!("启动更新器失败: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// 定位更新器：与当前可执行文件同目录优先，其次 PATH。
+fn updater_path() -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) {
+        "zhu-ye-updater.exe"
+    } else {
+        "zhu-ye-updater"
+    };
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(dir) = current.parent() {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    // 开发布局：workspace target/<profile>/ 下两个二进制同目录，已由上面覆盖；
+    // 兜底直接交给 PATH 解析。
+    Some(std::path::PathBuf::from(name))
 }
 
 fn demo(pinyin: &str) {
@@ -316,10 +366,17 @@ fn dict_file_path() -> PathBuf {
 }
 
 /// `dict` 子命令：加载 v2 词典，查询拼音词条或通过 `-r` 反查英文。
+///
+/// `dict update [check|apply|status]` 转发到独立更新器（M6-U，S-5）。
 fn dict_command(args: Vec<String>) {
+    if args.get(2).map(String::as_str) == Some("update") {
+        dict_update_command(&args);
+        return;
+    }
     let Some(path) = args.get(2) else {
         println!("用法: zhu-ye-cli dict <词典文件> [拼音]");
         println!("      zhu-ye-cli dict <词典文件> -r 英文");
+        println!("      zhu-ye-cli dict update [check|apply|status]");
         return;
     };
     match DictionaryFile::open(Path::new(path)) {

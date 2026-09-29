@@ -51,6 +51,8 @@ fn run() -> Result<(), String> {
         Some("build-slang") => build_slang_command(),
         Some("build-manifest") => build_manifest_command(&args),
         Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
+        Some("sign-manifest") => sign_manifest_command(required_path(&args, 2)?),
+        Some("verify-signature") => verify_signature_command(required_path(&args, 2)?),
         _ => {
             print_usage();
             Ok(())
@@ -80,6 +82,12 @@ fn print_usage() {
         "  build-manifest [目录] [--version V] [--min-engine V]  扫描 *.zyct 生成 manifest.json（M6）"
     );
     println!("  verify-manifest <manifest.json>  逐包复核内容哈希与大小（M6）");
+    println!(
+        "  sign-manifest <manifest.json>  用发布私钥签名（读 ZHU_YE_RELEASE_SECRET_KEY，M6-U）"
+    );
+    println!(
+        "  verify-signature <manifest.json>  用内置/指定公钥验签（读 ZHU_YE_RELEASE_PUBLIC_KEY，M6-U）"
+    );
 }
 
 /// `source-check`：source_check 失败返回 Err（含逐源明细），帮助文本仍可读。
@@ -211,6 +219,84 @@ fn build_manifest_command(args: &[String]) -> Result<(), String> {
 /// `verify-manifest <文件>`：逐包复核内容哈希与大小。
 fn verify_manifest_command(path: PathBuf) -> Result<(), String> {
     verify_manifest(&path).map(|_| ())
+}
+
+/// `sign-manifest <文件>`（M6-U）：用发布私钥对 manifest 签名并就地写回。
+///
+/// 私钥从环境变量 `ZHU_YE_RELEASE_SECRET_KEY` 读取（32 字节十六进制），
+/// **绝不写入仓库、日志或命令行参数**——参数会留在进程列表与 shell 历史里。
+fn sign_manifest_command(path: PathBuf) -> Result<(), String> {
+    let secret_hex = std::env::var("ZHU_YE_RELEASE_SECRET_KEY").map_err(|_| {
+        "未设置 ZHU_YE_RELEASE_SECRET_KEY（32 字节十六进制私钥）；\
+         私钥只应存在于发布环境，不得写入仓库"
+            .to_owned()
+    })?;
+    let secret_bytes = decode_hex(&secret_hex)?;
+    let secret: [u8; 32] = secret_bytes.as_slice().try_into().map_err(|_| {
+        format!(
+            "私钥长度应为 32 字节（64 个十六进制字符），实际 {} 字节",
+            secret_bytes.len()
+        )
+    })?;
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("读取 manifest 失败（{}）: {error}", path.display()))?;
+    let manifest = zhu_ye_core::parse_manifest(&text).map_err(|error| error.to_string())?;
+    let signed =
+        zhu_ye_core::sign_manifest(&manifest, &secret).map_err(|error| error.to_string())?;
+
+    let json = serde_json::to_string_pretty(&signed)
+        .map_err(|error| format!("序列化签名 manifest 失败: {error}"))?;
+    std::fs::write(&path, json)
+        .map_err(|error| format!("写入 manifest 失败（{}）: {error}", path.display()))?;
+
+    let signature = signed
+        .signature
+        .as_ref()
+        .ok_or_else(|| "签名后 manifest 缺少签名块".to_owned())?;
+    println!("已签名: {}", path.display());
+    println!("  算法: {}", signature.algorithm);
+    println!("  公钥: {}", signature.public_key);
+    println!("  请把该公钥配置到构建环境 ZHU_YE_RELEASE_PUBLIC_KEY，使客户端能验签");
+    Ok(())
+}
+
+/// `verify-signature <文件>`（M6-U）：用指定或内置公钥验签。
+fn verify_signature_command(path: PathBuf) -> Result<(), String> {
+    let key_hex = std::env::var("ZHU_YE_RELEASE_PUBLIC_KEY")
+        .map_err(|_| "未设置 ZHU_YE_RELEASE_PUBLIC_KEY（32 字节十六进制公钥）".to_owned())?;
+    let key = zhu_ye_core::parse_public_key(&key_hex).map_err(|error| error.to_string())?;
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("读取 manifest 失败（{}）: {error}", path.display()))?;
+    let manifest = zhu_ye_core::parse_manifest(&text).map_err(|error| error.to_string())?;
+    zhu_ye_core::verify_signature_with_key(&manifest, &key).map_err(|error| error.to_string())?;
+    println!(
+        "验签通过: {}（{} 个包）",
+        path.display(),
+        manifest.packs.len()
+    );
+    Ok(())
+}
+
+/// 解析十六进制字符串为字节。
+fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
+    let text = text.trim();
+    if !text.len().is_multiple_of(2) {
+        return Err(format!("十六进制长度必须为偶数，实际 {}", text.len()));
+    }
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let bytes = text.as_bytes();
+    for pair in bytes.chunks(2) {
+        let high = (pair[0] as char)
+            .to_digit(16)
+            .ok_or_else(|| "包含非十六进制字符".to_owned())?;
+        let low = (pair[1] as char)
+            .to_digit(16)
+            .ok_or_else(|| "包含非十六进制字符".to_owned())?;
+        out.push(((high << 4) | low) as u8);
+    }
+    Ok(out)
 }
 
 fn required_path(args: &[String], index: usize) -> Result<PathBuf, String> {
