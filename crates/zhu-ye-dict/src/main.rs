@@ -13,9 +13,9 @@ use zhu_ye_core::dict_format::DictHeader;
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
-    build_base, build_manifest, build_pack, build_real_bigrams, build_real_dictionary, build_v2,
-    dict_schema_version, pipeline_status, seed_bigrams, seed_entries, source_check, today,
-    verify_manifest,
+    build_base, build_manifest, build_pack, build_real_bigrams, build_real_dictionary, build_slang,
+    build_v2, dict_schema_version, pipeline_status, seed_bigrams, seed_entries, source_check,
+    today, verify_manifest,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -48,6 +48,7 @@ fn run() -> Result<(), String> {
         Some("source-check") => source_check_command(),
         Some("build-pack") => build_pack_command(args.get(2).map(String::as_str)),
         Some("build-base") => build_base_command(&args),
+        Some("build-slang") => build_slang_command(),
         Some("build-manifest") => build_manifest_command(&args),
         Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
         _ => {
@@ -73,6 +74,9 @@ fn print_usage() {
         "  build-base [--min-score N]  构建基础包（xdhyc 骨架 + wordfreq 词频 + jieba 扩充，N 默认 2000）（M6）"
     );
     println!(
+        "  build-slang           构建网络语包（种子表 + 把关抽查，输出 slang.zyct 与 slang.gate.json）（M6）"
+    );
+    println!(
         "  build-manifest [目录] [--version V] [--min-engine V]  扫描 *.zyct 生成 manifest.json（M6）"
     );
     println!("  verify-manifest <manifest.json>  逐包复核内容哈希与大小（M6）");
@@ -93,6 +97,42 @@ fn build_pack_command(pack_id: Option<&str>) -> Result<(), String> {
     let pack_id = pack_id.ok_or_else(|| "缺少包 id（支持：it / med）".to_owned())?;
     let stats = build_pack(pack_id, Path::new("."))?;
     println!("内容 SHA-256: {}", stats.sha256);
+    Ok(())
+}
+
+/// `build-slang`：把关抽查通过后构建网络语包并打印把关摘要。
+fn build_slang_command() -> Result<(), String> {
+    let report = build_slang(Path::new("."))?;
+    let audit = &report.audit;
+    println!(
+        "把关表 {}：负例 {}/{} 拦截（漏放 0），正例误杀 {}/{}（{:.1}%）",
+        report.blocklist_version,
+        audit.negative_blocked,
+        audit.negative_total,
+        audit.positive_killed.len(),
+        audit.positive_total,
+        audit.false_kill_rate * 100.0
+    );
+    for killed in &audit.positive_killed {
+        println!(
+            "  误杀：{}（{}：{}）",
+            killed.text, killed.category, killed.pattern
+        );
+    }
+    println!(
+        "网络语包（slang.zyct）构建完成：种子 {} 行，纯中文词 {}，缩写 {}，把关拦截 {}，排除 {}，词条 {}，大小 {} 字节",
+        report.seed_rows,
+        report.word_entries,
+        report.abbreviation_entries,
+        report.gate_blocked.len(),
+        report.excluded.len(),
+        report.entry_count,
+        report.file_size
+    );
+    for item in report.gate_blocked.iter().chain(&report.excluded) {
+        println!("  排除：{} [{}]（{}）", item.word, item.key, item.reason);
+    }
+    println!("内容 SHA-256: {}", report.sha256);
     Ok(())
 }
 

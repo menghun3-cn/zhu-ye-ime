@@ -323,6 +323,10 @@ fn strip_tone_marks(input: &str) -> Option<String> {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PackStats {
     pub source_lines: usize,
+    /// MDN 术语表标题解析出的纯汉字术语数（仅 it 包）。
+    pub mdn_terms: usize,
+    /// MDN 术语入包数（去重、注音后）。
+    pub mdn_accepted: usize,
     pub accepted: usize,
     pub annotation_failed: usize,
     pub duplicates: usize,
@@ -331,7 +335,46 @@ pub struct PackStats {
     pub sha256: String,
 }
 
+/// MDN zh-cn 术语表打包文件（`scripts/fetch-mdn-glossary.ps1` 产出，pin 锁定）。
+pub const MDN_BUNDLE: &str = "mdn-glossary-zh-pages.txt";
+
+/// MDN 术语静态词频：取 THUOCL_IT 文档频率中位数量级（DF 中位数 441）。
+pub const MDN_FREQUENCY: u64 = 500;
+
+/// 从 MDN 打包文件提取术语：取每页 front matter 的 `title:`，去引号与括注
+/// （全角/半角括号内的英文或缩写），并按顿号/斜杠拆分并列名；只保留 2 字以上纯汉字。
+/// 结果按出现顺序去重。
+pub fn parse_mdn_titles(bundle: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+    for line in bundle.lines() {
+        let Some(title) = line.strip_prefix("title:") else {
+            continue;
+        };
+        let title = title.trim().trim_matches(['"', '\'']);
+        let mut stripped = String::with_capacity(title.len());
+        let mut depth = 0usize;
+        for ch in title.chars() {
+            match ch {
+                '（' | '(' => depth += 1,
+                '）' | ')' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => stripped.push(ch),
+                _ => {}
+            }
+        }
+        for part in stripped.split(['、', '/', '／']) {
+            let part = part.trim();
+            if part.chars().count() >= 2 && is_cjk_word(part) && seen.insert(part.to_owned()) {
+                terms.push(part.to_owned());
+            }
+        }
+    }
+    terms
+}
+
 /// 构建领域词包（thuocl 词表 -> 注音 -> v2 词典）。
+///
+/// `it` 包另并入 MDN zh-cn 术语表标题（CC BY-SA 2.5+，署名 Mozilla Contributors）。
 ///
 /// 词频取 THUOCL 文档频率（DF）；领域词无译文（译文层按现有策略过滤空译文）。
 pub fn build_pack(pack_id: &str, root: &Path) -> Result<PackStats, String> {
@@ -393,6 +436,25 @@ pub fn build_pack(pack_id: &str, root: &Path) -> Result<PackStats, String> {
         entries.push(DictionaryEntry::new(word, pinyin, frequency));
     }
 
+    if pack_id == "it" {
+        let bundle = fs::read_to_string(root.join(CACHE_DIR).join(MDN_BUNDLE))
+            .map_err(|error| format!("读取 MDN 术语表打包失败（{MDN_BUNDLE}）: {error}"))?;
+        for term in parse_mdn_titles(&bundle) {
+            stats.mdn_terms += 1;
+            let Some(pinyin) = tables.annotate(&term) else {
+                stats.annotation_failed += 1;
+                continue;
+            };
+            if !seen.insert((term.clone(), pinyin.clone())) {
+                stats.duplicates += 1;
+                continue;
+            }
+            stats.accepted += 1;
+            stats.mdn_accepted += 1;
+            entries.push(DictionaryEntry::new(term, pinyin, MDN_FREQUENCY));
+        }
+    }
+
     let bytes = crate::build_v2(&entries, &[]).map_err(|error| error.to_string())?;
     let output = root.join(ARTIFACTS_DIR).join(format!("{pack_id}.zyct"));
     if let Some(parent) = output.parent() {
@@ -412,6 +474,12 @@ pub fn build_pack(pack_id: &str, root: &Path) -> Result<PackStats, String> {
         stats.entry_count,
         stats.file_size
     );
+    if pack_id == "it" {
+        println!(
+            "MDN 术语表：纯汉字术语 {}，入包 {}",
+            stats.mdn_terms, stats.mdn_accepted
+        );
+    }
     println!(
         "注音底表：词级 {}，单字级 {}",
         tables.word_map_len(),
@@ -1062,6 +1130,15 @@ mod tests {
         assert!(!words.iter().any(|(w, _)| w.contains("ＯＫ")));
         // 音节数与字符数不匹配或音节非法 -> 丢弃
         assert!(!words.iter().any(|(w, _)| w == "坏行"));
+    }
+
+    #[test]
+    fn mdn_标题提取去括注拆并列() {
+        let bundle = "### api\n---\ntitle: API\nslug: Glossary/API\n---\n正文 title: 不算\n### alpn\n---\ntitle: 应用层协议协商（ALPN）\n---\n### cssom\n---\ntitle: \"CSS 对象模型\"\n---\n### x\n---\ntitle: 变量、常量/字面量 (literal)\n---\n### dup\n---\ntitle: 应用层协议协商\n---\n### one\n---\ntitle: 位\n---\n";
+        assert_eq!(
+            parse_mdn_titles(bundle),
+            vec!["应用层协议协商", "变量", "常量", "字面量"]
+        );
     }
 
     #[test]

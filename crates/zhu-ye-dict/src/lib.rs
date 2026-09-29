@@ -25,6 +25,9 @@ pub use m6::{
     build_base, build_manifest, build_pack, source_check, today, verify_manifest, Manifest,
 };
 
+pub mod slang;
+pub use slang::{build_slang, SlangReport};
+
 /// 词典二进制格式版本。
 #[must_use]
 pub const fn dict_schema_version() -> u32 {
@@ -34,7 +37,7 @@ pub const fn dict_schema_version() -> u32 {
 /// 返回当前数据管线状态，供自检使用。
 #[must_use]
 pub fn pipeline_status() -> &'static str {
-    "v2 格式构建/检查可用：build、inspect、verify、import；M6：source-check、build-pack、build-manifest、verify-manifest"
+    "v2 格式构建/检查可用：build、inspect、verify、import；M6：source-check、build-pack、build-base、build-slang、build-manifest、verify-manifest"
 }
 
 #[cfg(test)]

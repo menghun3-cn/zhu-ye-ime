@@ -86,6 +86,33 @@ foreach ($pinFile in $pinFiles) {
             if ($pin.sha256) { $status = 'ok（快照锁定）' } else { $status = 'ok（未锁定）' }
             $hashNote = $h.Substring(0, 12)
         }
+        elseif ($pin.kind -eq 'bundle') {
+            # 打包类：由专用抓取脚本按锁定 commit 逐条抓取并拼接为单文件，此处只做哈希锁定
+            $target = Join-Path (Join-Path $root $CacheDir) $pin.cache_file
+            if ($DryRun) {
+                $state = if (Test-Path $target) { '缓存已存在' } else { "需运行 $($pin.fetch_script)" }
+                $status = "dry-run（$state）"
+            }
+            else {
+                if ($Force -or -not (Test-Path $target)) {
+                    & (Join-Path $root $pin.fetch_script)
+                    if (-not (Test-Path $target)) { throw "打包脚本未产出：$target" }
+                }
+                $h = Get-Sha256 $target
+                if ($pin.sha256) {
+                    if ($h -ne $pin.sha256) { throw "打包哈希漂移：期望 $($pin.sha256)，实际 $h（锁定 commit 下内容不应变化，人工审查）" }
+                    $status = 'ok（打包一致）'
+                }
+                elseif ($WritePins) {
+                    $pin.sha256 = $h
+                    $pin.size = (Get-Item $target).Length
+                    Write-PinBack $pin $pinFile.FullName
+                    $status = 'ok（打包回填锁定）'
+                }
+                else { $status = '未锁定（加 -WritePins 回填哈希）' }
+                $hashNote = $h.Substring(0, 12)
+            }
+        }
         else {
             if (-not $pin.url) { throw "pin 缺少 url 字段" }
             $target = if ($pin.cache_rel) {

@@ -17,7 +17,9 @@ and there was no per-pack reproducibility gate.
 
 ## Decision
 
-`zhu-ye-dict` gained five M6 subcommands, all implemented in `m6.rs`:
+`zhu-ye-dict` gained six M6 subcommands; `build-slang` lives in `slang.rs`
+(see [slang pack and content gate](2026-09-28-slang-pack-and-content-gate.md)),
+the rest in `m6.rs`:
 
 - `source-check` — reads every `data/pins/*.json`, hashes the referenced cache
   or snapshot file, and fails the build unless every locked hash matches.
@@ -28,7 +30,13 @@ and there was no per-pack reproducibility gate.
   CJK words, annotates pinyin, dedups on (word, pinyin), compiles with
   `build_v2` and writes `data/artifacts/<id>.zyct`. Frequency = THUOCL DF
   capped at u32::MAX; domain packs carry no translations (the existing
-  pipeline already filters empty translations).
+  pipeline already filters empty translations). The `it` pack also merges
+  MDN zh-cn glossary titles (D-015, a `kind: bundle` pin fetched per slug at
+  a locked commit by `scripts/fetch-mdn-glossary.ps1`): `parse_mdn_titles`
+  takes each page's front-matter `title:`, strips quotes and parenthesized
+  English/abbreviations, splits on `、` and `/`, and keeps pure-CJK terms of
+  at least two chars; they get a flat frequency of 500 (the THUOCL_IT DF
+  median is 441).
 - `build-base [--min-score N]` — merges the skeleton (XDHCY 56,008), CC-CEDICT
   words (with translations) and the jieba expansion into `base.zyct`; records
   measured stats (skeleton count, wordfreq hit rate, expansions, char-set
@@ -78,7 +86,7 @@ Measured on 2026-09-28: 56,008 rows loaded → 56,062 word forms; wordfreq hits
 jieba expansion 247,423; 378,312 entries, 29,559,095 bytes (28.2 MB
 ≤ 60 MB); kTGHZ char-set coverage 95.5% (remaining chars are rare, covered in
 part by jieba single-char words). `base.zyct` is included in the manifest
-(2026.09.28-p2, `verify-manifest` 5/5). New build-tool deps: `flate2`,
+(2026.09.28-p3 with the slang pack, `verify-manifest` 6/6). New build-tool deps: `flate2`,
 `rmpv`, `zip` (runtime crate unaffected).
 
 ### Pinyin annotation strategy
@@ -96,8 +104,8 @@ syllable table (`zhu_ye_core::pinyin::SyllableTable`):
    plain ASCII, `ü` → `v`). Words not in the word tier are annotated
    char-by-char and validated again.
 
-Observed on 2026-09-28: IT pack 16,000 rows → 12,853 entries (1 annotation
-failure, 1 duplicate), 0.94 MB; medical pack 18,749 rows → 18,675 entries (74
+Observed on 2026-09-28: IT pack 16,000 THUOCL rows plus 380 MDN terms →
+13,144 entries (291 from MDN; the other 89 duplicate THUOCL), 0.96 MB; medical pack 18,749 rows → 18,675 entries (74
 annotation failures), 1.37 MB. Annotation failures come from characters
 outside the standard 8,105 set and are intentionally dropped.
 
@@ -128,8 +136,7 @@ purely additive step in M6-U.
   pack `flate2`, `rmpv`, `zip`) sit in the build-tool crate only — the runtime
   crate is unaffected; annotation failures must be watched per-source (74 in
   medical on first build; documented in `docs/数据清单.md` D-014 note).
-- Remaining M6-P work: `build-slang` plus MDN glossary page fetches (T-045),
-  and S-1 tuning convergence for the base pack (`--min-score` sweep plus a
+- Remaining M6-P work: S-1 tuning convergence for the base pack (`--min-score` sweep plus a
   sampling spot-check of first-candidate coverage before the acceptance
   criteria 7.5 numbers are declared final).
 - Supersedes nothing; extends the pins/fetch mechanism documented in
