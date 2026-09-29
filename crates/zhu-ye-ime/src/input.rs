@@ -284,13 +284,46 @@ impl InputEngine {
 
     /// 字母进入组合；英文模式或非小写字母返回 `false`。
     pub fn handle_letter(&mut self, c: char) -> bool {
-        if self.mode != InputMode::Chinese || !c.is_ascii_lowercase() {
+        if !c.is_ascii_lowercase() {
+            return false;
+        }
+        self.push_composing(c)
+    }
+
+    /// 数字进入组合串（T-049）：供含数字缩写键（`996`/`u1s1` 等）使用；
+    /// 是否该走本路径由调用方按 `is_abbreviation_prefix` 判定，英文模式拒绝。
+    pub fn handle_digit(&mut self, c: char) -> bool {
+        if !c.is_ascii_digit() {
+            return false;
+        }
+        self.push_composing(c)
+    }
+
+    fn push_composing(&mut self, c: char) -> bool {
+        if self.mode != InputMode::Chinese {
             return false;
         }
         self.composing.push(c);
         self.refresh_candidates();
         self.page = 0;
         true
+    }
+
+    /// 判断 `text` 是否为某个"含数字缩写键"的前缀（T-049）。
+    ///
+    /// 数字键既要能选词（FR-006），又要能输入数字缩写键；判定依据是
+    /// 词典中是否存在以 `text` 开头、且拼音键含 ASCII 数字的词条——
+    /// 数字只有在"某缩写键的组成部分"这一种情况下才该进组合串，
+    /// 否则一律保持原有选词/直出语义。
+    #[must_use]
+    pub fn is_abbreviation_prefix(&self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        self.dictionary
+            .lookup_prefix(text)
+            .iter()
+            .any(|entry| entry.pinyin.chars().any(|c| c.is_ascii_digit()))
     }
 
     /// Backspace 删除最后一个拼音字母；无组合时返回 `false`。
@@ -806,6 +839,68 @@ mod tests {
         assert!(!engine.is_active());
         engine.toggle_mode();
         assert!(engine.handle_letter('n'));
+    }
+
+    /// T-049：含数字缩写键（拼音键含 ASCII 数字）必须能被 `is_abbreviation_prefix` 识别，
+    /// 从而让数字键走组合串路径而非选词；纯拼音词条不得被误判。
+    #[test]
+    fn 数字缩写键前缀可识别且不误判拼音词() {
+        let dictionary: Arc<dyn zhu_ye_core::Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("九九六", "996", 5000),
+                zhu_ye_core::DictionaryEntry::new("有一说一", "u1s1", 5000),
+                zhu_ye_core::DictionaryEntry::new("你好", "nihao", 100),
+            ]));
+        let engine = InputEngine::new(dictionary);
+
+        // 纯数字与含数字混合键的前缀链都识别。
+        assert!(engine.is_abbreviation_prefix("9"));
+        assert!(engine.is_abbreviation_prefix("99"));
+        assert!(engine.is_abbreviation_prefix("u"));
+        assert!(engine.is_abbreviation_prefix("u1"));
+        assert!(engine.is_abbreviation_prefix("u1s"));
+        // 完整键本身也算前缀（`lookup_prefix` 含等值匹配）。
+        assert!(engine.is_abbreviation_prefix("996"));
+        // 纯拼音词前缀不得被判为数字缩写前缀，否则会夺走数字选词。
+        assert!(!engine.is_abbreviation_prefix("n"));
+        assert!(!engine.is_abbreviation_prefix("ni"));
+        assert!(!engine.is_abbreviation_prefix(""));
+    }
+
+    /// T-049：数字进入组合串后与字母拼接，走整串直查得到缩写词。
+    #[test]
+    fn 数字进入组合串可查询含数字缩写词() {
+        let dictionary: Arc<dyn zhu_ye_core::Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("九九六", "996", 5000),
+                zhu_ye_core::DictionaryEntry::new("有一说一", "u1s1", 5000),
+            ]));
+        let mut engine = InputEngine::new(dictionary);
+
+        for c in "996".chars() {
+            assert!(engine.handle_digit(c), "数字 {c} 应进入组合串");
+        }
+        assert_eq!(engine.composing(), "996");
+        assert_eq!(engine.candidates()[0].text, "九九六");
+
+        engine.handle_escape();
+        assert!(engine.handle_letter('u'));
+        assert!(engine.handle_digit('1'));
+        assert!(engine.handle_letter('s'));
+        assert!(engine.handle_digit('1'));
+        assert_eq!(engine.composing(), "u1s1");
+        assert_eq!(engine.candidates()[0].text, "有一说一");
+    }
+
+    /// T-049：英文模式与非法字符不得进入组合串，避免破坏既有模式语义。
+    #[test]
+    fn 英文模式与非法字符不进入数字组合() {
+        let mut engine = engine();
+        engine.toggle_mode();
+        assert!(!engine.handle_digit('9'));
+        engine.toggle_mode();
+        assert!(!engine.handle_digit('a'));
+        assert!(!engine.handle_digit('中'));
     }
 
     #[test]

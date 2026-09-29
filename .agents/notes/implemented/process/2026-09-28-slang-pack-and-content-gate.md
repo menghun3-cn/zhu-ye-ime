@@ -84,8 +84,9 @@ offensive-term catalog in the installer.
   time, so the runtime path (M6-R) can trust every letter key in the pack.
 - Costs: the seed and blocklist need manual maintenance per release; the
   sample set must grow with the blocklist to keep ≥200 per side meaningful.
-  Digit keys (996, 520) are packed, but whether the engine can reach them
-  waits on the S-2 digit-key check.
+  Digit keys (996, 520) are packed; the engine reaches them since T-049
+  resolved the digit-key semantics (see the
+  [digit abbreviation key note](../bug-fix/2026-09-29-digit-abbreviation-key.md)).
 - Runtime lookup, the tail-group placement, and the `[网络]` label belong to
   M6-R. This note covers only the build side.
 - Supersedes nothing. It extends
