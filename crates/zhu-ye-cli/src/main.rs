@@ -148,9 +148,45 @@ fn bench() {
     let lookup_us = measure_lookup(20_000, true);
     let bigram_us = measure_bigram(100_000, true);
     let (zh_en_us, en_zh_us) = measure_translation(50_000, true);
+    // M6-R：多包场景（基础包 + 全部领域包）对比单词典查找延迟。
+    let multi_pack_us = measure_multi_pack_lookup(20_000, true);
     println!(
-        "指标: segment_us={segment_us:.3} lookup_us={lookup_us:.3} bigram_us={bigram_us:.3} zh_en_us={zh_en_us:.3} en_zh_us={en_zh_us:.3}"
+        "指标: segment_us={segment_us:.3} lookup_us={lookup_us:.3} bigram_us={bigram_us:.3} zh_en_us={zh_en_us:.3} en_zh_us={en_zh_us:.3} multi_pack_us={multi_pack_us:.3}"
     );
+}
+
+/// 多包查找基准（M6-R，验收标准 7.2「候选刷新延迟（全包启用）」）。
+///
+/// 通过 `ZYDT_PACKS` 指定以逗号分隔的包路径；未设置时回退单词典路径，
+/// 使本项在只有 seed 包的环境下仍可运行。
+fn measure_multi_pack_lookup(runs: usize, print: bool) -> f64 {
+    let paths: Vec<PathBuf> = match std::env::var_os("ZYDT_PACKS") {
+        Some(value) => std::env::split_paths(&value).collect(),
+        None => vec![dict_file_path()],
+    };
+    let (composite, skipped) = zhu_ye_core::CompositeDictionary::from_paths(&paths);
+    if print && !skipped.is_empty() {
+        println!("多包装载跳过 {} 个包: {skipped:?}", skipped.len());
+    }
+    let dictionary: Arc<dyn Dictionary> = Arc::new(composite);
+    let queries = ["nihao", "xian", "de", "shuru", "zaoshanghao"];
+    let start = Instant::now();
+    let mut hits = 0usize;
+    for _ in 0..runs {
+        for query in queries {
+            hits = hits.saturating_add(dictionary.lookup(query).len());
+        }
+    }
+    let ops = runs.saturating_mul(queries.len());
+    let elapsed = start.elapsed();
+    if print {
+        println!(
+            "多包查找基准: {} 个包, {ops} 次, 总 {elapsed:?}, 平均 {:?}/次, 累积词条 {hits}",
+            paths.len(),
+            elapsed / ops as u32
+        );
+    }
+    us_per_op(elapsed, ops)
 }
 
 fn us_per_op(elapsed: std::time::Duration, ops: usize) -> f64 {

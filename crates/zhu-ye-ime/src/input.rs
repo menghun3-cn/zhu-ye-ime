@@ -23,6 +23,9 @@ pub const CANDIDATE_PAGE_SIZE: usize = 9;
 /// 前缀候选（T-029）补全组最多进入排序的条数；防止短前缀命中过多词条。
 const PREFIX_COMPLETION_CAP: usize = 32;
 
+/// 缩写前缀补全（M6-R）最多追加的条数。
+const ABBREVIATION_COMPLETION_CAP: usize = 32;
+
 /// 输入模式。T-013 接入 Shift 切换；这里先提供状态与切换方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -72,6 +75,8 @@ pub struct InputEngine {
     page_size: usize,
     /// 译文层候选缓存；输入串或候选变化时刷新。
     cached_translation_candidates: Vec<Candidate>,
+    /// 网络语包（M6-R）：提供字母/数字缩写查询；未启用时为 `None`。
+    slang: Option<Arc<dyn Dictionary>>,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -108,7 +113,21 @@ impl InputEngine {
             layer: CandidateLayer::default(),
             page_size: CANDIDATE_PAGE_SIZE,
             cached_translation_candidates: Vec::new(),
+            slang: None,
         }
+    }
+
+    /// 挂载网络语包（M6-R）：启用后缩写路径（FR-016/FR-017）生效。
+    #[must_use]
+    pub fn with_slang(mut self, slang: Arc<dyn Dictionary>) -> Self {
+        self.slang = Some(slang);
+        self
+    }
+
+    /// 当前是否已启用网络语包缩写路径。
+    #[must_use]
+    pub fn has_slang(&self) -> bool {
+        self.slang.is_some()
     }
 
     /// 使用指定词典与排序模型创建引擎；测试可注入自定义排序。
@@ -595,6 +614,19 @@ impl InputEngine {
             );
             self.candidates = self.ranking.rank(candidates, &context);
         }
+        // M6-R 缩写路径（FR-016/FR-017）：整串完全不可切分且长度达标时，
+        // 查询网络语包并把命中候选作为**独立组追加在尾部**，不参与默认排序竞争。
+        if let Some(slang) = &self.slang {
+            let abbreviation = zhu_ye_core::abbreviation_candidates(
+                &self.table,
+                slang.as_ref(),
+                &self.composing,
+                ABBREVIATION_COMPLETION_CAP,
+            );
+            // 取出主候选（`mem::take` 避免克隆），合并后写回。
+            let main = std::mem::take(&mut self.candidates);
+            self.candidates = zhu_ye_core::append_abbreviation_group(main, abbreviation);
+        }
         self.cached_translation_candidates = self
             .candidates
             .iter()
@@ -669,6 +701,7 @@ mod tests {
     use zhu_ye_core::bigram::InMemoryBigramModel;
     use zhu_ye_core::generate_candidates;
     use zhu_ye_core::pinyin::SyllableTable;
+    use zhu_ye_core::Dictionary;
     use zhu_ye_core::UserDictStore;
     use zhu_ye_core::{build_v2, seed_bigrams, seed_entries};
 
@@ -732,6 +765,62 @@ mod tests {
         let mut other = engine();
         type_text(&mut other, "nih");
         assert_eq!(eng.candidates(), other.candidates());
+    }
+
+    // ---- M6-R 网络语缩写路径 ----
+
+    fn slang_engine() -> InputEngine {
+        let slang: Arc<dyn Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("永远的神", "yyds", 5000),
+                zhu_ye_core::DictionaryEntry::new("有一说一", "u1s1", 5000),
+                zhu_ye_core::DictionaryEntry::new("九九六", "996", 5000),
+            ]));
+        InputEngine::with_m1_seed().with_slang(slang)
+    }
+
+    #[test]
+    fn 未挂载网络语包时缩写路径不生效() {
+        let mut eng = engine();
+        assert!(!eng.has_slang());
+        type_text(&mut eng, "yyds");
+        assert!(
+            eng.candidates().iter().all(|c| c.text != "永远的神"),
+            "未启用网络语包时不应出现缩写候选"
+        );
+    }
+
+    #[test]
+    fn 挂载网络语包后缩写候选追加尾部() {
+        let mut eng = slang_engine();
+        assert!(eng.has_slang());
+        type_text(&mut eng, "yyds");
+        let last = eng.candidates().last().expect("应有候选");
+        assert_eq!(last.text, "永远的神");
+        assert_eq!(last.source, zhu_ye_core::candidate::CandidateSource::Slang);
+    }
+
+    #[test]
+    fn 数字缩写键在引擎层可达() {
+        let mut eng = slang_engine();
+        for c in "996".chars() {
+            assert!(eng.handle_digit(c));
+        }
+        assert_eq!(eng.composing(), "996");
+        let found = eng.candidates().iter().any(|c| c.text == "九九六");
+        assert!(found, "996 应产出九九六候选");
+    }
+
+    #[test]
+    fn 可切分串不触发缩写路径() {
+        let mut eng = slang_engine();
+        type_text(&mut eng, "wo");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Slang),
+            "可切分串 wo 不得触发缩写路径"
+        );
     }
 
     #[test]

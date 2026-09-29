@@ -40,8 +40,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::candidate_ui::{
-    index_marker, theme, theme_from_system_colors, CandidateMetrics, CandidateUiTheme,
-    CandidateUiView, SystemColors, UiColor, UiRect, UiThemeKind, BASE_DPI,
+    display_main_text, index_marker, theme, theme_from_system_colors, CandidateMetrics,
+    CandidateUiTheme, CandidateUiView, SystemColors, UiColor, UiRect, UiThemeKind, BASE_DPI,
 };
 
 /// 窗口主题偏好；`Auto` 跟随系统深浅色与高对比度。
@@ -361,9 +361,12 @@ impl CandidateWindowState {
                 marker_color,
             );
 
+            // M6-R：网络语缩写候选在主文本后追加 `[网络]` 标注；
+            // 标注并入主文本，宽度估算（row_split）自然把它计入。
+            let main_owned = display_main_text(item, self.view.translation_mode);
             let (main, secondary) = if self.view.translation_mode && !item.translation.is_empty() {
                 (
-                    item.translation.as_str(),
+                    main_owned.as_str(),
                     if item.text == item.translation {
                         ""
                     } else {
@@ -371,7 +374,7 @@ impl CandidateWindowState {
                     },
                 )
             } else {
-                (item.text.as_str(), item.translation.as_str())
+                (main_owned.as_str(), item.translation.as_str())
             };
             let text_color = if is_selected {
                 self.theme.highlight_foreground

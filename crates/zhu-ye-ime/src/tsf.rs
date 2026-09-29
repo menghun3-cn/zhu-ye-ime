@@ -47,7 +47,9 @@ use windows::Win32::UI::TextServices::{
 use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
 };
-use zhu_ye_core::{core_version, BigramModel, Dictionary, DictionaryFile, UserDictStore};
+use zhu_ye_core::{
+    core_version, BigramModel, CompositeDictionary, Dictionary, DictionaryFile, UserDictStore,
+};
 
 use crate::candidate_window::{CandidateWindow, CandidateWindowPlacement};
 use crate::input::{m1_seed_dictionary, InputEngine, InputMode};
@@ -838,44 +840,140 @@ fn file_log_enabled() -> bool {
     FILE_LOG_ENABLED.load(Ordering::Relaxed)
 }
 
-/// 创建输入引擎：优先加载 `%APPDATA%\ai-zhu-ye-ime\seed.zyct`，
-/// 缺失或损坏时回退 M1 内置演示词典，保证输入法始终可启动。
+/// 创建输入引擎（M6-R 多包装配）。
+///
+/// 装配顺序（方案设计 11.3）：
+/// 1. 基础包：`ZHU_YE_DICT_PATH` 覆盖 > DLL 同目录 `dictionary.zyct` > `%APPDATA%`；
+/// 2. 读 `%APPDATA%\ai-zhu-ye-ime\config.json` 的 `enabled_packs`，在
+///    `%APPDATA%\ai-zhu-ye-ime\packs\` 下按 `<id>.zyct` 解析领域包；
+/// 3. 全部包合并为 `CompositeDictionary`（词频取 max）；
+/// 4. 网络语包单独挂到引擎上，供缩写路径（FR-016/FR-017）查询。
+///
+/// 任一包打开失败只跳过该包并记日志，绝不阻断输入；无任何可用包时回退内置演示词典。
 fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
-    let dict_path = dictionary_path();
-    match DictionaryFile::open(&dict_path) {
-        Ok(file) => {
-            debug_log(&format!("zhu-ye: dict-ok path={dict_path:?}"));
-            let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
-            let bigram: Arc<dyn BigramModel> = Arc::new(file);
-            match user_store {
-                Some(store) => InputEngine::with_user_store_and_bigram(dictionary, store, bigram),
-                None => InputEngine::with_bigram(dictionary, bigram),
-            }
+    let (config, config_diagnostic) = zhu_ye_core::load_config(&config_path());
+    if let Some(diagnostic) = config_diagnostic {
+        debug_log(&format!("zhu-ye: config-warn {diagnostic}"));
+    }
+
+    let plan = assembly_plan(&config);
+    for id in &plan.unknown {
+        debug_log(&format!("zhu-ye: config-unknown-pack id={id}"));
+    }
+    for id in &plan.missing {
+        debug_log(&format!("zhu-ye: config-missing-pack id={id}"));
+    }
+
+    let paths = plan.paths();
+    let (composite, skipped) = CompositeDictionary::from_paths(&paths);
+    for diagnostic in &skipped {
+        debug_log(&format!("zhu-ye: pack-skipped {diagnostic}"));
+    }
+
+    if composite.is_empty() {
+        debug_log(&format!(
+            "zhu-ye: dict-fallback path={:?}",
+            plan.base.clone().unwrap_or_default()
+        ));
+        return match user_store {
+            Some(store) => InputEngine::with_user_store(m1_seed_dictionary(), store),
+            None => InputEngine::with_m1_seed(),
+        };
+    }
+
+    for (name, entries) in composite.describe() {
+        debug_log(&format!("zhu-ye: pack-ok path={name:?} entries={entries}"));
+    }
+    debug_log(&format!(
+        "zhu-ye: composite-ok packs={} enabled={:?} online_update={}",
+        composite.file_count(),
+        config.enabled_packs,
+        config.online_update
+    ));
+
+    let slang = slang_pack(&plan);
+    let dictionary: Arc<dyn Dictionary> = Arc::new(composite.clone());
+    let bigram: Arc<dyn BigramModel> = Arc::new(composite);
+    let engine = match user_store {
+        Some(store) => InputEngine::with_user_store_and_bigram(dictionary, store, bigram),
+        None => InputEngine::with_bigram(dictionary, bigram),
+    };
+    match slang {
+        Some(slang) => {
+            debug_log("zhu-ye: slang-path enabled");
+            engine.with_slang(slang)
         }
-        Err(_) => {
-            debug_log(&format!("zhu-ye: dict-fallback path={dict_path:?}"));
-            match user_store {
-                Some(store) => InputEngine::with_user_store(m1_seed_dictionary(), store),
-                None => InputEngine::with_m1_seed(),
-            }
+        None => engine,
+    }
+}
+
+/// 计算多包装配计划：基础包目录取 DLL 同目录（或环境变量覆盖的父目录）。
+fn assembly_plan(config: &zhu_ye_core::ConfigFile) -> zhu_ye_core::PackPlan {
+    let (base_dir, packs_dir) = assembly_dirs();
+    zhu_ye_core::plan_packs(config, &base_dir, &packs_dir)
+}
+
+/// 基础包所在目录与领域包目录。
+fn assembly_dirs() -> (PathBuf, PathBuf) {
+    let packs_dir = appdata_root()
+        .map(|root| root.join(zhu_ye_core::PACKS_DIR_NAME))
+        .unwrap_or_else(|| PathBuf::from(zhu_ye_core::PACKS_DIR_NAME));
+    let base_dir = resolve_base_dir(
+        std::env::var_os("ZHU_YE_DICT_PATH").map(PathBuf::from),
+        installed_dictionary_path(),
+        appdata_root(),
+    );
+    (base_dir, packs_dir)
+}
+
+/// 网络语包路径：装配计划里文件名为 `slang.zyct` 的包。
+fn slang_pack(plan: &zhu_ye_core::PackPlan) -> Option<Arc<dyn Dictionary>> {
+    let path = plan
+        .packs
+        .iter()
+        .find(|path| path.file_stem().and_then(|s| s.to_str()) == Some("slang"))?;
+    match DictionaryFile::open(path) {
+        Ok(file) => Some(Arc::new(file)),
+        Err(error) => {
+            debug_log(&format!("zhu-ye: slang-open-failed {error}"));
+            None
         }
     }
 }
 
-/// 词典运行时路径解析顺序：显式环境变量 > DLL 同目录（安装器写入）
-/// > 用户数据目录 > 工作目录回退。缺失或损坏时由 `create_engine` 回退内置演示词典。
-fn dictionary_path() -> PathBuf {
-    if let Some(override_path) = std::env::var_os("ZHU_YE_DICT_PATH") {
-        return PathBuf::from(override_path);
-    }
-    resolve_dictionary_path(installed_dictionary_path(), appdata_dictionary_path())
+/// 配置目录：`%APPDATA%\ai-zhu-ye-ime`。
+fn appdata_root() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|root| PathBuf::from(root).join("ai-zhu-ye-ime"))
 }
 
-/// 纯路径取舍，便于单测；调用方传入已经确认存在的候选路径。
-fn resolve_dictionary_path(installed: Option<PathBuf>, appdata: Option<PathBuf>) -> PathBuf {
-    installed
-        .or(appdata)
-        .unwrap_or_else(|| PathBuf::from(DICTIONARY_FILE_NAME))
+/// 配置文件路径：`%APPDATA%\ai-zhu-ye-ime\config.json`。
+fn config_path() -> PathBuf {
+    appdata_root()
+        .map(|root| root.join("config.json"))
+        .unwrap_or_else(|| PathBuf::from("config.json"))
+}
+
+/// 基础包目录解析（M6-R）：显式环境变量 > DLL 同目录（安装器写入）
+/// > 用户数据目录。返回目录由调用方拼接 `dictionary.zyct`。
+///
+/// 保留 T-022 确立的优先级，只是从"选出一个文件"改为"选出一个目录"——
+/// 多包装配需要目录，而不是单个文件路径。
+fn resolve_base_dir(
+    override_path: Option<PathBuf>,
+    installed: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(path) = override_path {
+        if let Some(parent) = path.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    if let Some(path) = installed {
+        if let Some(parent) = path.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    appdata.unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// 本 DLL 内的锚点函数：取其地址经 `GetModuleHandleExW(FROM_ADDRESS)`
@@ -907,14 +1005,6 @@ fn installed_dictionary_path() -> Option<PathBuf> {
         let candidate = directory.join(DICTIONARY_FILE_NAME);
         candidate.exists().then_some(candidate)
     }
-}
-
-/// 用户数据目录里的词典，保留旧版手动放词典的开发流程。
-fn appdata_dictionary_path() -> Option<PathBuf> {
-    let candidate = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .map(|root| root.join("ai-zhu-ye-ime").join(DICTIONARY_FILE_NAME))?;
-    candidate.exists().then_some(candidate)
 }
 
 /// 用户词库 JSON 路径：`%APPDATA%\ai-zhu-ye-ime\user_words.json`。
@@ -1208,23 +1298,30 @@ mod tests {
     }
 
     #[test]
-    fn 词典路径优先安装目录并回退默认文件名() {
+    fn 基础包目录优先环境变量再安装目录再用户目录() {
+        let override_path = Some(PathBuf::from("D:\\custom\\my.zyct"));
         let installed = Some(PathBuf::from(
             "C:\\Program Files\\ai-zhu-ye-ime\\tsf\\dictionary.zyct",
         ));
-        let appdata = Some(PathBuf::from("%APPDATA%\\ai-zhu-ye-ime\\dictionary.zyct"));
+        let appdata = Some(PathBuf::from("%APPDATA%\\ai-zhu-ye-ime"));
+
+        // 环境变量优先，取其父目录（VM 逐包切换测试依赖此语义）。
         assert_eq!(
-            resolve_dictionary_path(installed.clone(), None).as_path(),
-            installed.as_deref().unwrap()
+            resolve_base_dir(override_path.clone(), installed.clone(), appdata.clone()),
+            PathBuf::from("D:\\custom")
         );
+        // 其次 DLL 同目录。
         assert_eq!(
-            resolve_dictionary_path(None, appdata.clone()).as_path(),
-            appdata.as_deref().unwrap()
+            resolve_base_dir(None, installed.clone(), appdata.clone()),
+            PathBuf::from("C:\\Program Files\\ai-zhu-ye-ime\\tsf")
         );
+        // 再次用户数据目录。
         assert_eq!(
-            resolve_dictionary_path(None, None),
-            PathBuf::from(DICTIONARY_FILE_NAME)
+            resolve_base_dir(None, None, appdata.clone()),
+            appdata.clone().unwrap()
         );
+        // 全空时回退当前目录，保证仍可启动。
+        assert_eq!(resolve_base_dir(None, None, None), PathBuf::from("."));
     }
 
     #[test]
