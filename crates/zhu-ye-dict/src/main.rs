@@ -13,9 +13,9 @@ use zhu_ye_core::dict_format::DictHeader;
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
-    build_base, build_manifest, build_pack, build_real_bigrams, build_real_dictionary, build_slang,
-    build_v2, dict_schema_version, pipeline_status, seed_bigrams, seed_entries, source_check,
-    today, verify_manifest,
+    audit_coverage, build_base, build_manifest, build_pack, build_real_bigrams,
+    build_real_dictionary, build_slang, build_v2, dict_schema_version, pipeline_status,
+    seed_bigrams, seed_entries, source_check, today, verify_manifest,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -48,6 +48,7 @@ fn run() -> Result<(), String> {
         Some("source-check") => source_check_command(),
         Some("build-pack") => build_pack_command(args.get(2).map(String::as_str)),
         Some("build-base") => build_base_command(&args),
+        Some("audit-coverage") => audit_coverage_command(&args),
         Some("build-slang") => build_slang_command(),
         Some("build-manifest") => build_manifest_command(&args),
         Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
@@ -74,6 +75,9 @@ fn print_usage() {
     );
     println!(
         "  build-base [--min-score N]  构建基础包（xdhyc 骨架 + wordfreq 词频 + jieba 扩充，N 默认 2000）（M6）"
+    );
+    println!(
+        "  audit-coverage [--sample N] [--base 文件]  常用词出候选率与首候选正确率抽检（S-1，N 默认 5000）（M6）"
     );
     println!(
         "  build-slang           构建网络语包（种子表 + 把关抽查，输出 slang.zyct 与 slang.gate.json）（M6）"
@@ -168,6 +172,91 @@ fn build_base_command(args: &[String]) -> Result<(), String> {
         index += 1;
     }
     build_base(Path::new("."), min_score).map(|_| ())
+}
+
+/// `audit-coverage [--sample N] [--base 文件]`：常用词覆盖与首候选抽检（S-1）。
+///
+/// 门槛与验收标准 FR-018 一致：出候选率 ≥98%、首候选正确率 ≥90%；
+/// 任一不达标时以退出码 1 结束，使该命令可作为调参迭代的门禁。
+fn audit_coverage_command(args: &[String]) -> Result<(), String> {
+    let mut sample = 5000usize;
+    let mut base = PathBuf::from("data/artifacts/base.zyct");
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--sample" => {
+                index += 1;
+                sample = args
+                    .get(index)
+                    .ok_or_else(|| "--sample 缺少数值".to_owned())?
+                    .parse::<usize>()
+                    .map_err(|error| format!("--sample 解析失败: {error}"))?;
+            }
+            "--base" => {
+                index += 1;
+                base = PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| "--base 缺少路径".to_owned())?,
+                );
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                return Err(format!("多余参数：{}", args[index]));
+            }
+        }
+        index += 1;
+    }
+
+    let report = audit_coverage(Path::new("."), &base, sample)?;
+    println!("抽检样本: {} 词（骨架前 {} 条）", report.sampled, sample);
+    println!(
+        "出候选率: {}/{} = {:.2}%（门槛 ≥98%）",
+        report.with_candidates, report.sampled, report.coverage_pct
+    );
+    println!(
+        "首候选=目标词: {}/{} = {:.2}%（同音冲突下有天花板，参考值）",
+        report.first_hit, report.sampled, report.first_hit_pct
+    );
+    println!(
+        "  样本含 {} 个不同拼音 → 该口径理论上限 {:.2}%",
+        report.distinct_pinyins,
+        report.distinct_pinyins as f64 / report.sampled.max(1) as f64 * 100.0
+    );
+    println!(
+        "首候选=组内最常用词: {}/{} = {:.2}%（门槛 ≥90%，排序质量口径）",
+        report.group_winner_hit, report.sampled, report.group_winner_pct
+    );
+    if !report.misses.is_empty() {
+        println!(
+            "未出候选（前 {} 条）: {}",
+            report.misses.len(),
+            report.misses.join("、")
+        );
+    }
+    if !report.first_misses.is_empty() {
+        println!("首候选非目标（前 {} 条）:", report.first_misses.len());
+        for (target, actual) in &report.first_misses {
+            println!("  {target} -> {actual}");
+        }
+    }
+
+    // 判定：覆盖 ≥98% 且 组内最常用词居首 ≥90%（排除同音冲突的天花板口径）。
+    let coverage_ok = report.coverage_pct >= 98.0;
+    let first_ok = report.group_winner_pct >= 90.0;
+    if coverage_ok && first_ok {
+        println!("S-1 抽检通过。");
+        Ok(())
+    } else {
+        Err(format!(
+            "S-1 抽检未达标：出候选率 {:.2}%（{}），组内最常用词居首率 {:.2}%（{}）",
+            report.coverage_pct,
+            if coverage_ok { "达标" } else { "不达标" },
+            report.group_winner_pct,
+            if first_ok { "达标" } else { "不达标" }
+        ))
+    }
 }
 
 /// `build-manifest [目录] [--version V] [--min-engine V]`：

@@ -704,7 +704,22 @@ fn xdhyc_unretroflex(marked: &str) -> String {
 /// - 顿号 `宁为玉碎,不为瓦全` 与间隔号 `一二·九运动` 合并为无分隔词形、
 ///   拼音侧 `sui4',bu4` 合并音节为 `sui4'bu4`（顿号无语义，输入时由分词边界覆盖）；
 /// - 全角外来字符行 `阿Ｑ` 保留原词形（拼音音节与字符数对齐）。
+///
+/// 旧签名（不含排名），仅供既有测试使用；生产路径请用 [`load_xdhyc_ranked`]。
+#[cfg(test)]
 fn load_xdhyc(text: &str) -> Vec<(String, String)> {
+    load_xdhyc_ranked(text)
+        .into_iter()
+        .map(|(word, pinyin, _)| (word, pinyin))
+        .collect()
+}
+
+/// 加载 xdhyc 骨架并保留官方常用度排名（第三列）。
+///
+/// 排名用于解决多音词冲突：同一个词可能有多条记录（`了` 有 `le` rank 590 与
+/// `liao3` rank 2542），必须保留排名最优的那条读音，否则后出现的生僻读音会
+/// 覆盖常用读音。
+fn load_xdhyc_ranked(text: &str) -> Vec<(String, String, u32)> {
     let table = SyllableTable::standard();
     let mut words = Vec::new();
     for line in text.lines() {
@@ -716,6 +731,10 @@ fn load_xdhyc(text: &str) -> Vec<(String, String)> {
         let (Some(word), Some(marked)) = (parts.next(), parts.next()) else {
             continue;
         };
+        let rank = parts
+            .next()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(u32::MAX);
         // 儿化 'r -> 'er（仅独立 r 音节）；顿号 ', -> '（合并音节分隔）
         let syllables_marked = xdhyc_unretroflex(marked).replace("',", "'");
         let Some(syllables) = split_pinyin_syllables(&syllables_marked) else {
@@ -730,7 +749,7 @@ fn load_xdhyc(text: &str) -> Vec<(String, String)> {
             if !load_xdhyc_valid_word(&clean) || clean.chars().count() != syllables.len() {
                 continue;
             }
-            words.push((clean, syllables.concat()));
+            words.push((clean, syllables.concat(), rank));
         }
     }
     words
@@ -802,7 +821,9 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
 
     let xdhyc_text = fs::read_to_string(cache.join("xdhyc-2008.txt"))
         .map_err(|error| format!("读取 xdhyc 骨架失败: {error}"))?;
-    let skeleton = load_xdhyc(&xdhyc_text);
+    let skeleton = load_xdhyc_ranked(&xdhyc_text);
+    // 与 skeleton 逐条对应的官方常用度排名（第三列）。
+    let skeleton_ranks: Vec<u32> = skeleton.iter().map(|(_, _, rank)| *rank).collect();
 
     let wheel_bytes = fs::read(cache.join("wordfreq-3.1.1-py3-none-any.whl"))
         .map_err(|error| format!("读取 wordfreq wheel 失败: {error}"))?;
@@ -829,8 +850,19 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
     };
 
     // a) 骨架：全部入包，拼音取镜像自带（官方拼音）。
+    //
+    // 骨架对多音词有多条记录（`了` 有 `le` rank 590 与 `liao3` rank 2542）。
+    // 必须保留**官方排名最优**（rank 最小）的那条读音：按文件顺序插入会让
+    // 后出现的生僻读音覆盖常用读音，实测导致 `le` 组只剩生僻字、`了` 落到 `liao`。
     let mut merged: HashMap<String, (String, u32, Option<String>)> = HashMap::new();
-    for (word, pinyin) in &skeleton {
+    let mut skeleton_rank: HashMap<String, u32> = HashMap::new();
+    for (index, (word, pinyin, _)) in skeleton.iter().enumerate() {
+        let rank = skeleton_ranks.get(index).copied().unwrap_or(u32::MAX);
+        let existing_rank = skeleton_rank.get(word).copied();
+        if existing_rank.is_some_and(|current| current <= rank) {
+            continue;
+        }
+        skeleton_rank.insert(word.clone(), rank);
         let frequency = frequency_of(word);
         merged.insert(word.clone(), (pinyin.clone(), frequency, None));
     }
@@ -850,12 +882,16 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
     }
 
     // c) jieba 扩充：纯 CJK、拼音注音（CEDICT 词级 -> kTGHZ 字级）、标定频率 ≥ min_score。
+    //
+    // 门槛与词频都用 `frequency_of`（wordfreq 主源优先，未命中才取 jieba 标定值）：
+    // 若这里直接用原始 `jieba_score`，未入骨架/CEDICT 的词会拿到 jieba 尺度的分值，
+    // 从而压过骨架词——实测 `垸`（wordfreq 2450）以 jieba 5690 盖过 `元`（5600）。
     let mut jieba_expansion = 0usize;
-    for (word, count) in &jieba {
+    for word in jieba.keys() {
         if merged.contains_key(word) {
             continue;
         }
-        let score = jieba_score(*count);
+        let score = frequency_of(word);
         if score < min_score {
             continue;
         }
@@ -898,7 +934,7 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
     let skeleton_words = skeleton.len();
     let wordfreq_hits = skeleton
         .iter()
-        .filter(|(word, _)| wordfreq.contains_key(word))
+        .filter(|(word, _, _)| wordfreq.contains_key(word))
         .count();
     let wordfreq_hit_pct = if skeleton_words == 0 {
         0.0
@@ -937,6 +973,119 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
     );
     println!("内容 SHA-256: {}", stats.sha256);
     Ok(stats)
+}
+
+// ---------------------------------------------------------------------------
+// S-1 抽检：常用词覆盖与首候选正确率（FR-018、验收标准 7.5）
+// ---------------------------------------------------------------------------
+
+/// 抽检结果（S-1 定稿依据）。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct CoverageReport {
+    /// 抽检词数（骨架前 N 条）。
+    pub sampled: usize,
+    /// 出候选词数（任意候选命中）。
+    pub with_candidates: usize,
+    /// 出候选率（%），验收门槛 ≥98%。
+    pub coverage_pct: f64,
+    /// 首候选即目标词的数量。
+    pub first_hit: usize,
+    /// 首候选正确率（%），验收门槛 ≥90%。
+    pub first_hit_pct: f64,
+    /// 未出候选的词（最多记录 [`MAX_MISSES`] 条）。
+    pub misses: Vec<String>,
+    /// 出候选但首候选不是目标词的词（最多记录 [`MAX_MISSES`] 条）。
+    pub first_misses: Vec<(String, String)>,
+    /// 不同拼音的组数（同音词组只可能有一个居首）。
+    pub distinct_pinyins: usize,
+    /// 首候选为"该拼音组内官方排名最优词"的数量。
+    pub group_winner_hit: usize,
+    /// 组内期望胜者居首率（%）：排除同音冲突后的排序质量口径。
+    pub group_winner_pct: f64,
+}
+
+/// 抽检明细最多记录条数，避免大包输出过长。
+pub const MAX_MISSES: usize = 20;
+
+/// 对已构建的 base 包做常用词抽检（FR-018）。
+///
+/// 抽检样本取骨架（xdhyc，按官方常用度排序）前 `sample_size` 条：这正是
+/// "常用 5000 词样例"的权威来源，而非人工挑选的词表。
+///
+/// 判定方式与真实输入一致：用词条拼音调用 `generate_candidates`，检查目标词
+/// 是否出现、是否居首。首候选受静态词频与排序模型共同决定，因此本函数测的是
+/// **端到端可达性**，不是词典里有没有这个词。
+///
+/// **同音冲突与两个口径**：5000 个常用词只对应约 3662 个不同拼音，同音词
+/// （`是/时/使`）中只能有一个居首，因此"目标词居首率"存在约 73% 的天花板，
+/// 不能拿它直接对 90% 门槛。本函数同时给出 `group_winner_pct`——首候选是否为
+/// 该拼音组内**官方排名最优**的词，这才是排序质量口径（排除同音冲突的干扰）。
+pub fn audit_coverage(
+    root: &Path,
+    base_path: &Path,
+    sample_size: usize,
+) -> Result<CoverageReport, String> {
+    use zhu_ye_core::candidate::generate_candidates;
+    use zhu_ye_core::dict::Dictionary;
+    use zhu_ye_core::DictionaryFile;
+
+    let cache = root.join(CACHE_DIR);
+    let xdhyc_text = fs::read_to_string(cache.join("xdhyc-2008.txt"))
+        .map_err(|error| format!("读取 xdhyc 骨架失败: {error}"))?;
+    let skeleton = load_xdhyc_ranked(&xdhyc_text);
+
+    let file = DictionaryFile::open(base_path)
+        .map_err(|error| format!("打开 base 包失败（{}）: {error}", base_path.display()))?;
+    let dictionary: &dyn Dictionary = &file;
+    let table = SyllableTable::standard();
+
+    // 每拼音组的"官方排名最优词"：与 build_base 一样按 rank 取最小者，
+    // 保证抽检口径与构建口径一致（多音词取常用读音）。
+    let mut best_by_pinyin: HashMap<&str, (u32, &str)> = HashMap::new();
+    for (word, pinyin, rank) in skeleton.iter().take(sample_size) {
+        best_by_pinyin
+            .entry(pinyin.as_str())
+            .and_modify(|entry| {
+                if *rank < entry.0 {
+                    *entry = (*rank, word.as_str());
+                }
+            })
+            .or_insert((*rank, word.as_str()));
+    }
+
+    let mut report = CoverageReport::default();
+    for (word, pinyin, _) in skeleton.iter().take(sample_size) {
+        report.sampled += 1;
+        let candidates = generate_candidates(&table, dictionary, pinyin);
+        if candidates.is_empty() {
+            if report.misses.len() < MAX_MISSES {
+                report.misses.push(word.clone());
+            }
+            continue;
+        }
+        report.with_candidates += 1;
+        match candidates.first() {
+            Some(first) if &first.text == word => report.first_hit += 1,
+            Some(first) if report.first_misses.len() < MAX_MISSES => {
+                report.first_misses.push((word.clone(), first.text.clone()));
+            }
+            _ => {}
+        }
+        // 组内期望胜者口径：排除同音冲突干扰。
+        if let Some((_, winner)) = best_by_pinyin.get(pinyin.as_str()) {
+            if candidates.first().map(|c| c.text.as_str()) == Some(*winner) {
+                report.group_winner_hit += 1;
+            }
+        }
+    }
+
+    report.distinct_pinyins = best_by_pinyin.len();
+    if report.sampled > 0 {
+        report.coverage_pct = report.with_candidates as f64 / report.sampled as f64 * 100.0;
+        report.first_hit_pct = report.first_hit as f64 / report.sampled as f64 * 100.0;
+        report.group_winner_pct = report.group_winner_hit as f64 / report.sampled as f64 * 100.0;
+    }
+    Ok(report)
 }
 
 /// UTC 日期 `YYYY-MM-DD`（构建期确定性优先，时区差异不影响哈希/校验路径）。
@@ -1073,6 +1222,85 @@ mod tests {
         // -1cB 桶的"的"先插入，-3cB 桶覆盖为 8970（实际数据中词只出现在一个桶）
         assert_eq!(map.get("的").copied(), Some(8970));
         assert_eq!(map.get("中文").copied(), Some(8970));
+    }
+
+    /// 多音词必须保留官方排名最优（rank 最小）的读音。
+    ///
+    /// 修复前 `build_base` 按文件顺序 `insert` 到 HashMap，后出现的一条会覆盖
+    /// 前面的：实测导致 `了` 落到 `liao3`（rank 2542），而常用读音 `le`（rank 590）
+    /// 丢失，`le` 组只剩生僻字。
+    #[test]
+    fn 骨架多音词保留官方排名最优读音() {
+        // 了：le(rank 590) 与 liao3(rank 2542)；重(chong2) 与 重(zhong4) 同理。
+        let text = "了\tle\t590\n了\tliao3\t2542\n重\tzhong4\t120\n重\tchong2\t890\n";
+        let ranked = load_xdhyc_ranked(text);
+        assert_eq!(ranked.len(), 4, "每条记录都应保留");
+
+        // 模拟 build_base 的择优逻辑：同词只留 rank 最小者。
+        let mut chosen: HashMap<String, (String, u32)> = HashMap::new();
+        for (word, pinyin, rank) in &ranked {
+            let should_take = match chosen.get(word) {
+                Some((_, current)) => *rank < *current,
+                None => true,
+            };
+            if should_take {
+                chosen.insert(word.clone(), (pinyin.clone(), *rank));
+            }
+        }
+        assert_eq!(
+            chosen.get("了").map(|(pinyin, _)| pinyin.as_str()),
+            Some("le"),
+            "了 应保留常用读音 le（rank 590），而非 liao3（rank 2542）"
+        );
+        assert_eq!(
+            chosen.get("重").map(|(pinyin, _)| pinyin.as_str()),
+            Some("zhong"),
+            "重 应保留 rank 更小的 zhong4"
+        );
+    }
+
+    /// jieba 扩充必须使用 `frequency_of`（wordfreq 主源优先），而不是原始
+    /// `jieba_score`。
+    ///
+    /// 修复前直接存 jieba 尺度分值：实测 `垸` wordfreq=2450 却以 jieba 5690
+    /// 入包，压过骨架词 `元`（wordfreq 5600）。
+    #[test]
+    fn jieba扩充词频取主源优先而非jieba标定值() {
+        // 真实数据（实测值）：「元」wordfreq=5600；「垸」wordfreq=2450，
+        // 但 jieba 频次标定后 jieba_score≈5690。
+        let wordfreq: HashMap<String, u32> =
+            [("元".to_owned(), 5600u32), ("垸".to_owned(), 2450u32)]
+                .into_iter()
+                .collect();
+        let jieba: HashMap<String, u64> = [("垸".to_owned(), 30_000u64)].into_iter().collect();
+
+        // 修复后的语义：先查 wordfreq，未命中才用 jieba 标定值。
+        let frequency_of = |word: &str| -> u32 {
+            wordfreq.get(word).copied().unwrap_or_else(|| {
+                jieba
+                    .get(word)
+                    .map(|count| jieba_score(*count))
+                    .unwrap_or(1)
+            })
+        };
+
+        let yuan = frequency_of("元");
+        assert_eq!(yuan, 5600, "wordfreq 命中时应取主源值");
+        // 关键：修复前「垸」用 jieba 尺度（≈5690）会压过「元」（5600）；
+        // 修复后取 wordfreq 的 2450，不得越位。
+        let yuan_score = frequency_of("垸");
+        assert_eq!(yuan_score, 2450, "「垸」应取 wordfreq 值而非 jieba 标定值");
+        assert!(
+            yuan_score < yuan,
+            "仅由 jieba 扩充进入的词不得压过骨架词：垸={yuan_score} < 元={yuan}"
+        );
+        // 前提校验：jieba 尺度确实更高，说明该缺陷真实存在过。
+        assert!(
+            jieba_score(30_000) > yuan,
+            "前提校验：jieba 尺度（{}）确实高于 元 的 {}",
+            jieba_score(30_000),
+            yuan
+        );
     }
 
     #[test]

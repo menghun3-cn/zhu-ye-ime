@@ -22,7 +22,8 @@ pub use import::{BigramStats, ImportStats};
 
 pub mod m6;
 pub use m6::{
-    build_base, build_manifest, build_pack, source_check, today, verify_manifest, Manifest,
+    audit_coverage, build_base, build_manifest, build_pack, source_check, today, verify_manifest,
+    BaseStats, CoverageReport, Manifest, MAX_MISSES,
 };
 
 pub mod slang;
