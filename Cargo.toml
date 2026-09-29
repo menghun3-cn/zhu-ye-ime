@@ -5,6 +5,7 @@ members = [
     "crates/zhu-ye-ime",
     "crates/zhu-ye-dict",
     "crates/zhu-ye-cli",
+    "crates/zhu-ye-updater",
 ]
 
 [workspace.package]

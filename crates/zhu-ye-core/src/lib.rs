@@ -13,9 +13,11 @@ pub mod dict_builder;
 pub mod dict_format;
 pub mod dict_loader;
 pub mod error;
+pub mod manifest;
 pub mod pack_config;
 pub mod pinyin;
 pub mod translate;
+pub mod update;
 pub mod user_dict;
 pub mod user_store;
 
@@ -30,12 +32,22 @@ pub use candidate::{
 pub use composite::{any_exists, pack_path, CompositeDictionary};
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 pub use error::{Error, Result};
+pub use manifest::{
+    canonical_bytes, parse_manifest, parse_public_key, sha256_file, sha256_hex, sign_manifest,
+    verify_pack_contents, verify_signature, verify_signature_with_key, version_at_least, Manifest,
+    ManifestSignature, PackMeta, SignatureError, MANIFEST_SCHEMA, SIGNATURE_ALGORITHM,
+};
 pub use pack_config::{
     load_config, plan_packs, save_config, ConfigFile, PackPlan, BASE_PACK_FILE_NAME,
     CONFIG_FORMAT_VERSION, KNOWN_PACK_IDS, PACKS_DIR_NAME,
 };
 pub use pinyin::{segment_all, valid_prefix, FullPinyinScheme, PinyinScheme, SyllableTable};
 pub use translate::{InMemoryTranslator, TranslationDirection, Translator};
+pub use update::{
+    apply_release, apply_staged, backup_path, clean_staging, find_outdated, rollback_pack,
+    stage_packs, staging_dir, verify_installed, verify_release, ApplyOutcome, UpdateError,
+    BACKUP_SUFFIX, STAGING_DIR_NAME,
+};
 pub use user_dict::UserDictionary;
 pub use user_store::{unix_now, UserDictStore};
 
