@@ -12,11 +12,14 @@ pub mod dict;
 pub mod dict_builder;
 pub mod dict_format;
 pub mod dict_loader;
+pub mod emoji;
 pub mod error;
+pub mod format;
 pub mod manifest;
 pub mod pack_config;
 pub mod pinyin;
 pub mod suggestion;
+pub mod symbols;
 pub mod translate;
 pub mod update;
 pub mod user_dict;
@@ -34,7 +37,9 @@ pub use candidate::{
 };
 pub use composite::{any_exists, pack_path, CompositeDictionary};
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
+pub use emoji::{emoji_for, EmojiEntry, EMOJI_TABLE};
 pub use error::{Error, Result};
+pub use format::{cn_numeral, format_candidates, FormatCandidate};
 pub use manifest::{
     canonical_bytes, parse_manifest, parse_public_key, sha256_file, sha256_hex, sign_manifest,
     verify_pack_contents, verify_signature, verify_signature_with_key, version_at_least, Manifest,
@@ -53,6 +58,7 @@ pub use suggestion::{
     suggest_phrases, suggest_words, suggestion_candidates, SUGGESTION_CAP, SUGGESTION_PHRASE_CAP,
     SUGGESTION_WORD_CAP,
 };
+pub use symbols::{symbol_group, MATH_SYMBOLS, NUMBER_SYMBOLS, PUNCT_SYMBOLS};
 pub use translate::{InMemoryTranslator, TranslationDirection, Translator};
 pub use update::{
     apply_release, apply_staged, backup_path, clean_staging, find_outdated, rollback_pack,

@@ -25,6 +25,12 @@ pub enum CandidateSource {
     Corrected,
     /// 上屏联想候选（T-058/T-059，场景5）；仅出现在空闲候选窗，UI 不新增标签。
     Suggestion,
+    /// 数字格式候选（FR-027，场景7）；仅出现在空闲候选窗，UI 不新增标签。
+    NumberFormat,
+    /// v 模式符号候选（FR-028，场景7）；仅出现在空闲候选窗，UI 不新增标签。
+    Symbol,
+    /// emoji 推荐候选（FR-029，场景7）；追在拼音候选尾部，UI 不新增标签。
+    Emoji,
 }
 
 /// 输入法候选。
