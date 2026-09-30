@@ -83,6 +83,12 @@ pub struct InputEngine {
     /// 上屏联想候选（T-058/T-059，场景5）：拼音为空且刚上屏过一个词时，
     /// 由 bigram 后继检索生成（Top5 整词 + 两词短语）；输入字母即清空。
     suggestion: Vec<String>,
+    /// 数字格式候选模式（FR-027，场景7）：空闲态连续输入数字时的累积串；
+    /// 数字由引擎直接上屏（边输边上屏），选中格式时替换最近 buffer 长度字符。
+    digit_buffer: String,
+    /// v 模式符号候选（FR-028，场景7）：空闲态按 `v` 启动，`v1`/`vx`/`vh`
+    /// 出符号组候选；非法字母回退拼音（`vi`）。
+    v_buffer: String,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -148,6 +154,8 @@ impl InputEngine {
             cached_translation_candidates: Vec::new(),
             slang: None,
             suggestion: Vec::new(),
+            digit_buffer: String::new(),
+            v_buffer: String::new(),
         }
     }
 
@@ -285,6 +293,203 @@ impl InputEngine {
         &self.suggestion
     }
 
+    /// 数字格式候选模式是否活跃（FR-027，场景7）：空闲态输入数字串中。
+    #[must_use]
+    pub fn digit_active(&self) -> bool {
+        !self.digit_buffer.is_empty()
+    }
+
+    /// 数字格式模式当前候选数（格式候选，≤8）；非数字模式返回 0。
+    #[must_use]
+    pub fn digit_candidate_count(&self) -> usize {
+        if self.digit_active() {
+            self.candidates.len()
+        } else {
+            0
+        }
+    }
+
+    /// 数字格式模式累积的数字串（已上屏正文与其一致）。
+    #[must_use]
+    pub fn digit_text(&self) -> &str {
+        &self.digit_buffer
+    }
+
+    /// 空闲态追加一个数字进入数字格式模式（FR-027）。
+    ///
+    /// 引擎吞下数字键：数字文本已由 TSF 层直插上屏，这里只累积 buffer 并
+    /// 刷新格式候选；组合态/英文模式/上屏联想态（D-05 联想优先）拒绝。
+    /// ASCII 小数点 `.` 也在数字模式内接受（金额 `12345.6`，TSF 层转发
+    /// `VK_OEM_PERIOD`/`VK_DECIMAL`），非法位置由 `format_candidates` 兜底为空。
+    pub fn digit_append(&mut self, c: char) -> bool {
+        if self.mode != InputMode::Chinese
+            || !(c.is_ascii_digit() || c == '.')
+            || self.is_active()
+            || self.suggestion_active()
+        {
+            return false;
+        }
+        self.digit_buffer.push(c);
+        self.suggestion.clear();
+        self.refresh_digit_candidates();
+        true
+    }
+
+    /// 数字模式退格（FR-027）：引擎删除 buffer 尾部并刷新候选；
+    /// 文档侧的退格由 TSF 层同步执行。清空后退出数字模式。
+    pub fn digit_backspace(&mut self) -> bool {
+        if !self.digit_active() {
+            return false;
+        }
+        self.digit_buffer.pop();
+        if self.digit_buffer.is_empty() {
+            self.exit_digit();
+        } else {
+            self.refresh_digit_candidates();
+        }
+        true
+    }
+
+    /// 退出数字格式模式：清空 buffer 与候选；已上屏的数字正文保持不变。
+    /// 退出后不把数字串当作联想前词（数字不参与上下文联想）。
+    pub fn exit_digit(&mut self) {
+        if !self.digit_active() {
+            return;
+        }
+        self.digit_buffer.clear();
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+        self.previous_word = None;
+        self.refresh_suggestion();
+    }
+
+    /// 数字格式选择预览：第 `index` 个格式候选的上屏文本与需替换的
+    /// 字符数（= buffer UTF-16 长度，由 TSF 层做替换）；不可选返回 `None`。
+    #[must_use]
+    pub fn preview_digit(&self, index: usize) -> Option<(String, usize)> {
+        if !self.digit_active() {
+            return None;
+        }
+        let text = self.candidates.get(index)?.text.clone();
+        Some((text, self.digit_buffer.encode_utf16().count()))
+    }
+
+    /// 提交第 `index` 个数字格式候选并退出数字模式（FR-027）。
+    /// 返回 (上屏文本, 替换长度)；格式文本成为新的联想前词。
+    pub fn commit_digit(&mut self, index: usize) -> Option<(String, usize)> {
+        let selection = self.preview_digit(index)?;
+        self.digit_buffer.clear();
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+        self.previous_word = Some(selection.0.clone());
+        self.refresh_suggestion();
+        Some(selection)
+    }
+
+    /// v 模式是否活跃（FR-028，场景7）：空闲态已按 `v` 且尚未退出。
+    #[must_use]
+    pub fn v_active(&self) -> bool {
+        !self.v_buffer.is_empty()
+    }
+
+    /// 当前 v_buffer 长度（含首字母 `v`）：1 = 等待类型码，2 = 已出符号组。
+    #[must_use]
+    pub fn v_buffer_len(&self) -> usize {
+        self.v_buffer.chars().count()
+    }
+
+    /// v 模式当前符号候选数（≤9）；非 v 模式返回 0。
+    #[must_use]
+    pub fn v_symbol_count(&self) -> usize {
+        if self.v_active() {
+            self.candidates.len()
+        } else {
+            0
+        }
+    }
+
+    /// 空闲态按 `v` 进入 v 模式（FR-028）。
+    ///
+    /// 仅当组合为空、无联想、无数字模式时启动；`v` 是合法拼音字符
+    /// （nv/lv），组合态的 `v` 一律走正常拼音（由 `push_composing` 处理）。
+    pub fn v_start(&mut self) -> bool {
+        if self.mode != InputMode::Chinese
+            || self.is_active()
+            || self.suggestion_active()
+            || self.digit_active()
+            || self.v_active()
+        {
+            return false;
+        }
+        self.v_buffer.push('v');
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+        true
+    }
+
+    /// v 模式输入类型码（`1-9`/`x`/`h`）：刷新符号组候选。
+    /// 非法类型码返回 `false`（调用方应回退拼音）。
+    pub fn v_code(&mut self, c: char) -> bool {
+        if !self.v_active() {
+            return false;
+        }
+        if zhu_ye_core::symbol_group(c).is_none() {
+            return false;
+        }
+        self.v_buffer.push(c);
+        self.refresh_symbol_candidates();
+        true
+    }
+
+    /// v 模式输入非法字母（如 `vi` 的 `i`）：退出 v 模式并把 `v`+该字母
+    /// 交给正常拼音路径（`vi` 进入组合，行为与直接输 `vi` 一致）。
+    pub fn v_consume(&mut self, c: char) -> bool {
+        if !self.v_active() {
+            return false;
+        }
+        self.v_buffer.clear();
+        self.candidates.clear();
+        self.composing.push('v');
+        self.composing.push(c);
+        self.refresh_candidates();
+        self.suggestion.clear();
+        self.page = 0;
+        true
+    }
+
+    /// 退出 v 模式：清空 buffer 与符号候选。
+    pub fn v_exit(&mut self) {
+        if !self.v_active() {
+            return;
+        }
+        self.v_buffer.clear();
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+    }
+
+    /// v 模式退格（FR-028）：有类型码时回退到 `v`（重新等待类型码），
+    /// 只有 `v` 时直接退出 v 模式。
+    pub fn v_backspace(&mut self) -> bool {
+        if !self.v_active() {
+            return false;
+        }
+        if self.v_buffer_len() > 1 {
+            self.v_buffer.pop();
+            self.refresh_symbol_candidates();
+        } else {
+            self.v_exit();
+        }
+        true
+    }
+
     /// 参与上下文排序的前词；由最近一次成功提交维护。
     #[must_use]
     pub fn previous_word(&self) -> Option<&str> {
@@ -379,6 +584,8 @@ impl InputEngine {
         if self.mode != InputMode::Chinese {
             return false;
         }
+        // 防御：任何进入拼音组合的入口都先退出数字格式模式（FR-027）。
+        self.exit_digit();
         self.composing.push(c);
         self.refresh_candidates();
         // 输入字母即退出上屏联想态（T-059）。
@@ -405,7 +612,14 @@ impl InputEngine {
     }
 
     /// Backspace 删除最后一个拼音字母；无组合时返回 `false`。
+    /// 数字模式退格删除 buffer 尾部位（FR-027）；v 模式退格回退类型码（FR-028）。
     pub fn handle_backspace(&mut self) -> bool {
+        if self.digit_active() {
+            return self.digit_backspace();
+        }
+        if self.v_active() {
+            return self.v_backspace();
+        }
         if !self.is_active() {
             return false;
         }
@@ -416,7 +630,18 @@ impl InputEngine {
 
     /// 空格提交当前选中行候选（T-039：上下键移动选中行后回车/空格跟随后者）；
     /// 上屏联想态提交选中联想词（T-059）；无候选时按设计上屏拼音原文。
+    /// 数字格式模式（FR-027）空格 = 选择第 1 个格式候选并替换；
+    /// v 模式（FR-028）空格 = 选择第 1 个符号候选。
     pub fn handle_space(&mut self) -> Option<String> {
+        if self.digit_active() {
+            return self
+                .commit_digit(self.selected_on_page)
+                .map(|(text, _)| text);
+        }
+        if self.v_active() && self.v_symbol_count() > 0 {
+            let text = self.candidates.first()?.text.clone();
+            return self.commit_symbol(text);
+        }
         if self.suggestion_active() {
             let index = self
                 .selected_on_page
@@ -448,8 +673,17 @@ impl InputEngine {
         Some(text)
     }
 
-    /// Esc 取消本次组合，不产生提交文本；上屏联想态 Esc 关闭联想窗。
+    /// Esc 取消本次组合，不产生提交文本；上屏联想态 Esc 关闭联想窗；
+    /// 数字格式模式 Esc 退出（数字正文保留）；v 模式 Esc 退出。
     pub fn handle_escape(&mut self) -> bool {
+        if self.digit_active() {
+            self.exit_digit();
+            return true;
+        }
+        if self.v_active() {
+            self.v_exit();
+            return true;
+        }
         if self.suggestion_active() {
             self.suggestion.clear();
             return true;
@@ -464,7 +698,16 @@ impl InputEngine {
 
     /// 按 1-9 选择当前层第 `index` 个候选（index 从 0 开始）；越界时回退到拼音原文。
     /// 上屏联想态按数字选择联想词，越界不产生提交（防吞键）。
+    /// 数字格式模式按数字选择格式候选（越界返回 `None`，由 TSF 层继续追加）；
+    /// v 模式按数字选择符号候选。
     pub fn select_index(&mut self, index: usize) -> Option<String> {
+        if self.digit_active() {
+            return self.commit_digit(index).map(|(text, _)| text);
+        }
+        if self.v_active() {
+            let text = self.candidates.get(index)?.text.clone();
+            return self.commit_symbol(text);
+        }
         if self.suggestion_active() {
             let text = self.suggestion.get(index)?.clone();
             return self.commit_suggestion(text);
@@ -520,9 +763,16 @@ impl InputEngine {
         self.clear_composition();
     }
 
-    /// 为 TSF 层提供提交预览：空格应上屏的当前选中行候选（含上屏联想，T-059）。
+    /// 为 TSF 层提供提交预览：空格应上屏的当前选中行候选（含上屏联想，T-059；
+    /// 数字格式与 v 模式取各自首个候选，FR-027/028）。
     #[must_use]
     pub fn preview_space(&self) -> Option<String> {
+        if self.digit_active() {
+            return self.candidates.first().map(|c| c.text.clone());
+        }
+        if self.v_active() {
+            return self.candidates.first().map(|c| c.text.clone());
+        }
         if self.suggestion_active() {
             let index = self
                 .selected_on_page
@@ -543,6 +793,12 @@ impl InputEngine {
     /// 为 TSF 层提供数字选择预览：第 index 个候选或拼音原文（含上屏联想，T-059）。
     #[must_use]
     pub fn preview_selection(&self, index: usize) -> Option<String> {
+        if self.digit_active() {
+            return self.candidates.get(index).map(|c| c.text.clone());
+        }
+        if self.v_active() {
+            return self.candidates.get(index).map(|c| c.text.clone());
+        }
         if self.suggestion_active() {
             return self.suggestion.get(index).cloned();
         }
@@ -571,6 +827,8 @@ impl InputEngine {
     ///
     /// 上屏联想态（T-059）：组合串为空、联想候选置入 items，
     /// 候选窗因此继续显示（TSF 层以 `items` 是否为空判断是否隐藏）。
+    /// 数字格式模式（FR-027）与 v 模式（FR-028）：组合串为空、候选置入
+    /// items，页眉提示分别显示累积数字串与 v 指令串。
     #[must_use]
     pub fn candidate_ui_view(&self) -> CandidateUiView {
         let page_size = self.page_size.max(1);
@@ -592,6 +850,30 @@ impl InputEngine {
                         source: zhu_ye_core::candidate::CandidateSource::Suggestion,
                     })
                     .collect(),
+            };
+        }
+        if self.digit_active() {
+            return CandidateUiView {
+                composition: String::new(),
+                pinyin_hint: self.digit_buffer.clone(),
+                page: 0,
+                page_size,
+                page_count: 1,
+                selected: self.selected_on_page,
+                translation_mode: false,
+                items: self.candidates.iter().map(candidate_ui_item).collect(),
+            };
+        }
+        if self.v_active() {
+            return CandidateUiView {
+                composition: String::new(),
+                pinyin_hint: self.v_buffer.clone(),
+                page: 0,
+                page_size,
+                page_count: 1,
+                selected: self.selected_on_page,
+                translation_mode: false,
+                items: self.candidates.iter().map(candidate_ui_item).collect(),
             };
         }
         if self.mode != InputMode::Chinese {
@@ -662,6 +944,64 @@ impl InputEngine {
         self.previous_word = Some(text.clone());
         self.refresh_suggestion();
         Some(text)
+    }
+
+    /// 提交 v 模式符号候选（FR-028）：符号作为新前词上屏，退出 v 模式。
+    fn commit_symbol(&mut self, text: String) -> Option<String> {
+        self.v_buffer.clear();
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+        self.previous_word = Some(text.clone());
+        self.refresh_suggestion();
+        Some(text)
+    }
+
+    /// 按数字格式规则刷新候选（FR-027）：确定性格式列表，来源 `NumberFormat`。
+    fn refresh_digit_candidates(&mut self) {
+        // 格式候选顺序即展示顺序（日期 4 式 → …），score 仅保序。
+        self.candidates = zhu_ye_core::format_candidates(&self.digit_buffer)
+            .into_iter()
+            .enumerate()
+            .map(|(index, format)| Candidate {
+                text: format.text,
+                translation: None,
+                pinyin: None,
+                score: index as i64,
+                source: zhu_ye_core::candidate::CandidateSource::NumberFormat,
+            })
+            .collect();
+        self.cached_translation_candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+    }
+
+    /// 按 v 模式类型码刷新符号候选（FR-028）：来源 `Symbol`，一页 9 项。
+    fn refresh_symbol_candidates(&mut self) {
+        let Some(code) = self.v_buffer.chars().last() else {
+            return;
+        };
+        self.candidates = zhu_ye_core::symbol_group(code)
+            .map(|group| {
+                group
+                    .iter()
+                    .enumerate()
+                    .map(|(index, text)| Candidate {
+                        text: (*text).to_owned(),
+                        translation: None,
+                        pinyin: None,
+                        score: index as i64,
+                        source: zhu_ye_core::candidate::CandidateSource::Symbol,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.cached_translation_candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
     }
 
     /// 按 bigram 后继检索刷新上屏联想候选（T-058 检索层入口）。
@@ -798,6 +1138,17 @@ impl InputEngine {
             // 取出主候选（`mem::take` 避免克隆），合并后写回。
             let main = std::mem::take(&mut self.candidates);
             self.candidates = zhu_ye_core::append_abbreviation_group(main, abbreviation);
+        }
+        // FR-029（场景7）：整串拼音等于别名时把 emoji 追加到候选**尾部**；
+        // 只占队尾、不参与排序（score 取 i64::MIN），保证 T-057 命中率不回退。
+        if let Some(emoji) = zhu_ye_core::emoji_for(&self.composing) {
+            self.candidates.push(Candidate {
+                text: emoji.to_owned(),
+                translation: None,
+                pinyin: None,
+                score: i64::MIN,
+                source: zhu_ye_core::candidate::CandidateSource::Emoji,
+            });
         }
         self.cached_translation_candidates = self
             .candidates
@@ -1721,5 +2072,284 @@ mod tests {
             .map(|c| c.text.as_str())
             .collect();
         assert_eq!(texts, vec!["你好"], "nihao 整词命中，候选只有整词本身");
+    }
+
+    // ---- 场景7（T-061）：数字格式候选 / v 模式 / emoji 推荐 ----
+
+    fn digit_engine() -> InputEngine {
+        engine()
+    }
+
+    #[test]
+    fn 数字模式累积并刷新日期候选() {
+        let mut eng = digit_engine();
+        assert!(!eng.digit_active());
+        for c in ['2', '0', '2', '6', '0', '9', '3', '0'] {
+            assert!(eng.digit_append(c));
+        }
+        assert!(eng.digit_active());
+        assert!(eng.composing().is_empty(), "数字模式不应出现组合串");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["2026-09-30", "2026/09/30", "2026年9月30日", "2026.09.30"]
+        );
+        assert_eq!(
+            eng.candidates()[0].source,
+            zhu_ye_core::candidate::CandidateSource::NumberFormat
+        );
+    }
+
+    #[test]
+    fn 数字模式选中格式返回替换长度() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        let (text, replace_len) = eng.preview_digit(1).expect("第 2 个日期候选");
+        assert_eq!(text, "2026/09/30");
+        assert_eq!(replace_len, 8, "替换长度为 buffer 的 UTF-16 长度");
+        let committed = eng.commit_digit(1).expect("提交");
+        assert_eq!(committed.0, "2026/09/30");
+        assert!(!eng.digit_active(), "提交后退出数字模式");
+        assert!(eng.candidates().is_empty());
+    }
+
+    #[test]
+    fn 数字模式选中越界返回空且状态保持() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        assert_eq!(eng.preview_digit(9), None);
+        assert_eq!(eng.select_index(9), None);
+        assert!(eng.digit_active(), "越界选择不应退出数字模式");
+    }
+
+    #[test]
+    fn 数字模式不足五位无候选() {
+        let mut eng = digit_engine();
+        for c in "12".chars() {
+            eng.digit_append(c);
+        }
+        assert!(eng.digit_active());
+        assert!(eng.candidates().is_empty(), "12 不应触发格式候选");
+    }
+
+    #[test]
+    fn 数字模式退格与退出() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        assert!(eng.digit_backspace());
+        assert_eq!(eng.digit_text(), "2026093");
+        assert!(eng.handle_backspace(), "引擎层退格路由到数字模式");
+        assert_eq!(eng.digit_text(), "202609");
+        assert!(eng.handle_escape());
+        assert!(!eng.digit_active(), "Esc 退出数字模式");
+        assert!(eng.candidates().is_empty());
+    }
+
+    #[test]
+    fn 数字模式空格空格选第一个格式() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        let text = eng.handle_space().expect("空格应选中第 0 项");
+        assert_eq!(text, "2026-09-30");
+        assert!(!eng.digit_active());
+    }
+
+    #[test]
+    fn 金额与电话格式候选() {
+        let mut eng = digit_engine();
+        for c in ['1', '2', '3', '4', '5', '.', '6'] {
+            assert!(eng.digit_append(c), "数字模式接受小数点点位（金额）");
+        }
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["12,345.6", "一万二千三百四十五点六"]);
+
+        let mut phone = digit_engine();
+        for c in "13800138000".chars() {
+            phone.digit_append(c);
+        }
+        let texts: Vec<&str> = phone.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["138 0013 8000", "138-0013-8000"]);
+    }
+
+    #[test]
+    fn 字母进入拼音组合自动退出数字模式() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        assert!(eng.handle_letter('n'));
+        assert!(!eng.digit_active(), "字母进入组合应退出数字模式");
+        assert_eq!(eng.composing(), "n");
+    }
+
+    #[test]
+    fn 组合态数字不进数字模式() {
+        let mut eng = digit_engine();
+        type_text(&mut eng, "niha");
+        assert!(!eng.digit_active());
+        // 组合态数字属于网络语缩写前缀判定后走选词/组合，不启动数字模式。
+        assert!(!eng.digit_append('9'));
+    }
+
+    #[test]
+    fn v模式启动与符号组() {
+        let mut eng = engine();
+        assert!(eng.v_start());
+        assert!(eng.v_active());
+        assert_eq!(eng.v_buffer_len(), 1, "只有 v 时等待类型码");
+        assert!(eng.v_code('1'));
+        assert_eq!(eng.v_buffer_len(), 2);
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts.len(), 9);
+        assert_eq!(texts[0], "①");
+        assert_eq!(
+            eng.candidates()[0].source,
+            zhu_ye_core::candidate::CandidateSource::Symbol
+        );
+    }
+
+    #[test]
+    fn v模式数学与标点组() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('x');
+        let math: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(math[0], "±");
+        assert!(math.contains(&"∞"));
+
+        eng.v_backspace();
+        assert_eq!(eng.v_buffer_len(), 1);
+        eng.v_code('h');
+        let punct: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(punct[0], "，");
+    }
+
+    #[test]
+    fn v模式非法字母回退拼音() {
+        let mut eng = engine();
+        eng.v_start();
+        assert!(eng.v_consume('i'));
+        assert!(!eng.v_active(), "vi 应退出 v 模式");
+        assert_eq!(eng.composing(), "vi", "v+i 交给拼音组合");
+    }
+
+    #[test]
+    fn v模式组合态不启动() {
+        let mut eng = engine();
+        type_text(&mut eng, "nv");
+        assert!(!eng.v_active(), "组合态 v 属于 nv/lv 拼音");
+        assert!(!eng.v_start());
+    }
+
+    #[test]
+    fn v模式选符号上屏() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('1');
+        let text = eng.select_index(2).expect("选择第 3 个符号");
+        assert_eq!(text, "③");
+        assert!(!eng.v_active());
+        assert_eq!(eng.previous_word(), Some("③"));
+    }
+
+    #[test]
+    fn v模式空格选首个符号() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('1');
+        let text = eng.handle_space().expect("空格选第 0 个符号");
+        assert_eq!(text, "①");
+        assert!(!eng.v_active());
+    }
+
+    #[test]
+    fn v模式退出清空() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('x');
+        assert!(eng.handle_escape());
+        assert!(!eng.v_active());
+        assert!(eng.candidates().is_empty());
+        // 只有 v 时退格 = 退出。
+        eng.v_start();
+        assert!(eng.handle_backspace());
+        assert!(!eng.v_active());
+    }
+
+    #[test]
+    fn 联想态不启动v模式与数字模式() {
+        // D-05：联想优先——上屏联想活跃时 v/数字不进入各自模式。
+        let mut eng = suggestion_engine();
+        commit_nihao(&mut eng);
+        assert!(eng.suggestion_active());
+        assert!(!eng.v_start(), "联想态 v 不应启动 v 模式");
+        assert!(!eng.digit_append('9'), "联想态数字不应进入数字模式");
+        assert!(eng.suggestion_active(), "联想候选保持");
+    }
+
+    #[test]
+    fn emoji队尾追加不改变既有候选() {
+        let mut eng = engine();
+        type_text(&mut eng, "ai");
+        let normal = eng
+            .candidates()
+            .iter()
+            .any(|c| c.text == "爱" && c.source != zhu_ye_core::candidate::CandidateSource::Emoji);
+        assert!(normal, "ai 的普通拼音候选（爱）保留");
+        let first = eng.candidates()[0].text.clone();
+        let last = eng.candidates().last().expect("应有候选");
+        assert_eq!(last.text, "❤️", "emoji 追在队尾");
+        assert_eq!(last.source, zhu_ye_core::candidate::CandidateSource::Emoji);
+        // 队首候选不受 emoji 追加影响（T-057 不回退前提）。
+        assert_eq!(eng.candidates()[0].text, first);
+    }
+
+    #[test]
+    fn emoji不命中的拼音无追加() {
+        let mut eng = engine();
+        type_text(&mut eng, "nihao");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Emoji),
+            "nihao 无别名命中，不应追加 emoji"
+        );
+    }
+
+    #[test]
+    fn 数字模式候选窗视图() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        let view = eng.candidate_ui_view();
+        assert!(view.composition.is_empty());
+        assert_eq!(view.pinyin_hint, "20260930");
+        assert_eq!(view.visible_items().len(), 4);
+        assert_eq!(
+            view.visible_items()[1].text,
+            "2026/09/30",
+            "候选窗第 2 项为 / 分隔日期"
+        );
+    }
+
+    #[test]
+    fn v模式候选窗视图() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('1');
+        let view = eng.candidate_ui_view();
+        assert!(view.composition.is_empty());
+        assert_eq!(view.pinyin_hint, "v1");
+        assert_eq!(view.visible_items().len(), 9);
+        assert_eq!(view.visible_items()[0].text, "①");
     }
 }
