@@ -194,6 +194,14 @@ position and keeps the fewest-syllables guard for the trigger only.
   (feature/2026-09-19-candidate-ranking-static-model, beam reuses them).
   Nothing in the M7 batch supersedes those; the language-fact tables
   (initials, fuzzy pairs) are self-maintained and need no license entry.
-- VM interactive acceptance of the visible candidate window (验收标准 8.1) is
-  the remaining M7-A step; host-side assertions above already cover the same
-  acceptance items through `InputEngine`.
+- VM interactive acceptance of the visible candidate window (验收标准 8.1)
+  passed end-to-end on the acceptance VM (Windows Server 2019 zh-CN, real TSF
+  stack, four packs + dictionary): 6/6 checks green — `nh` first=你好,
+  `wsm` first=为什么, `zongguo` window contains 中国 (select key 3 commits it),
+  `niha` window contains 你好 (select key 3), whole-sentence case first=
+  我想明天去北京, and `nh` + digit 1 commits 你好. Evidence: TSF debug log
+  `cand-show first=`/`commit`, six screenshots with distinct MD5 (画面变化真实),
+  pixel forensics (候选窗主题色包围盒: s1–s5 可见, s5 最宽与 items=9 一致,
+  s6 上屏后隐藏). Deployment note: the dictionary file is mmap-locked by TSF
+  inproc hosts, so install into a fresh directory (`tsf-m7`) instead of
+  overwriting; later cleanup then removes the legacy directory.
