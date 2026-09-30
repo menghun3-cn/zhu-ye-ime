@@ -16,6 +16,7 @@ pub mod error;
 pub mod manifest;
 pub mod pack_config;
 pub mod pinyin;
+pub mod suggestion;
 pub mod translate;
 pub mod update;
 pub mod user_dict;
@@ -47,6 +48,10 @@ pub use pack_config::{
 pub use pinyin::{
     fuzzy_variants, initial_syllables, segment_all, valid_prefix, FullPinyinScheme, PinyinScheme,
     SyllableTable,
+};
+pub use suggestion::{
+    suggest_phrases, suggest_words, suggestion_candidates, SUGGESTION_CAP, SUGGESTION_PHRASE_CAP,
+    SUGGESTION_WORD_CAP,
 };
 pub use translate::{InMemoryTranslator, TranslationDirection, Translator};
 pub use update::{

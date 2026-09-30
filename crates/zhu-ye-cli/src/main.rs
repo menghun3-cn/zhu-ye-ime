@@ -11,9 +11,10 @@ use std::sync::Arc;
 use zhu_ye_core::candidate::{corrected_candidates, initial_candidates, sentence_candidates};
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::{
-    core_version, generate_candidates, BigramModel, Candidate, CandidateSorter, Dictionary,
-    DictionaryEntry, InMemoryBigramModel, InMemoryDictionary, InMemoryTranslator, OfflineAiService,
-    RankingConfig, RankingContext, RankingModel, StaticRankingModel, SyllableTable, Translator,
+    core_version, generate_candidates, suggestion_candidates, BigramModel, Candidate,
+    CandidateSorter, Dictionary, DictionaryEntry, InMemoryBigramModel, InMemoryDictionary,
+    InMemoryTranslator, OfflineAiService, RankingConfig, RankingContext, RankingModel,
+    StaticRankingModel, SyllableTable, Translator,
 };
 use zhu_ye_core::{UserDictStore, UserDictionary};
 
@@ -27,6 +28,7 @@ fn main() {
         Some("dict") => dict_command(args),
         Some("rank") => rank_command(args),
         Some("eval") => eval_command(args),
+        Some("suggest") => suggest_command(args),
         _ => print_usage(),
     }
 }
@@ -44,6 +46,7 @@ fn print_usage() {
     println!("  dict update [check|apply|status]  触发词典更新器（M6-U，S-5）");
     println!("  rank <文件> <拼音> [前词]  加载 v2 词典并按上下文输出排序候选");
     println!("  eval <文件> <词样本.tsv> [整句样本.tsv] [--out-miss 文件]  命中率评测（T-057）");
+    println!("  suggest <文件> <前词>  上屏联想候选（整词 + 两词短语，T-058）");
 }
 
 /// `dict update` 子命令（M6-U，S-5）：触发独立更新器 exe。
@@ -571,6 +574,34 @@ fn rank_command(args: Vec<String>) {
             }
         }
         Err(error) => println!("加载失败: {error}"),
+    }
+}
+
+/// `suggest` 子命令（T-058）：上屏联想候选。
+///
+/// 以已上屏前词为基础输出联想列表（高频后继整词 + 前词+后继两词短语），
+/// 口径与引擎空闲候选窗完全一致（`zhu_ye_core::suggestion_candidates`）。
+fn suggest_command(args: Vec<String>) {
+    let Some(path) = args.get(2).map(String::as_str) else {
+        println!("用法: zhu-ye-cli suggest <词典文件> <前词>");
+        return;
+    };
+    let Some(previous) = args.get(3).map(String::as_str) else {
+        println!("用法: zhu-ye-cli suggest <词典文件> <前词>");
+        return;
+    };
+    let file = match DictionaryFile::open(Path::new(path)) {
+        Ok(file) => file,
+        Err(error) => {
+            println!("加载失败: {error}");
+            return;
+        }
+    };
+    let bigram: Arc<dyn BigramModel> = Arc::new(file);
+    let candidates = suggestion_candidates(bigram.as_ref(), previous);
+    println!("上屏联想: {previous}（{} 条）", candidates.len());
+    for (index, candidate) in candidates.iter().enumerate() {
+        println!("{:>2}. {}", index + 1, candidate);
     }
 }
 

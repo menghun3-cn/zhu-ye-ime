@@ -160,6 +160,21 @@ impl BigramModel for CompositeDictionary {
             .max()
             .unwrap_or(0)
     }
+
+    fn successors(&self, previous: &str, limit: usize) -> Vec<(String, u64)> {
+        // 各源分别取后继后按词合并取 max（与 frequency 同口径），再按频率降序截取。
+        let mut merged: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for file in &self.files {
+            for (word, frequency) in file.successors(previous, limit) {
+                let entry = merged.entry(word).or_insert(0);
+                *entry = (*entry).max(frequency);
+            }
+        }
+        let mut items: Vec<(String, u64)> = merged.into_iter().collect();
+        items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        items.truncate(limit);
+        items
+    }
 }
 
 impl Translator for CompositeDictionary {
