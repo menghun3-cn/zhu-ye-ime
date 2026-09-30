@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::bigram::{BigramModel, EmptyBigramModel};
 use crate::dict::{Dictionary, DictionaryEntry};
-use crate::pinyin::{segment_all, SyllableTable};
+use crate::pinyin::{fuzzy_variants, initial_syllables, segment_all, SyllableTable};
 use crate::user_dict::UserDictionary;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -21,6 +21,8 @@ pub enum CandidateSource {
     Ai,
     /// 网络语缩写路径候选（M6-R）；UI 以 `[网络]` 标注。
     Slang,
+    /// 模糊音/纠错候选（M7，FR-024）；UI 不新增标签，仅 source 区分。
+    Corrected,
 }
 
 /// 输入法候选。
@@ -290,6 +292,254 @@ pub fn append_abbreviation_group(main: Vec<Candidate>, slang: Vec<Candidate>) ->
     merged
 }
 
+/// 简拼最小触发长度（M7，方案设计 12.2.3）。
+pub const INITIAL_MIN_LEN: usize = 2;
+/// 简拼最大触发长度（超过放弃，防组合爆炸）。
+pub const INITIAL_MAX_LEN: usize = 4;
+/// 简拼展开组合最多进入结果的总条数。
+pub const INITIAL_COMPLETION_CAP: usize = 32;
+
+/// 简拼/首字母候选（M7，FR-023，方案设计 12.2）。
+///
+/// 输入为 2-4 位纯小写 ASCII 首字母串（如 `nh`），按 `pinyin::INITIAL_SYLLABLE_TABLE`
+/// 前序笛卡尔积展开为完整拼音串，整词命中词典即产候选。
+///
+/// 触发前置由调用方保证（不可完整切分、长度合规、纯字母），本函数内部仍做防御：
+/// - 任一字母无简拼音节 → 返回空
+/// - 展开组合数超过上限 → 返回空（防组合爆炸：4 位 × 6 音节 = 1296 种，超预算）
+///
+/// 返回顺序 = 表序展开顺序（确定性）；由调用方并入主候选后统一排序。
+#[must_use]
+pub fn initial_candidates(dictionary: &dyn Dictionary, initials: &str) -> Vec<Candidate> {
+    let chars: Vec<char> = initials.chars().collect();
+    if chars.len() < INITIAL_MIN_LEN || chars.len() > INITIAL_MAX_LEN {
+        return Vec::new();
+    }
+    if !chars.iter().all(|c| c.is_ascii_lowercase()) {
+        return Vec::new();
+    }
+    let sets: Vec<&'static [&'static str]> = chars.iter().map(|c| initial_syllables(*c)).collect();
+    if sets.iter().any(|set| set.is_empty()) {
+        return Vec::new();
+    }
+    // 前序笛卡尔积：控制组合数上限，超出即放弃（防长串组合爆炸）。
+    const MAX_COMBINATIONS: usize = 128;
+    let mut combos: Vec<String> = vec![String::new()];
+    for set in &sets {
+        let mut next = Vec::with_capacity(combos.len().saturating_mul(set.len()));
+        for prefix in &combos {
+            for syllable in *set {
+                let mut combo = prefix.clone();
+                combo.push_str(syllable);
+                next.push(combo);
+            }
+        }
+        combos = next;
+        if combos.len() > MAX_COMBINATIONS {
+            return Vec::new();
+        }
+    }
+    let mut collected: Vec<Candidate> = Vec::new();
+    for combo in combos {
+        let entries = dictionary.lookup(&combo);
+        for entry in entries {
+            let mut candidate = candidate_from_entry(&entry);
+            candidate.pinyin = Some(combo.clone());
+            collected.push(candidate);
+            if collected.len() >= INITIAL_COMPLETION_CAP {
+                return collected;
+            }
+        }
+    }
+    collected
+}
+
+/// 纠错变体上限（M7，方案设计 12.3.3）。
+pub const CORRECTION_VARIANT_CAP: usize = 24;
+
+/// 模糊音与纠错候选（M7，FR-024，方案设计 12.3）。
+///
+/// 输入串必须**可完整切分**且**无整词命中**（由调用方保证，本函数内部防御）。
+/// 两类纠错：
+/// 1. **模糊替换**：对切分中每个音节做 `fuzzy_variants`（如 `zong`→`zhong`）；
+/// 2. **少字母补全**：对最后一个音节枚举以它为前缀的完整音节（如 `ha`→`hao`）。
+///
+/// 变体拼音串命中词典的候选标注 `CandidateSource::Corrected`，作为独立组
+/// 追加在主候选之后（UI 不新增标签）。数量受 `CORRECTION_VARIANT_CAP` 约束。
+#[must_use]
+pub fn corrected_candidates(
+    table: &SyllableTable,
+    dictionary: &dyn Dictionary,
+    pinyin: &str,
+) -> Vec<Candidate> {
+    if pinyin.is_empty() || !dictionary.lookup(pinyin).is_empty() {
+        return Vec::new();
+    }
+    let segments = segment_all(table, pinyin);
+    let Some(segments) = segments.first() else {
+        return Vec::new();
+    };
+    let syllable_count = segments.len();
+    let mut collected: Vec<Candidate> = Vec::new();
+    let mut seen_pinyin: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (index, syllable) in segments.iter().enumerate() {
+        let variants = if index + 1 == syllable_count {
+            // 尾音节：模糊替换 + 少字母补全。
+            let mut variants = fuzzy_variants(syllable);
+            variants.extend(
+                table
+                    .complete_syllables_with_prefix(syllable)
+                    .into_iter()
+                    .filter(|completed| *completed != syllable)
+                    .map(str::to_owned),
+            );
+            variants
+        } else {
+            fuzzy_variants(syllable)
+        };
+        for variant in variants {
+            if !table.is_complete_syllable(&variant) {
+                continue;
+            }
+            let mut replaced = segments.clone();
+            replaced[index] = variant.clone();
+            let new_pinyin = replaced.concat();
+            if !seen_pinyin.insert(new_pinyin.clone()) {
+                continue;
+            }
+            for entry in dictionary.lookup(&new_pinyin) {
+                let mut candidate = candidate_from_entry(&entry);
+                candidate.source = CandidateSource::Corrected;
+                candidate.pinyin = Some(new_pinyin.clone());
+                collected.push(candidate);
+                if collected.len() >= CORRECTION_VARIANT_CAP {
+                    return collected;
+                }
+            }
+        }
+    }
+    collected
+}
+
+/// Beam Search 参数（M7，方案设计 12.4.2）。
+pub const BEAM_WIDTH: usize = 8;
+/// 每个（子串）最多参与搜索的候选词数。
+pub const BEAM_WORD_CAP: usize = 4;
+/// 整句候选最多返回条数。
+pub const SENTENCE_TOP_N: usize = 5;
+/// 单个词最多覆盖的拼音字符数（4 个音节 × 平均 3-4 字符，防长串搜索爆炸）。
+pub const SENTENCE_MAX_WORD_CHARS: usize = 12;
+
+/// 整句 Beam Search 候选（M7，FR-025，方案设计 12.4）。
+///
+/// 输入串必须**可完整切分**、**音节数 ≥3**且**无整词命中**（由调用方保证，
+/// 本函数内部防御）。采用**跨音节整词匹配**的 beam 搜索：
+/// - 在每个拼音位置上，枚举所有「可完整切分的子串」（1 至 `SENTENCE_MAX_WORD_CHARS`
+///   字符），直接 `lookup` 命中词典词条——`mingtian` 这类两音节整词可被选中；
+/// - 得分 = Σ(词频 × unigram权重 + bigram(前词, 词)min(cap) × bigram权重)，
+///   与 `StaticRankingModel` 同权重（`RankingConfig::default()`），保证可比；
+/// - 每步保 `BEAM_WIDTH` 条路径，每个子串取 `BEAM_WORD_CAP` 个候选词；
+/// - 合并所有完整路径，同文本去重取最高分，返回前 `SENTENCE_TOP_N`。
+///
+/// 整词命中与音节数不足的输入返回空（调用方走现状路径）。整句候选
+/// `source = Static`、`pinyin = 原输入串`，由调用方置于主候选最前。
+/// 全部路径耗尽返回空（调用方回退单字拼接，保证 ≥1 候选）。
+#[must_use]
+pub fn sentence_candidates(
+    table: &SyllableTable,
+    dictionary: &dyn Dictionary,
+    bigram: &dyn BigramModel,
+    pinyin: &str,
+) -> Vec<Candidate> {
+    if pinyin.is_empty() || !dictionary.lookup(pinyin).is_empty() {
+        return Vec::new();
+    }
+    // 防抖：少于 3 个音节的长串不进 beam（短串沿用现状，避免行为漂移）。
+    let mut all_segments = segment_all(table, pinyin);
+    let min_syllables = all_segments
+        .iter()
+        .map(Vec::len)
+        .min()
+        .unwrap_or(usize::MAX);
+    if min_syllables < 3 {
+        return Vec::new();
+    }
+    let _ = std::mem::take(&mut all_segments); // 已用 min 统计，释放中间结果
+
+    let config = RankingConfig::default();
+    // beam: (词序列, 已消费字符数, 累计分)。字符数保证终止（每步至少消费 1 字符）。
+    let mut beam: Vec<(Vec<String>, usize, i64)> = vec![(Vec::new(), 0, 0)];
+    let len = pinyin.len();
+    // 至多 len 轮（每轮至少消费 1 字符），保证有限步终止。
+    for _ in 0..len {
+        let mut next_beam: Vec<(Vec<String>, usize, i64)> = Vec::new();
+        for (words, pos, score) in &beam {
+            let end_max = (*pos + SENTENCE_MAX_WORD_CHARS).min(len);
+            for end in (*pos + 1)..=end_max {
+                let sub = &pinyin[*pos..end];
+                if segment_all(table, sub).is_empty() {
+                    continue;
+                }
+                let entries = dictionary.lookup(sub);
+                if entries.is_empty() {
+                    continue;
+                }
+                for entry in entries.iter().take(BEAM_WORD_CAP) {
+                    let unigram_part = i64::try_from(entry.frequency)
+                        .unwrap_or(i64::MAX)
+                        .saturating_mul(i64::try_from(config.unigram_weight).unwrap_or(1));
+                    let bigram_part = words
+                        .last()
+                        .map_or(0, |previous| {
+                            bigram
+                                .frequency(previous, &entry.word)
+                                .min(config.bigram_frequency_cap)
+                        })
+                        .saturating_mul(config.bigram_weight);
+                    let add = i64::try_from(bigram_part)
+                        .unwrap_or(i64::MAX)
+                        .saturating_add(unigram_part);
+                    let mut next_words = words.clone();
+                    next_words.push(entry.word.clone());
+                    next_beam.push((next_words, end, score.saturating_add(add)));
+                }
+            }
+        }
+        if next_beam.is_empty() {
+            break; // 全部路径耗尽，回退由调用方负责
+        }
+        // 截断到 BEAM_WIDTH：累计分降序，同分按词文本序（确定性）。
+        next_beam.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.join("").cmp(&b.0.join(""))));
+        next_beam.truncate(BEAM_WIDTH);
+        beam = next_beam;
+        // 全部路径已消费到串尾则终止。
+        if beam.iter().all(|(_, pos, _)| *pos == len) {
+            break;
+        }
+    }
+
+    let mut sentence_scores: HashMap<String, i64> = HashMap::new();
+    for (words, pos, score) in &beam {
+        if *pos != len {
+            continue;
+        }
+        let sentence = words.join("");
+        let existing = sentence_scores.entry(sentence.clone()).or_insert(i64::MIN);
+        if *score > *existing {
+            *existing = *score;
+        }
+    }
+
+    let mut sentences: Vec<(String, i64)> = sentence_scores.into_iter().collect();
+    sentences.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sentences.truncate(SENTENCE_TOP_N);
+    sentences
+        .into_iter()
+        .map(|(sentence, score)| Candidate::new(sentence, score).with_pinyin(pinyin.to_owned()))
+        .collect()
+}
+
 fn deduplicate_and_sort(candidates: Vec<Candidate>) -> Vec<Candidate> {
     let mut by_text: HashMap<String, Candidate> = HashMap::new();
     for candidate in candidates {
@@ -449,10 +699,10 @@ mod tests {
 
     use crate::bigram::InMemoryBigramModel;
     use crate::candidate::{
-        abbreviation_candidates, append_abbreviation_group, generate_candidates,
-        generate_prefix_candidates, is_abbreviation_input, merge_candidate_groups, Candidate,
-        CandidateSorter, CandidateSource, RankingConfig, RankingContext, RankingModel,
-        StaticRankingModel,
+        abbreviation_candidates, append_abbreviation_group, corrected_candidates,
+        generate_candidates, generate_prefix_candidates, initial_candidates, is_abbreviation_input,
+        merge_candidate_groups, sentence_candidates, Candidate, CandidateSorter, CandidateSource,
+        RankingConfig, RankingContext, RankingModel, StaticRankingModel,
     };
     use crate::dict::{DictionaryEntry, InMemoryDictionary};
     use crate::pinyin::SyllableTable;
@@ -828,5 +1078,193 @@ mod tests {
         );
         let texts: Vec<&str> = merged.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["你好", "泥"]);
+    }
+
+    // ---- 输入体验优化（M7，FR-023 至 FR-025）----
+
+    fn m7_dictionary() -> InMemoryDictionary {
+        InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你好", "nihao", 100),
+            DictionaryEntry::new("泥好", "nihao", 30),
+            DictionaryEntry::new("为什么", "weishenme", 80),
+            DictionaryEntry::new("我是", "woshi", 70),
+            DictionaryEntry::new("我们", "women", 60),
+            DictionaryEntry::new("你", "ni", 90),
+            DictionaryEntry::new("好", "hao", 85),
+            DictionaryEntry::new("我", "wo", 88),
+            DictionaryEntry::new("想", "xiang", 75),
+            DictionaryEntry::new("明天", "mingtian", 72),
+            DictionaryEntry::new("去", "qu", 68),
+            DictionaryEntry::new("北京", "beijing", 95),
+            DictionaryEntry::new("中国", "zhongguo", 92),
+            DictionaryEntry::new("难", "nan", 50),
+            DictionaryEntry::new("发", "fa", 66),
+        ])
+    }
+
+    #[test]
+    fn 简拼展开命中整词() {
+        let dictionary = m7_dictionary();
+        let candidates = initial_candidates(&dictionary, "nh");
+        assert!(
+            candidates.iter().any(|c| c.text == "你好"),
+            "nh 应展开 nihao 命中你好，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 简拼三字展开() {
+        let dictionary = m7_dictionary();
+        let candidates = initial_candidates(&dictionary, "wsm");
+        assert!(
+            candidates.iter().any(|c| c.text == "为什么"),
+            "wsm 应展开 weishenme 命中为什么"
+        );
+    }
+
+    #[test]
+    fn 简拼单字符与非法输入不触发() {
+        let dictionary = m7_dictionary();
+        assert!(
+            initial_candidates(&dictionary, "n").is_empty(),
+            "单字符不触发"
+        );
+        assert!(
+            initial_candidates(&dictionary, "N").is_empty(),
+            "大写不触发"
+        );
+        assert!(
+            initial_candidates(&dictionary, "u1s1").is_empty(),
+            "含数字不触发"
+        );
+        assert!(initial_candidates(&dictionary, "").is_empty());
+    }
+
+    #[test]
+    fn 简拼未知字母返回空() {
+        let dictionary = m7_dictionary();
+        assert!(
+            initial_candidates(&dictionary, "qq").is_empty(),
+            "字母 q 不在简拼表（表中无 q）则整组放弃"
+        );
+    }
+
+    #[test]
+    fn 简拼结果确定性() {
+        let dictionary = m7_dictionary();
+        let first = initial_candidates(&dictionary, "nh");
+        let second = initial_candidates(&dictionary, "nh");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn 模糊替换纠错出中国() {
+        let table = SyllableTable::standard();
+        let dictionary = m7_dictionary();
+        let candidates = corrected_candidates(&table, &dictionary, "zongguo");
+        let zhongguo = candidates
+            .iter()
+            .find(|c| c.text == "中国")
+            .expect("zongguo 应纠错出中国");
+        assert_eq!(zhongguo.source, CandidateSource::Corrected);
+        assert_eq!(zhongguo.pinyin.as_deref(), Some("zhongguo"));
+    }
+
+    #[test]
+    fn 少字母补全尾音节() {
+        let table = SyllableTable::standard();
+        let dictionary = m7_dictionary();
+        let candidates = corrected_candidates(&table, &dictionary, "niha");
+        assert!(
+            candidates.iter().any(|c| c.text == "你好"),
+            "niha 应补全 ha→hao 出你好，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 整词命中不触发纠错() {
+        let table = SyllableTable::standard();
+        let dictionary = m7_dictionary();
+        assert!(
+            corrected_candidates(&table, &dictionary, "nihao").is_empty(),
+            "nihao 整词命中则不纠错"
+        );
+        assert!(corrected_candidates(&table, &dictionary, "").is_empty());
+    }
+
+    #[test]
+    fn 整句beam搜索全局最优() {
+        let table = SyllableTable::standard();
+        let dictionary = m7_dictionary();
+        let bigram = InMemoryBigramModel::new();
+        let candidates =
+            sentence_candidates(&table, &dictionary, &bigram, "woxiangmingtianqubeijing");
+        assert!(
+            !candidates.is_empty(),
+            "长串应产出整句候选: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            candidates.iter().any(|c| c.text == "我想明天去北京"),
+            "应包含我想明天去北京: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            candidates[0].pinyin.as_deref(),
+            Some("woxiangmingtianqubeijing")
+        );
+    }
+
+    #[test]
+    fn 短串与整词命中不启动beam() {
+        let table = SyllableTable::standard();
+        let dictionary = m7_dictionary();
+        let bigram = InMemoryBigramModel::new();
+        assert!(
+            sentence_candidates(&table, &dictionary, &bigram, "nihao").is_empty(),
+            "整词命中不启动 beam"
+        );
+        assert!(
+            sentence_candidates(&table, &dictionary, &bigram, "ni").is_empty(),
+            "单音节不启动 beam"
+        );
+        assert!(sentence_candidates(&table, &dictionary, &bigram, "").is_empty());
+    }
+
+    #[test]
+    fn 整句beam借助bigram选出自然搭配() {
+        let table = SyllableTable::standard();
+        let mut dictionary = m7_dictionary();
+        // 人为构造：xiang 的高频词是"想"，qu 只跟"去"。
+        dictionary.push(DictionaryEntry::new("响", "xiang", 2000));
+        dictionary.push(DictionaryEntry::new("趣", "qu", 2000));
+        let mut bigram = InMemoryBigramModel::new();
+        bigram.insert("想", "去", 1000);
+        bigram.insert("明天", "去", 1000);
+        bigram.insert("去", "北京", 1000);
+        let candidates =
+            sentence_candidates(&table, &dictionary, &bigram, "woxiangmingtianqubeijing");
+        assert!(
+            candidates.iter().any(|c| c.text == "我想明天去北京"),
+            "beam 应借助 bigram 选我想明天去北京而非响/趣组合: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 }
