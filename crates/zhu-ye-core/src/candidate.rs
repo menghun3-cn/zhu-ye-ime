@@ -430,6 +430,17 @@ pub const BEAM_WORD_CAP: usize = 4;
 pub const SENTENCE_TOP_N: usize = 5;
 /// 单个词最多覆盖的拼音字符数（4 个音节 × 平均 3-4 字符，防长串搜索爆炸）。
 pub const SENTENCE_MAX_WORD_CHARS: usize = 12;
+/// 词单频（unigram）进入整句评分前的上限，与 `bigram_frequency_cap` 同量级。
+/// 修复 M7-A 实测暴露的问题：真实词库中超高频单字（如「被」）若放行原始词频，
+/// 会凭 unigram 碾压多音节整词，导致 beam 退化为逐字拼接。
+pub const SENTENCE_UNIGRAM_CAP: i64 = 100_000;
+/// 前词→本词无任何 bigram 证据（频率为 0）时的路径惩罚。
+/// 整句评分按"词间转移"建模：`想去北京` 有证据得分，`去被敬` 无证据被罚，
+/// 使随机单字拼接无法通过累加小分值胜过自然搭配。
+/// 罚额与 `SENTENCE_UNIGRAM_CAP` 等值：M7-A 实测发现若罚 < cap，超高频单字
+/// （如介词「被」）罚后残值仍为正，两个残值累积即可压过低频整词（如「北京」）。
+/// 罚 = cap 使无证据词贡献 ≤ 0，随机拼接路径整体必然深于有证据路径。
+pub const SENTENCE_BIGRAM_MISS_PENALTY: i64 = SENTENCE_UNIGRAM_CAP;
 
 /// 整句 Beam Search 候选（M7，FR-025，方案设计 12.4）。
 ///
@@ -437,8 +448,11 @@ pub const SENTENCE_MAX_WORD_CHARS: usize = 12;
 /// 本函数内部防御）。采用**跨音节整词匹配**的 beam 搜索：
 /// - 在每个拼音位置上，枚举所有「可完整切分的子串」（1 至 `SENTENCE_MAX_WORD_CHARS`
 ///   字符），直接 `lookup` 命中词典词条——`mingtian` 这类两音节整词可被选中；
-/// - 得分 = Σ(词频 × unigram权重 + bigram(前词, 词)min(cap) × bigram权重)，
-///   与 `StaticRankingModel` 同权重（`RankingConfig::default()`），保证可比；
+/// - 评分（与 `StaticRankingModel` 同权重体系，M7-A 修订）：
+///   首词 = min(词频, `SENTENCE_UNIGRAM_CAP`) × unigram权重；
+///   后续词 = 前词→本词 bigram 有证据时
+///   min(词频, cap) × unigram权重 + min(bigram, cap) × bigram权重，
+///   无 bigram 证据时 min(词频, cap) × unigram权重 − `SENTENCE_BIGRAM_MISS_PENALTY`；
 /// - 每步保 `BEAM_WIDTH` 条路径，每个子串取 `BEAM_WORD_CAP` 个候选词；
 /// - 合并所有完整路径，同文本去重取最高分，返回前 `SENTENCE_TOP_N`。
 ///
@@ -472,6 +486,10 @@ pub fn sentence_candidates(
     let mut beam: Vec<(Vec<String>, usize, i64)> = vec![(Vec::new(), 0, 0)];
     let len = pinyin.len();
     // 至多 len 轮（每轮至少消费 1 字符），保证有限步终止。
+    // `completed` 跨轮保留已消费到串尾的路径——整词步长（如「明天」8 字符）会让
+    // 高分局 路径提前完成；若只从当轮 `next_beam` 收集，慢（逐字）路径会在后续
+    // 轮次把提前完成的路径挤出 beam，导致 top 结果退化（M7-A 实测发现）。
+    let mut completed: Vec<(Vec<String>, usize, i64)> = Vec::new();
     for _ in 0..len {
         let mut next_beam: Vec<(Vec<String>, usize, i64)> = Vec::new();
         for (words, pos, score) in &beam {
@@ -486,20 +504,27 @@ pub fn sentence_candidates(
                     continue;
                 }
                 for entry in entries.iter().take(BEAM_WORD_CAP) {
-                    let unigram_part = i64::try_from(entry.frequency)
+                    // unigram 上限：防止超高频单字以原始词频垄断整句评分（M7-A 修订）。
+                    let unigram_capped = i64::try_from(entry.frequency)
                         .unwrap_or(i64::MAX)
+                        .min(SENTENCE_UNIGRAM_CAP)
                         .saturating_mul(i64::try_from(config.unigram_weight).unwrap_or(1));
-                    let bigram_part = words
-                        .last()
-                        .map_or(0, |previous| {
-                            bigram
-                                .frequency(previous, &entry.word)
-                                .min(config.bigram_frequency_cap)
-                        })
-                        .saturating_mul(config.bigram_weight);
-                    let add = i64::try_from(bigram_part)
-                        .unwrap_or(i64::MAX)
-                        .saturating_add(unigram_part);
+                    let bigram_score = words.last().map_or(0, |previous| {
+                        bigram
+                            .frequency(previous, &entry.word)
+                            .min(config.bigram_frequency_cap)
+                    });
+                    let add = if words.is_empty() || bigram_score > 0 {
+                        // 首词或存在词间转移证据：unigram + bigram 加成。
+                        unigram_capped.saturating_add(
+                            i64::try_from(bigram_score)
+                                .unwrap_or(i64::MAX)
+                                .saturating_mul(i64::try_from(config.bigram_weight).unwrap_or(1)),
+                        )
+                    } else {
+                        // 前词→本词无证据：随机拼接惩罚，防止「去被敬」类路径胜出。
+                        unigram_capped.saturating_sub(SENTENCE_BIGRAM_MISS_PENALTY)
+                    };
                     let mut next_words = words.clone();
                     next_words.push(entry.word.clone());
                     next_beam.push((next_words, end, score.saturating_add(add)));
@@ -509,18 +534,26 @@ pub fn sentence_candidates(
         if next_beam.is_empty() {
             break; // 全部路径耗尽，回退由调用方负责
         }
-        // 截断到 BEAM_WIDTH：累计分降序，同分按词文本序（确定性）。
-        next_beam.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.join("").cmp(&b.0.join(""))));
-        next_beam.truncate(BEAM_WIDTH);
-        beam = next_beam;
-        // 全部路径已消费到串尾则终止。
-        if beam.iter().all(|(_, pos, _)| *pos == len) {
-            break;
+        // 分离「已到串尾」与「继续展开」：完成路径并入 completed 跨轮保留。
+        let (mut done, mut pending): (Vec<_>, Vec<_>) =
+            next_beam.into_iter().partition(|(_, pos, _)| *pos == len);
+        if !done.is_empty() {
+            done.append(&mut completed);
+            done.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.join("").cmp(&b.0.join(""))));
+            done.truncate(BEAM_WIDTH);
+            completed = done;
         }
+        if pending.is_empty() {
+            break; // 全部路径均已完成
+        }
+        // 截断到 BEAM_WIDTH：累计分降序，同分按词文本序（确定性）。
+        pending.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.join("").cmp(&b.0.join(""))));
+        pending.truncate(BEAM_WIDTH);
+        beam = pending;
     }
 
     let mut sentence_scores: HashMap<String, i64> = HashMap::new();
-    for (words, pos, score) in &beam {
+    for (words, pos, score) in beam.iter().chain(completed.iter()) {
         if *pos != len {
             continue;
         }
@@ -1261,6 +1294,34 @@ mod tests {
         assert!(
             candidates.iter().any(|c| c.text == "我想明天去北京"),
             "beam 应借助 bigram 选我想明天去北京而非响/趣组合: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 整句beam超高频单字不压过整词() {
+        // M7-A 真实词库实测回归：单字「名/天/被/敬」词频远超整词「明天/北京」时，
+        // 旧评分（unigram 无上限 + 无 bigram 惩罚）会让 beam 退化为逐字拼接。
+        let table = SyllableTable::standard();
+        let mut dictionary = m7_dictionary();
+        dictionary.push(DictionaryEntry::new("名", "ming", 90_000));
+        dictionary.push(DictionaryEntry::new("天", "tian", 90_000));
+        dictionary.push(DictionaryEntry::new("被", "bei", 90_000));
+        dictionary.push(DictionaryEntry::new("敬", "jing", 90_000));
+        let mut bigram = InMemoryBigramModel::new();
+        // 自然搭配有强 bigram 证据；各单字组合均无证据（被罚）。
+        bigram.insert("想", "明天", 8_000);
+        bigram.insert("明天", "去", 9_000);
+        bigram.insert("去", "北京", 8_000);
+        let candidates =
+            sentence_candidates(&table, &dictionary, &bigram, "woxiangmingtianqubeijing");
+        assert_eq!(
+            candidates.first().map(|c| c.text.as_str()),
+            Some("我想明天去北京"),
+            "超高频单字不得压过整词: {:?}",
             candidates
                 .iter()
                 .map(|c| c.text.as_str())

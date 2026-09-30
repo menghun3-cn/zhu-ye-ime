@@ -8,6 +8,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use zhu_ye_core::candidate::{corrected_candidates, initial_candidates, sentence_candidates};
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::{
     core_version, generate_candidates, BigramModel, Candidate, CandidateSorter, Dictionary,
@@ -200,9 +201,66 @@ fn bench() {
     let (zh_en_us, en_zh_us) = measure_translation(50_000, true);
     // M6-R：多包场景（基础包 + 全部领域包）对比单词典查找延迟。
     let multi_pack_us = measure_multi_pack_lookup(20_000, true);
+    // M7：三输入优化路径（简拼/纠错/整句）延迟（验收标准 8.2）。
+    let (initial_us, corrected_us, sentence_us) = measure_m7_paths(2_000, true);
     println!(
-        "指标: segment_us={segment_us:.3} lookup_us={lookup_us:.3} bigram_us={bigram_us:.3} zh_en_us={zh_en_us:.3} en_zh_us={en_zh_us:.3} multi_pack_us={multi_pack_us:.3}"
+        "指标: segment_us={segment_us:.3} lookup_us={lookup_us:.3} bigram_us={bigram_us:.3} zh_en_us={zh_en_us:.3} en_zh_us={en_zh_us:.3} multi_pack_us={multi_pack_us:.3} m7_initial_us={initial_us:.3} m7_corrected_us={corrected_us:.3} m7_sentence_us={sentence_us:.3}"
     );
+}
+
+/// M7 三路径延迟基准（FR-023 至 FR-025，验收标准 8.2：验收 ≤30ms、目标 ≤15ms）。
+///
+/// 使用 `ZYDT_DICT`（`dict_file_path`）指向的真实词典文件；文件不可用时
+/// 返回全零（bench 仍可运行，验收数据以 release + 真实词典为准）。
+fn measure_m7_paths(runs: usize, print: bool) -> (f64, f64, f64) {
+    let path = dict_file_path();
+    let Ok(file) = DictionaryFile::open(&path) else {
+        if print {
+            eprintln!("M7 路径基准跳过：无法打开词典 {}", path.display());
+        }
+        return (0.0, 0.0, 0.0);
+    };
+    let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
+    let table = SyllableTable::standard();
+    let bigram = &file;
+
+    let start = Instant::now();
+    let mut initial_hits = 0usize;
+    for _ in 0..runs {
+        initial_hits =
+            initial_hits.saturating_add(initial_candidates(dictionary.as_ref(), "nh").len());
+    }
+    let initial_us = us_per_op(start.elapsed(), runs);
+
+    let start = Instant::now();
+    let mut corrected_hits = 0usize;
+    for _ in 0..runs {
+        corrected_hits = corrected_hits
+            .saturating_add(corrected_candidates(&table, dictionary.as_ref(), "niha").len());
+    }
+    let corrected_us = us_per_op(start.elapsed(), runs);
+
+    let start = Instant::now();
+    let mut sentence_hits = 0usize;
+    for _ in 0..runs {
+        sentence_hits = sentence_hits.saturating_add(
+            sentence_candidates(
+                &table,
+                dictionary.as_ref(),
+                bigram,
+                "woxiangmingtianqubeijing",
+            )
+            .len(),
+        );
+    }
+    let sentence_us = us_per_op(start.elapsed(), runs);
+
+    if print {
+        println!("M7 简拼基准: {runs} 次, 平均 {initial_us:.3}us/次, 累积命中 {initial_hits}");
+        println!("M7 纠错基准: {runs} 次, 平均 {corrected_us:.3}us/次, 累积命中 {corrected_hits}");
+        println!("M7 整句基准: {runs} 次, 平均 {sentence_us:.3}us/次, 累积命中 {sentence_hits}");
+    }
+    (initial_us, corrected_us, sentence_us)
 }
 
 /// 多包查找基准（M6-R，验收标准 7.2「候选刷新延迟（全包启用）」）。
