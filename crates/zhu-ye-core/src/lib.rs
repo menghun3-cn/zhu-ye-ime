@@ -13,6 +13,7 @@ pub mod dict_builder;
 pub mod dict_format;
 pub mod dict_loader;
 pub mod emoji;
+pub mod en_words;
 pub mod error;
 pub mod format;
 pub mod manifest;
@@ -38,6 +39,7 @@ pub use candidate::{
 pub use composite::{any_exists, pack_path, CompositeDictionary};
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 pub use emoji::{emoji_for, EmojiEntry, EMOJI_TABLE};
+pub use en_words::{en_words_with_prefix, EnWordEntry, EN_WORDS};
 pub use error::{Error, Result};
 pub use format::{cn_numeral, format_candidates, FormatCandidate};
 pub use manifest::{
