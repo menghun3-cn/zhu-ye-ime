@@ -585,6 +585,50 @@ impl BigramModel for DictionaryFile {
     fn frequency(&self, previous: &str, word: &str) -> u64 {
         self.find_bigram(previous, word).unwrap_or(0)
     }
+
+    fn successors(&self, previous: &str, limit: usize) -> Vec<(String, u64)> {
+        // bigram 表按 (previous, word, frequency) 排序（见 dict_builder），
+        // 相同前词的记录连续：二分定位 (previous, "") 的下界后顺序扫描区段。
+        let count = self.header.bigram_count as usize;
+        if count == 0 || previous.is_empty() {
+            return Vec::new();
+        }
+        let mut low = 0usize;
+        let mut high = count;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let record = BigramRecord::new(
+                &self.bigram_records()[mid * BIGRAM_RECORD_SIZE..(mid + 1) * BIGRAM_RECORD_SIZE],
+            );
+            let key = (
+                self.text_unchecked(record.previous_offset(), record.previous_len()),
+                self.text_unchecked(record.word_offset(), record.word_len()),
+            );
+            if key < (previous, "") {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let mut items: Vec<(String, u64)> = Vec::new();
+        for index in low..count {
+            let record = BigramRecord::new(
+                &self.bigram_records()
+                    [index * BIGRAM_RECORD_SIZE..(index + 1) * BIGRAM_RECORD_SIZE],
+            );
+            let prev = self.text_unchecked(record.previous_offset(), record.previous_len());
+            if prev != previous {
+                break;
+            }
+            let word = self
+                .text_unchecked(record.word_offset(), record.word_len())
+                .to_owned();
+            items.push((word, u64::from(record.frequency())));
+        }
+        items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        items.truncate(limit);
+        items
+    }
 }
 
 impl Translator for DictionaryFile {
@@ -784,6 +828,15 @@ mod tests {
         assert_eq!(file.frequency("你好", "世界"), 120);
         assert_eq!(file.frequency("你好", "中国"), 0);
         assert_eq!(file.frequency("我们", "的"), 0);
+
+        // T-058 后继检索：bigram 表按前词连续，下界二分 + 区段扫描取高频后继。
+        assert_eq!(
+            file.successors("世界", 5),
+            vec![("你好".to_owned(), 90), ("中国".to_owned(), 60),]
+        );
+        assert_eq!(file.successors("你好", 1), vec![("世界".to_owned(), 120)]);
+        assert!(file.successors("未收录", 5).is_empty());
+        assert!(file.successors("", 5).is_empty());
 
         assert_eq!(file.zh_to_en("你好").as_deref(), Some("hello"));
         assert_eq!(file.zh_to_en("中国").as_deref(), Some("China"));
