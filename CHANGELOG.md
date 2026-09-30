@@ -12,6 +12,8 @@
 - 整句/长句 Beam Search：`woxiangmingtianqubeijing`→我想明天去北京；跨音节整词匹配 + 词间转移评分（unigram 上限、bigram 缺失惩罚），整句组置主候选最前（T-055，FR-025）
 - host-e2e 新增 `--m7` 输入体验优化断言组（真实词典 22 项，含确定性）与 `scripts/e2e.ps1` 集成（T-055）
 - `zhu-ye-cli bench` 新增 M7 三路径延迟场景（简拼/纠错/整句，回填验收标准 8.5）（T-055）
+- 多音缺读补丁管线：`shui`→谁、`shou`→熟；构建期只增不改补读音词条（kTGHZ2013 规范读音对照 + 人工把关补丁表 + `import --polyphone` + `audit-polyphone` 审计命令）；修复 `dict -r` 中文键反查越界 panic（T-056）
+- host-e2e `--m7` 增 4 项多音/反查断言（26/26）（T-056）
 
 ## [0.1.0] - 2026-09-23
 
