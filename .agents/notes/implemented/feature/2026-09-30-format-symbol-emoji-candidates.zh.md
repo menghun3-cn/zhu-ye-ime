@@ -12,7 +12,7 @@ Status: implemented
 
 三个独立候选源挂在空闲候选窗之后（`suggestion > digit > v`，FR-029 D-05），一律不参与拼音排序。
 
-**core**（`zhu-ye-core`）：`format.rs` — `format_candidates` 把数字串映射为排版文本（8 位日期 4 式、6 位年月 2 式、4 位年份 1 式、金额千分位+`cn_numeral` 中文读数、11 位电话 2 式、≥5 位纯千分位；超长/非法返回空）；`symbols.rs` — `symbol_group('1'..='9')` 序号 ①-⑨、`x` 数学 ±×÷≈≠≤≥∞％、`h` 标点 ，。！？、；：""——每类一页 9 个；`emoji.rs` — 静态 109 条别名表按别名字节序、`emoji_for` 二分查找；`CandidateSource` 增 `NumberFormat`/`Symbol`/`Emoji` 三变体。
+**core**（`zhu-ye-core`）：`format.rs` — `format_candidates` 把数字串映射为排版文本（8 位日期 4 式、6 位年月 2 式、4 位年份 1 式、金额千分位+`cn_numeral` 中文读数、11 位电话 2 式、≥5 位纯千分位；超长/非法返回空）；`symbols.rs` — `symbol_group('1'..='9')` 序号 ①-⑨、`x` 数学 ±×÷≈≠≤≥∞％、`h` 标点 ，。！？、；：""——每类一页 9 个；`emoji.rs` — 静态 381 条别名表按别名字节序、`emoji_for` 二分查找；`CandidateSource` 增 `NumberFormat`/`Symbol`/`Emoji` 三变体。
 
 **引擎**（`input.rs`）：
 - `digit_buffer`：空闲态数字键进入数字模式并把该字符立即写入文档（digit_append 接受 ASCII 数字与 `.`）；不足 5 位无候选；`digit_active` 期间数字/退格/空格/Esc 全按数字模式语义；任何字母/拼音输入先退出数字模式（`push_composing` 开头 `exit_digit`）。`commit_digit` 清 buffer 并把 `previous_word` 设为格式文本——随后的空闲窗展示该文本的 bigram 联想（D-05）。
@@ -44,7 +44,7 @@ Status: implemented
 - 提交格式数字文本会把 `previous_word` 置为该文本，空闲窗随之切到该文本的 bigram 联想（联想 > 数字优先级）。
 - 数字模式内 `.` 键被吞作小数点；模式外按键原样放行——数字模式活跃时用户无法用句号结束句子（先 Esc/字母退出）。
 - 组合态数字键语义不变（含 996/u1s1 等数字缩写键）。
-- emoji 表首批 109 条、静态二分；纯数据批次 T-062 铺至 300+。
+- emoji 表静态 381 条二分；T-062 纯数据批次由首批 109 条扩至 381（别名保持小写，有序性由测试强制）。
 - shui 候选覆盖项（选项 A）保持待办，与场景7 无交集。
 
 ## Deferred
