@@ -2,17 +2,20 @@
 # 输入：
 #   data/cache/frequencywords-en.txt   FrequencyWords 英文词频（D-018，CC BY-SA 4.0）
 #   data/patches/en-capitals.tsv       大小写补丁（人工维护，随 git 版本管理）
+#   data/patches/en-exclude.tsv        排除清单（中文人名/音译噪声词，人工维护，随 git 版本管理）
 #   data/raw/cedict_ts.u8              CC-CEDICT 原文（D-001，CC BY-SA 4.0，英文侧提取）
 # 输出：
 #   crates/zhu-ye-core/src/en_words.rs（表 + 查询函数 + 测试；由本脚本整体生成，变更应改脚本后重跑）
 # 规则：小写 ASCII 查键唯一、按字节序升序（二分依赖）；top10000 由频次截断；补丁只改原形/排序，
-#       可强推低频词进入；CEDICT 英文侧仅补充纯单词词目（过滤括号注释/空格短语）。
+#       可强推低频词进入；排除清单从两段数据源一并剔除；CEDICT 英文侧仅补充纯单词词目
+#       （过滤括号注释/空格短语）。
 # 兼容：Windows PowerShell 5.1+；脚本文件使用 UTF-8 BOM
 $ErrorActionPreference = 'Stop'
 
 $root = (Get-Location).Path
 $freqPath = Join-Path $root 'data/cache/frequencywords-en.txt'
 $patchPath = Join-Path $root 'data/patches/en-capitals.tsv'
+$excludePath = Join-Path $root 'data/patches/en-exclude.tsv'
 $cedictPath = Join-Path $root 'data/raw/cedict_ts.u8'
 $outPath = Join-Path $root 'crates/zhu-ye-core/src/en_words.rs'
 
@@ -107,9 +110,31 @@ foreach ($p in $patches) {
 # CEDICT 补充的排名从 nextRank 起
 $cedictExtra = [System.Collections.Generic.List[object]]::new()
 
+# ---------- 2.5 排除清单 ----------
+# 中文人名/音译噪声词（如 zhang/wang）在英文语料高频但对中文输入者是干扰：
+# 从 FrequencyWords 段删除（含大小写补丁段），并阻止 CEDICT 段补回。
+$exclude = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$beforeExclude = $ranked.Count
+foreach ($line in [System.IO.File]::ReadAllLines($excludePath)) {
+    $line = $line.Trim()
+    if ($line.Length -eq 0 -or $line.StartsWith('#')) { continue }
+    foreach ($l in $line -split "`t") {
+        $norm = $l.Trim().ToLowerInvariant()
+        if ($norm.Length -eq 0) { continue }
+        [void]$exclude.Add($norm)
+        if ($rankMap.ContainsKey($norm)) {
+            $obj = $rankMap[$norm]
+            [void]$rankMap.Remove($norm)
+            [void]$ranked.Remove($obj)
+        }
+    }
+}
+Write-Host ("排除清单：{0} 条（已从 FrequencyWords 段移除 {1} 条）" -f $exclude.Count, ($beforeExclude - $ranked.Count))
+
 # ---------- 3. CEDICT 英文侧提取 ----------
 $saw = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 foreach ($k in $rankMap.Keys) { [void]$saw.Add($k) }
+foreach ($k in $exclude) { [void]$saw.Add($k) }
 $cedictExtra = [System.Collections.Generic.List[object]]::new()
 $sr = [System.IO.StreamReader]::new($cedictPath, [System.Text.UTF8Encoding]::new($false))
 try {
@@ -149,7 +174,8 @@ $lines.Add('//! 英文词候选表（FR-030，场景 6）。')
 $lines.Add('//!')
 $lines.Add('//! 由 scripts/build-en-words.ps1 生成，请勿手改；改数据源/清洗/补丁后重跑脚本。')
 $lines.Add('//! 数据来源：FrequencyWords 英文词频（D-018，CC BY-SA 4.0）+ 人工大小写补丁')
-$lines.Add('//! （data/patches/en-capitals.tsv）+ CC-CEDICT 英文侧（D-001，CC BY-SA 4.0）。')
+$lines.Add('//! （data/patches/en-capitals.tsv）+ 排除清单（data/patches/en-exclude.tsv，')
+$lines.Add('//! 中文人名/音译噪声词）+ CC-CEDICT 英文侧（D-001，CC BY-SA 4.0）。')
 $lines.Add('//! 查键 norm 为小写 ASCII，按字节序升序（二分依赖）；word 保留原形大小写（D-09）；')
 $lines.Add('//! freq_rank 仅组内排序用（越小越常用，不参与中文静态排序，D-10）。')
 $lines.Add('')

@@ -2,7 +2,8 @@
 //!
 //! 由 scripts/build-en-words.ps1 生成，请勿手改；改数据源/清洗/补丁后重跑脚本。
 //! 数据来源：FrequencyWords 英文词频（D-018，CC BY-SA 4.0）+ 人工大小写补丁
-//! （data/patches/en-capitals.tsv）+ CC-CEDICT 英文侧（D-001，CC BY-SA 4.0）。
+//! （data/patches/en-capitals.tsv）+ 排除清单（data/patches/en-exclude.tsv，
+//! 中文人名/音译噪声词）+ CC-CEDICT 英文侧（D-001，CC BY-SA 4.0）。
 //! 查键 norm 为小写 ASCII，按字节序升序（二分依赖）；word 保留原形大小写（D-09）；
 //! freq_rank 仅组内排序用（越小越常用，不参与中文静态排序，D-10）。
 
@@ -12112,11 +12113,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "chemotherapy",
         word: "chemotherapy",
         freq_rank: 10810,
-    },
-    EnWordEntry {
-        norm: "chen",
-        word: "chen",
-        freq_rank: 5503,
     },
     EnWordEntry {
         norm: "cheng",
@@ -24884,19 +24880,9 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 1338,
     },
     EnWordEntry {
-        norm: "fan",
-        word: "fan",
-        freq_rank: 1721,
-    },
-    EnWordEntry {
         norm: "fancy",
         word: "fancy",
         freq_rank: 1805,
-    },
-    EnWordEntry {
-        norm: "fang",
-        word: "fang",
-        freq_rank: 8613,
     },
     EnWordEntry {
         norm: "fanny",
@@ -25377,11 +25363,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "fence",
         word: "fence",
         freq_rank: 3380,
-    },
-    EnWordEntry {
-        norm: "feng",
-        word: "feng",
-        freq_rank: 9071,
     },
     EnWordEntry {
         norm: "fenugreek",
@@ -27862,11 +27843,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "fryer",
         word: "fryer",
         freq_rank: 13158,
-    },
-    EnWordEntry {
-        norm: "fu",
-        word: "fu",
-        freq_rank: 4198,
     },
     EnWordEntry {
         norm: "fuck",
@@ -31029,11 +31005,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 10395,
     },
     EnWordEntry {
-        norm: "han",
-        word: "han",
-        freq_rank: 3880,
-    },
-    EnWordEntry {
         norm: "hand",
         word: "hand",
         freq_rank: 364,
@@ -33032,11 +33003,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "honeysuckle",
         word: "honeysuckle",
         freq_rank: 14981,
-    },
-    EnWordEntry {
-        norm: "hong",
-        word: "hong",
-        freq_rank: 2864,
     },
     EnWordEntry {
         norm: "honking",
@@ -37029,11 +36995,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 1222,
     },
     EnWordEntry {
-        norm: "jin",
-        word: "jin",
-        freq_rank: 3671,
-    },
-    EnWordEntry {
         norm: "jingle",
         word: "jingle",
         freq_rank: 7164,
@@ -39689,11 +39650,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 2373,
     },
     EnWordEntry {
-        norm: "li",
-        word: "li",
-        freq_rank: 3731,
-    },
-    EnWordEntry {
         norm: "liable",
         word: "liable",
         freq_rank: 9456,
@@ -40062,11 +40018,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "limpid",
         word: "limpid",
         freq_rank: 13046,
-    },
-    EnWordEntry {
-        norm: "lin",
-        word: "lin",
-        freq_rank: 5343,
     },
     EnWordEntry {
         norm: "lina",
@@ -49507,11 +49458,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "pamela",
         word: "pamela",
         freq_rank: 8229,
-    },
-    EnWordEntry {
-        norm: "pan",
-        word: "pan",
-        freq_rank: 3918,
     },
     EnWordEntry {
         norm: "panacea",
@@ -61969,11 +61915,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 8131,
     },
     EnWordEntry {
-        norm: "shi",
-        word: "shi",
-        freq_rank: 9795,
-    },
-    EnWordEntry {
         norm: "shield",
         word: "shield",
         freq_rank: 4510,
@@ -64212,11 +64153,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "sonata",
         word: "sonata",
         freq_rank: 11502,
-    },
-    EnWordEntry {
-        norm: "song",
-        word: "song",
-        freq_rank: 671,
     },
     EnWordEntry {
         norm: "songbird",
@@ -66824,11 +66760,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 10382,
     },
     EnWordEntry {
-        norm: "su",
-        word: "su",
-        freq_rank: 7058,
-    },
-    EnWordEntry {
         norm: "sub",
         word: "sub",
         freq_rank: 5842,
@@ -67312,11 +67243,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "summoned",
         word: "summoned",
         freq_rank: 7621,
-    },
-    EnWordEntry {
-        norm: "sun",
-        word: "sun",
-        freq_rank: 834,
     },
     EnWordEntry {
         norm: "sunbathing",
@@ -68597,11 +68523,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "tandoor",
         word: "tandoor",
         freq_rank: 15368,
-    },
-    EnWordEntry {
-        norm: "tang",
-        word: "tang",
-        freq_rank: 8100,
     },
     EnWordEntry {
         norm: "tango",
@@ -75109,11 +75030,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 8063,
     },
     EnWordEntry {
-        norm: "wan",
-        word: "wan",
-        freq_rank: 9554,
-    },
-    EnWordEntry {
         norm: "wanda",
         word: "wanda",
         freq_rank: 8408,
@@ -75132,11 +75048,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "wandering",
         word: "wandering",
         freq_rank: 5039,
-    },
-    EnWordEntry {
-        norm: "wang",
-        word: "wang",
-        freq_rank: 5207,
     },
     EnWordEntry {
         norm: "wanna",
@@ -75732,11 +75643,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "weevil",
         word: "weevil",
         freq_rank: 14703,
-    },
-    EnWordEntry {
-        norm: "wei",
-        word: "wei",
-        freq_rank: 8841,
     },
     EnWordEntry {
         norm: "weigh",
@@ -77209,11 +77115,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 1032,
     },
     EnWordEntry {
-        norm: "wu",
-        word: "wu",
-        freq_rank: 5123,
-    },
-    EnWordEntry {
         norm: "wyatt",
         word: "wyatt",
         freq_rank: 5460,
@@ -77247,11 +77148,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "xerox",
         word: "Xerox",
         freq_rank: 12383,
-    },
-    EnWordEntry {
-        norm: "xiao",
-        word: "xiao",
-        freq_rank: 7098,
     },
     EnWordEntry {
         norm: "xiaomi",
@@ -77324,16 +77220,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 15155,
     },
     EnWordEntry {
-        norm: "yan",
-        word: "yan",
-        freq_rank: 8686,
-    },
-    EnWordEntry {
-        norm: "yang",
-        word: "yang",
-        freq_rank: 4438,
-    },
-    EnWordEntry {
         norm: "yankee",
         word: "yankee",
         freq_rank: 8173,
@@ -77362,11 +77248,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "yay",
         word: "yay",
         freq_rank: 3384,
-    },
-    EnWordEntry {
-        norm: "ye",
-        word: "ye",
-        freq_rank: 3633,
     },
     EnWordEntry {
         norm: "yea",
@@ -77579,16 +77460,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         freq_rank: 9976,
     },
     EnWordEntry {
-        norm: "yu",
-        word: "yu",
-        freq_rank: 5028,
-    },
-    EnWordEntry {
-        norm: "yuan",
-        word: "yuan",
-        freq_rank: 8461,
-    },
-    EnWordEntry {
         norm: "yuck",
         word: "yuck",
         freq_rank: 8786,
@@ -77697,11 +77568,6 @@ pub static EN_WORDS: &[EnWordEntry] = &[
         norm: "zeus",
         word: "zeus",
         freq_rank: 8506,
-    },
-    EnWordEntry {
-        norm: "zhang",
-        word: "zhang",
-        freq_rank: 8549,
     },
     EnWordEntry {
         norm: "zimbabwe",

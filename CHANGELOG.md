@@ -19,7 +19,8 @@
 - 上下文联想引擎承接：上屏后空闲候选窗展示 bigram 后继联想（连续联想）；联想态数字键直接上屏、空格选词、Esc 关闭、输入字母即退出回主输入路径；联想候选标注 Suggestion 来源；host-e2e `--m8` 真实词典断言组 7/7（T-059）
 - 场景7 格式候选：任意连续数字启发式识别（空闲态数字键直插上屏、空格/数字选择、文档侧替换链换入格式文本；8 位日期 4 式/6 位年月/4 位年份/金额千分位+中文读数/11 位电话分段/≥5 位千分位）＋ v 模式符号组（空闲态 `v` 冷启动、v1 序号/vx 数学/vh 标点各一页 9 项、`vi` 回退拼音组合）＋ 拼音整串命中 emoji 别名队尾追加（不参与排序）；候选源优先级 联想 > 数字 > v；host-e2e `--m9` 真实词典断言组 15/15，T-057 命中率基准不回退（T-061）
 - emoji 别名表纯数据扩展：首批 109 条扩至 381 条（动物/食物/物品/天气/交通/运动/手势/符号等常用类别，字母序二分保持，规模断言 ≥300；顺带修正 `biye` 别名 emoji（👋→🎓）并新增 `soup`/`glasses` 等独立别名）（T-062）
-- core 英文词候选表 EN_WORDS（FR-030 底座，场景 6）：FrequencyWords 英文词频（D-018，CC BY-SA 4.0）前 10000 词 + 人工大小写补丁表（D-019，`data/patches/en-capitals.tsv`，专名/缩写原形如 `iPhone`/`API`/`QQ`，命令两可词保留小写）+ CC-CEDICT 英文侧纯单词补充（D-001），共 15561 条；小写 ASCII 查键有序二分 + 前缀区段扫描 `en_words_with_prefix`，按 freq_rank 组内排序、上限截断；生成脚本 `scripts/build-en-words.ps1` 可复现并 rustfmt（T-064）
+- core 英文词候选表 EN_WORDS（FR-030 底座，场景 6）：FrequencyWords 英文词频（D-018，CC BY-SA 4.0）前 10000 词 + 人工大小写补丁表（D-019，`data/patches/en-capitals.tsv`，专名/缩写原形如 `iPhone`/`API`/`QQ`，命令两可词保留小写）+ 人工排除清单（`data/patches/en-exclude.tsv`，中文人名音译噪声词，防 `zh` 等拼音声母前缀被英文组污染）+ CC-CEDICT 英文侧纯单词补充（D-001），共 15534 条；小写 ASCII 查键有序二分 + 前缀区段扫描 `en_words_with_prefix`，按 freq_rank 组内排序、上限截断；生成脚本 `scripts/build-en-words.ps1` 可复现并 rustfmt（T-064）
+- 中英混输引擎（场景 6，FR-030/FR-031）：整串不可按拼音切分时才查英文表，命中以 `EnWord` 来源组追加主候选之后（D-10：可切分串 `nihao`/`wo` 不介入、`pytho`→python、`iphon`→iPhone 保留原形、`api`→API；未命中回落缩写路径 `yyds` 不回退；候选 `pinyin=None` 不进用户词学习）；邮箱/网址格式态（core `email_url` 模块）：组合串含 `@`（前有字符）→ `.com/.cn/.net` 补全至多 3 条，`www.`/`http(s)://` 前缀（大小写不敏感）→ `.com/.cn/.org` 补全至多 3 条，已含 `.` 完整串直通；`handle_format_char` 组合态收 `@ . / :`、空闲态放行宿主（TSF 键路归 T-066）（T-065）
 
 ## [0.1.0] - 2026-09-23
 

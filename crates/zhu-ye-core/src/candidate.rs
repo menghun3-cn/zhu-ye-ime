@@ -31,6 +31,10 @@ pub enum CandidateSource {
     Symbol,
     /// emoji 推荐候选（FR-029，场景7）；追在拼音候选尾部，UI 不新增标签。
     Emoji,
+    /// 英文词候选（FR-030，场景6）；主候选之后追加英文组，UI 不新增标签。
+    EnWord,
+    /// 邮箱/网址补全候选（FR-031，场景6）；组合态 @/www./http 前缀路径，UI 不新增标签。
+    EmailUrl,
 }
 
 /// 输入法候选。
@@ -306,6 +310,21 @@ pub const INITIAL_MIN_LEN: usize = 2;
 pub const INITIAL_MAX_LEN: usize = 4;
 /// 简拼展开组合最多进入结果的总条数。
 pub const INITIAL_COMPLETION_CAP: usize = 32;
+
+/// 英文词候选（FR-030，场景6）：查 `EN_WORDS` 前缀得到英文原形候选组。
+///
+/// 只在调用方确认"整串不可按拼音切分"后调用（与缩写路径同判定，见 `is_abbreviation_input`）；
+/// 候选**不参与默认排序竞争**，由调用方追加到主候选尾部（D-10），`score` 取组内负排名
+/// 仅用于保持 freq_rank 升序展示。`pinyin = None`，不进入用户词学习。
+#[must_use]
+pub fn en_word_candidates(input: &str, limit: usize) -> Vec<Candidate> {
+    crate::en_words::en_words_with_prefix(input, limit)
+        .into_iter()
+        .map(|(word, rank)| {
+            Candidate::new(word, -(rank as i64)).with_source(CandidateSource::EnWord)
+        })
+        .collect()
+}
 
 /// 简拼/首字母候选（M7，FR-023，方案设计 12.2）。
 ///
