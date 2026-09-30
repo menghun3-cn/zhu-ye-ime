@@ -24,10 +24,12 @@ pub mod user_store;
 pub use ai::{AiService, OfflineAiService};
 pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
 pub use candidate::{
-    abbreviation_candidates, append_abbreviation_group, generate_candidates,
-    generate_prefix_candidates, is_abbreviation_input, merge_candidate_groups, Candidate,
-    CandidateSorter, PrefixCandidateGroups, RankingConfig, RankingContext, RankingModel,
-    StaticRankingModel, ABBREVIATION_MIN_LEN,
+    abbreviation_candidates, append_abbreviation_group, corrected_candidates, generate_candidates,
+    generate_prefix_candidates, initial_candidates, is_abbreviation_input, merge_candidate_groups,
+    sentence_candidates, Candidate, CandidateSorter, PrefixCandidateGroups, RankingConfig,
+    RankingContext, RankingModel, StaticRankingModel, ABBREVIATION_MIN_LEN, BEAM_WIDTH,
+    BEAM_WORD_CAP, CORRECTION_VARIANT_CAP, INITIAL_COMPLETION_CAP, INITIAL_MAX_LEN,
+    INITIAL_MIN_LEN, SENTENCE_MAX_WORD_CHARS, SENTENCE_TOP_N,
 };
 pub use composite::{any_exists, pack_path, CompositeDictionary};
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
@@ -42,7 +44,10 @@ pub use pack_config::{
     BASE_PACK_FILE_NAME, CONFIG_FORMAT_VERSION, DISTRIBUTABLE_PACK_IDS, KNOWN_PACK_IDS,
     PACKS_DIR_NAME,
 };
-pub use pinyin::{segment_all, valid_prefix, FullPinyinScheme, PinyinScheme, SyllableTable};
+pub use pinyin::{
+    fuzzy_variants, initial_syllables, segment_all, valid_prefix, FullPinyinScheme, PinyinScheme,
+    SyllableTable,
+};
 pub use translate::{InMemoryTranslator, TranslationDirection, Translator};
 pub use update::{
     apply_release, apply_staged, backup_path, clean_staging, find_outdated, rollback_pack,

@@ -217,11 +217,92 @@ pub fn segment_all(table: &SyllableTable, input: &str) -> Vec<Vec<String>> {
     std::mem::take(&mut dp[length])
 }
 
+/// 简拼展开用的静态常用音节表（M7，方案设计 12.2.2）。
+///
+/// 每个 ASCII 小写字母对应 4-6 个**最常用**音节，按口语常用度人工排序。
+/// 属于语言事实（非版权数据），自研维护；某字母无表项表示该首字母无简拼。
+pub const INITIAL_SYLLABLE_TABLE: &[(char, &[&str])] = &[
+    ('b', &["bu", "ba", "bei", "ben", "bian"]),
+    ('c', &["ci", "ca", "cai", "can", "ceng", "cuo"]),
+    ('d', &["de", "da", "dan", "dang", "di", "duo"]),
+    ('e', &["er", "en"]),
+    ('f', &["fa", "fan", "fang", "fei", "fu"]),
+    ('g', &["ge", "gao", "gan", "gang", "gong", "guo"]),
+    ('h', &["hao", "he", "hai", "han", "hui", "hua"]),
+    ('j', &["ji", "jian", "jiang", "jiao", "jin", "ju"]),
+    ('k', &["ke", "kai", "kan", "kuai", "kuang"]),
+    ('l', &["li", "la", "lai", "lan", "liang", "lu"]),
+    ('m', &["me", "ma", "ming", "men", "mu"]),
+    ('n', &["ni", "na", "nan", "neng", "nian"]),
+    ('o', &["ou"]),
+    ('p', &["pa", "pai", "pan", "pi", "ping"]),
+    ('q', &["qi", "qian", "qing", "qiu", "qu"]),
+    ('r', &["ran", "ren", "ri", "rong", "ru"]),
+    ('s', &["shi", "shen", "sheng", "sui", "suo"]),
+    ('t', &["ta", "tian", "tiao", "ting", "tong", "tu"]),
+    ('w', &["wo", "wei", "wan", "wang", "wen"]),
+    ('x', &["xi", "xia", "xian", "xiang", "xiao", "xin"]),
+    ('y', &["you", "yi", "yan", "yang", "yao", "yu"]),
+    ('z', &["zuo", "zi", "zai", "zan", "zheng", "zhi"]),
+];
+
+/// 查询简拼音节表中某字母对应的常用音节；未收录返回空切片。
+#[must_use]
+pub fn initial_syllables(initial: char) -> &'static [&'static str] {
+    INITIAL_SYLLABLE_TABLE
+        .iter()
+        .find(|(letter, _)| *letter == initial)
+        .map_or(&[], |(_, syllables)| *syllables)
+}
+
+/// 模糊音等价映射组（M7，方案设计 12.3.2）。
+///
+/// 每组内音节片段互为模糊等价；映射为语言事实（方言习惯），自研维护。
+/// 覆盖文档枚举的 7 组：zh↔z、ch↔c、sh↔s、n↔l、f↔h、an↔ang、en↔eng、in↔ing。
+pub const FUZZY_GROUPS: &[&[&str]] = &[
+    &["zh", "z"],
+    &["ch", "c"],
+    &["sh", "s"],
+    &["n", "l"],
+    &["f", "h"],
+    &["an", "ang"],
+    &["en", "eng"],
+    &["in", "ing"],
+];
+
+/// 返回单个音节的全部模糊变体（不含原音节本身），顺序确定。
+///
+/// 只做**单处替换**：对每个映射组，若音节内含该组任一片段，替换为组内
+/// 其余片段生成变体。例如 `zong` → `zhong`（zh↔z）、`lan` → `nan`（n↔l）。
+/// 音节不含任何映射片段时返回空。
+#[must_use]
+pub fn fuzzy_variants(syllable: &str) -> Vec<String> {
+    let mut variants = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for group in FUZZY_GROUPS {
+        for piece in *group {
+            if !syllable.contains(piece) {
+                continue;
+            }
+            for alternative in *group {
+                if alternative == piece {
+                    continue;
+                }
+                let variant = syllable.replace(piece, alternative);
+                if seen.insert(variant.clone()) {
+                    variants.push(variant);
+                }
+            }
+        }
+    }
+    variants
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        segment_all, valid_prefix, FullPinyinScheme, PinyinScheme, SyllableTable,
-        STANDARD_SYLLABLES,
+        fuzzy_variants, initial_syllables, segment_all, valid_prefix, FullPinyinScheme,
+        PinyinScheme, SyllableTable, INITIAL_SYLLABLE_TABLE, STANDARD_SYLLABLES,
     };
     use std::collections::HashSet;
 
@@ -327,5 +408,62 @@ mod tests {
         let scheme = FullPinyinScheme;
         assert_eq!(scheme.normalize("NiHao"), "nihao");
         assert_eq!(scheme.normalize("zhongguo"), "zhongguo");
+    }
+
+    #[test]
+    fn 简拼音节表覆盖常用首字母且音节合法() {
+        let table = table();
+        let mut letters: Vec<char> = INITIAL_SYLLABLE_TABLE
+            .iter()
+            .map(|(letter, _)| *letter)
+            .collect();
+        letters.sort_unstable();
+        let expected: Vec<char> = "bcdefghjklmnopqrstwxyz".chars().collect();
+        assert_eq!(letters, expected, "简拼表应覆盖全部常用声母字母");
+        for (letter, syllables) in INITIAL_SYLLABLE_TABLE {
+            assert!(!syllables.is_empty(), "字母 {letter} 不应有空音节列表");
+            assert!(
+                syllables
+                    .iter()
+                    .all(|s| s.starts_with(*letter) && table.is_complete_syllable(s)),
+                "字母 {letter} 的音节必须以该字母开头且为合法音节"
+            );
+        }
+    }
+
+    #[test]
+    fn 简拼音节查询命中与未收录() {
+        assert!(initial_syllables('n').contains(&"ni"));
+        assert!(initial_syllables('h').contains(&"hao"));
+        assert!(initial_syllables('w').contains(&"wei"));
+        assert!(initial_syllables('v').is_empty(), "未收录字母返回空");
+        assert!(initial_syllables('0').is_empty(), "非字母返回空");
+    }
+
+    #[test]
+    fn 模糊变体单处替换且确定() {
+        let mut variants = fuzzy_variants("zong");
+        variants.sort();
+        assert!(variants.contains(&"zhong".to_owned()));
+        assert!(!variants.contains(&"zong".to_owned()), "不含原音节本身");
+        assert!(variants.len() <= 4, "单处替换变体数受控");
+
+        let lan = fuzzy_variants("lan");
+        assert!(lan.contains(&"nan".to_owned()), "n↔l 映射：lan→nan");
+
+        let feng = fuzzy_variants("feng");
+        assert!(feng.contains(&"heng".to_owned()), "f↔h 映射：feng→heng");
+        assert!(!feng.contains(&"feng".to_owned()));
+
+        let first = fuzzy_variants("zong");
+        let second = fuzzy_variants("zong");
+        assert_eq!(first, second, "变体枚举确定");
+    }
+
+    #[test]
+    fn 无映射音节无变体() {
+        assert!(fuzzy_variants("wo").is_empty());
+        assert!(fuzzy_variants("duo").is_empty());
+        assert!(fuzzy_variants("").is_empty());
     }
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use std::path::Path;
 
-use zhu_ye_core::bigram::BigramModel;
+use zhu_ye_core::bigram::{BigramModel, EmptyBigramModel};
 use zhu_ye_core::candidate::{
     Candidate, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
 };
@@ -65,6 +65,9 @@ pub struct InputEngine {
     user_dictionary: UserDictionary,
     user_store: Option<UserDictStore>,
     ranking: Arc<dyn RankingModel>,
+    /// 整句 Beam Search（M7，FR-025）使用的 bigram 数据源；
+    /// 与排序模型通常共享同一份（modular 查询），无 bigram 时退化为 unigram 路径。
+    bigram: Arc<dyn BigramModel>,
     /// 当前候选页码，从 0 开始。
     page: usize,
     /// 当前层当前页内选中序号，从 0 开始；上下键移动，翻页后保持。
@@ -94,6 +97,32 @@ fn candidate_owned(candidate: &Candidate) -> CandidateSelection {
     }
 }
 
+/// 把「前组」（整句组）置于主候选之前；主候选与整句同文本时让位给前组。
+///
+/// 保持组间固定顺序（整句组在前），组内顺序不变；与 `append_group` 对称。
+fn prepend_group(front: Vec<Candidate>, main: Vec<Candidate>) -> Vec<Candidate> {
+    if front.is_empty() {
+        return main;
+    }
+    let front_texts: std::collections::HashSet<String> =
+        front.iter().map(|c| c.text.clone()).collect();
+    let mut merged = front;
+    merged.extend(main.into_iter().filter(|c| !front_texts.contains(&c.text)));
+    merged
+}
+
+/// 把「追加组」（纠错组）置于主候选之后；同文本主候选优先（纠错只是补充）。
+fn append_group(main: Vec<Candidate>, extra: Vec<Candidate>) -> Vec<Candidate> {
+    if extra.is_empty() {
+        return main;
+    }
+    let main_texts: std::collections::HashSet<String> =
+        main.iter().map(|c| c.text.clone()).collect();
+    let mut merged = main;
+    merged.extend(extra.into_iter().filter(|c| !main_texts.contains(&c.text)));
+    merged
+}
+
 impl InputEngine {
     /// 使用指定词典创建引擎；词典通过 trait 注入，未来可无缝切换 mmap 实现。
     #[must_use]
@@ -108,6 +137,7 @@ impl InputEngine {
             user_dictionary: UserDictionary::new(),
             user_store: None,
             ranking: Arc::new(StaticRankingModel::default()),
+            bigram: Arc::new(EmptyBigramModel),
             page: 0,
             selected_on_page: 0,
             layer: CandidateLayer::default(),
@@ -142,8 +172,14 @@ impl InputEngine {
     /// 使用指定词典与 bigram 数据创建引擎。
     #[must_use]
     pub fn with_bigram(dictionary: Arc<dyn Dictionary>, bigram: Arc<dyn BigramModel>) -> Self {
-        let ranking = Arc::new(StaticRankingModel::new(RankingConfig::default(), bigram));
-        Self::with_ranking(dictionary, ranking)
+        let ranking = Arc::new(StaticRankingModel::new(
+            RankingConfig::default(),
+            bigram.clone(),
+        ));
+        Self {
+            bigram,
+            ..Self::with_ranking(dictionary, ranking)
+        }
     }
 
     /// 使用指定词典与用户词持久化创建引擎；启动时加载，提交时自动记录并落盘。
@@ -188,10 +224,14 @@ impl InputEngine {
         bigram: Arc<dyn BigramModel>,
     ) -> Self {
         let user_dictionary = store.load().unwrap_or_default();
-        let ranking = Arc::new(StaticRankingModel::new(RankingConfig::default(), bigram));
+        let ranking = Arc::new(StaticRankingModel::new(
+            RankingConfig::default(),
+            bigram.clone(),
+        ));
         Self {
             user_dictionary,
             user_store: Some(store),
+            bigram,
             ..Self::with_ranking(dictionary, ranking)
         }
     }
@@ -607,12 +647,48 @@ impl InputEngine {
             let completed = self.ranking.rank(groups.completed, &context);
             self.candidates = zhu_ye_core::merge_candidate_groups(completions, completed);
         } else {
-            let candidates = zhu_ye_core::generate_candidates(
-                &self.table,
-                self.dictionary.as_ref(),
-                &self.composing,
-            );
-            self.candidates = self.ranking.rank(candidates, &context);
+            let composing = self.composing.clone();
+            let dictionary = self.dictionary.clone();
+            // 主路径：整词优先，无整词时按音节切分组合（现状行为保持）。
+            let candidates =
+                zhu_ye_core::generate_candidates(&self.table, dictionary.as_ref(), &composing);
+            let direct_hit = !dictionary.lookup(&composing).is_empty();
+            let mut main = self.ranking.rank(candidates, &context);
+
+            // M7 整句（FR-025）：无整词命中时用 beam 搜索全局最优整句，
+            // 作为独立「整句组」置于主候选最前（长串用户意图即整句）。
+            if !direct_hit {
+                let sentences = zhu_ye_core::sentence_candidates(
+                    &self.table,
+                    dictionary.as_ref(),
+                    self.bigram.as_ref(),
+                    &composing,
+                );
+                if !sentences.is_empty() {
+                    main = prepend_group(sentences, main);
+                }
+                // M7 纠错（FR-024）：无整词命中时追加「纠错组」（模糊替换/少字母补全），
+                // 置于主候选之后、缩写组之前；同文本主候选优先。
+                let corrected =
+                    zhu_ye_core::corrected_candidates(&self.table, dictionary.as_ref(), &composing);
+                if !corrected.is_empty() {
+                    main = append_group(main, corrected);
+                }
+            }
+
+            // M7 简拼（FR-023）：输入不可切分、主候选仍为空且为 2-4 位纯字母时，
+            // 按首字母展开整词作为主候选（防污染：仅此场景介入）。
+            if main.is_empty()
+                && composing.chars().count() >= 2
+                && composing.chars().all(|c| c.is_ascii_lowercase())
+                && segment_all(&self.table, &composing).is_empty()
+            {
+                let initials = zhu_ye_core::initial_candidates(dictionary.as_ref(), &composing);
+                if !initials.is_empty() {
+                    main = self.ranking.rank(initials, &context);
+                }
+            }
+            self.candidates = main;
         }
         // M6-R 缩写路径（FR-016/FR-017）：整串完全不可切分且长度达标时，
         // 查询网络语包并把命中候选作为**独立组追加在尾部**，不参与默认排序竞争。
@@ -1242,6 +1318,10 @@ mod tests {
         type_text(&mut engine, "nihao");
         engine.page_size = 1;
         engine.next_page();
+        // 连续退格：`niha` 时 M7 纠错提供「你好/尼好」候选（2 页，page=1 仍有效，
+        // 预期改进）；退到 `ni`（整词单候选）时页码必须收敛归零。
+        engine.handle_backspace();
+        engine.handle_backspace();
         engine.handle_backspace();
         assert_eq!(engine.page(), 0);
     }
@@ -1327,5 +1407,138 @@ mod tests {
         let view = engine.candidate_ui_view();
         assert_eq!(view.composition, "nihao");
         assert!(view.items.is_empty());
+    }
+
+    // ---- 输入体验优化（M7，FR-023 至 FR-025）引擎集成 ----
+
+    fn m7_engine() -> InputEngine {
+        use zhu_ye_core::dict::{DictionaryEntry, InMemoryDictionary};
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你好", "nihao", 100),
+            DictionaryEntry::new("我", "wo", 88),
+            DictionaryEntry::new("想", "xiang", 75),
+            DictionaryEntry::new("明天", "mingtian", 72),
+            DictionaryEntry::new("去", "qu", 68),
+            DictionaryEntry::new("北京", "beijing", 95),
+            DictionaryEntry::new("为什么", "weishenme", 80),
+            DictionaryEntry::new("中国", "zhongguo", 92),
+            DictionaryEntry::new("难", "nan", 50),
+        ]);
+        InputEngine::with_bigram(Arc::new(dictionary), Arc::new(InMemoryBigramModel::new()))
+    }
+
+    #[test]
+    fn 简拼nh出你好主候选() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "nh");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(texts.contains(&"你好"), "nh 简拼应出你好，实际: {texts:?}");
+    }
+
+    #[test]
+    fn 简拼wsm出为什么() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "wsm");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(
+            texts.contains(&"为什么"),
+            "wsm 简拼应出为什么，实际: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 可切分输入不触发简拼噪声() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "wo");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        // wo 应正常出整词候选「我」，不被简拼展开污染成「我哦」等。
+        assert!(
+            engine.candidates().iter().any(|c| c.text == "我"),
+            "wo 应出我，实际: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 模糊音zongguo纠错出中国() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "zongguo");
+        let candidates = engine.candidates();
+        let zhongguo = candidates
+            .iter()
+            .find(|c| c.text == "中国")
+            .expect("zongguo 应纠错出中国");
+        assert_eq!(
+            zhongguo.source,
+            zhu_ye_core::candidate::CandidateSource::Corrected
+        );
+    }
+
+    #[test]
+    fn 少字母niha纠错出你好() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "niha");
+        let candidates = engine.candidates();
+        assert!(
+            candidates.iter().any(|c| c.text == "你好"),
+            "niha 应补全 ha→hao 出你好，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 整词命中不触发纠错() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "nihao");
+        let candidates = engine.candidates();
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Corrected),
+            "nihao 整词命中不应出现纠错候选"
+        );
+    }
+
+    #[test]
+    fn 整句输入整句组居首() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "woxiangmingtianqubeijing");
+        let candidates = engine.candidates();
+        assert!(
+            candidates.iter().any(|c| c.text == "我想明天去北京"),
+            "长串应出整句，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        // 整句组置于列表前部（首个候选即整句）。
+        assert_eq!(candidates[0].text, "我想明天去北京", "整句应居首");
+    }
+
+    #[test]
+    fn 短串不启动整句路径() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "nihao");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["你好"], "nihao 整词命中，候选只有整词本身");
     }
 }

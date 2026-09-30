@@ -68,8 +68,13 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw '真实词典 smoke 未通过'
         }
+        Write-Host "M7 输入体验优化断言组（$RealDictionaryPath）"
+        & $binPath --m7 $RealDictionaryPath
+        if ($LASTEXITCODE -ne 0) {
+            throw 'M7 输入体验优化断言组未通过'
+        }
     } else {
-        Write-Host '未发现真实词典 data\artifacts\real.zyct，跳过真实数据 smoke（seed 回归已通过）'
+        Write-Host '未发现真实词典 data\artifacts\real.zyct，跳过真实数据 smoke 与 M7 断言（seed 回归已通过）'
     }
 } finally {
     Pop-Location

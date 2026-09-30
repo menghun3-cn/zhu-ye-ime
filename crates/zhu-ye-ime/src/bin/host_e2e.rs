@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use zhu_ye_core::bigram::InMemoryBigramModel;
+use zhu_ye_core::bigram::{BigramModel, InMemoryBigramModel};
 use zhu_ye_core::candidate::CandidateSource;
 use zhu_ye_core::dict::Dictionary;
 use zhu_ye_core::translate::{TranslationDirection, Translator};
@@ -64,6 +64,14 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             };
             run_real_smoke(Path::new(path))
+        }
+        // M7 输入体验优化验收（FR-023 至 FR-025，验收标准 8.1）：简拼/模糊音纠错/整句。
+        Some("--m7") => {
+            let Some(path) = args.get(1).map(String::as_str) else {
+                eprintln!("用法: host-e2e --m7 <词典文件>");
+                return ExitCode::from(2);
+            };
+            run_m7_checks(Path::new(path))
         }
         // M6-R 多包回归：--multi-pack <base.zyct> <pack1.zyct> [pack2.zyct ...]
         Some("--multi-pack") => {
@@ -255,6 +263,351 @@ fn run_real_smoke(path: &Path) -> ExitCode {
         runner.fail("真实词典 smoke 执行", &error);
     }
     runner.finish()
+}
+
+/// M7 体验优化验收入口（命令 `--m7 <词典文件>`）。
+fn run_m7_checks(path: &Path) -> ExitCode {
+    let mut runner = Runner {
+        passed: 0,
+        failed: 0,
+    };
+    if let Err(error) = m7_checks(path, &mut runner) {
+        runner.fail("M7 体验优化检查执行", &error);
+    }
+    runner.finish()
+}
+
+/// M7 体验优化断言组（验收标准 8.1，FR-023 至 FR-025）。
+///
+/// 独立词典加载（简拼/纠错需要真实词库）；全组行为与 TSF 无关，主机侧即可断言。
+fn m7_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
+    let file = DictionaryFile::open(path)
+        .map_err(|error| format!("打开 M7 验收词典 {path:?} 失败: {error}"))?;
+    let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
+    let mut engine = InputEngine::with_bigram(dictionary.clone(), Arc::new(file.clone()));
+    engine.handle_escape();
+
+    let type_and = |engine: &mut InputEngine, text: &str| {
+        engine.handle_escape();
+        type_text(engine, text);
+        engine
+            .candidates()
+            .iter()
+            .map(|c| (c.text.clone(), c.source.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    // ---- FR-023 简拼/首字母输入 ----
+    let nh = type_and(&mut engine, "nh");
+    if nh.iter().any(|(text, _)| text == "你好") {
+        runner.pass("简拼 nh 展开 ni+hao 命中你好");
+    } else {
+        runner.fail("简拼 nh 展开 ni+hao 命中你好", &format!("实际: {nh:?}"));
+    }
+    // 排序竞争：简拼候选参与正常排序（高频你好在前，不强制排序仅包含）。
+    if nh
+        .iter()
+        .position(|(text, _)| text == "你好")
+        .is_some_and(|index| index < 3)
+    {
+        runner.pass("简拼候选参与排序且高频词靠前");
+    } else {
+        runner.fail("简拼候选参与排序且高频词靠前", &format!("实际: {nh:?}"));
+    }
+
+    // 三字简拼：词典含该词时才断言（验收注「词典含该词时」）。
+    if !dictionary.lookup("weishenme").is_empty() {
+        let wsm = type_and(&mut engine, "wsm");
+        if wsm.iter().any(|(text, _)| text == "为什么") {
+            runner.pass("三字简拼 wsm 命中为什么");
+        } else {
+            runner.fail("三字简拼 wsm 命中为什么", &format!("实际: {wsm:?}"));
+        }
+    } else {
+        println!("[SKIP] 三字简拼 wsm：词典无「为什么」词条");
+    }
+
+    // 单字符防泛滥：n、w 均不触发（长度 <2）。
+    if type_and(&mut engine, "n").is_empty() && type_and(&mut engine, "w").is_empty() {
+        runner.pass("单字符不触发简拼");
+    } else {
+        runner.fail("单字符不触发简拼", "n/w 不应产出简拼候选");
+    }
+    // 超长不触发（长度 >4）：简拼函数级直接拒绝（引擎对超长串走既有前缀/全拼路径）。
+    if zhu_ye_core::initial_candidates(dictionary.as_ref(), "abcdefg").is_empty() {
+        runner.pass("超长纯字母不触发简拼");
+    } else {
+        runner.fail(
+            "超长纯字母不触发简拼",
+            "initial_candidates 对 5 位以上应返回空",
+        );
+    }
+    // 可切分防污染：wo/nihao 保持正常全拼路径，且无 Corrected 噪声。
+    let wo = type_and(&mut engine, "wo");
+    let nihao = type_and(&mut engine, "nihao");
+    let wo_ok = wo.iter().any(|(text, _)| text == "我");
+    let wo_clean = wo
+        .iter()
+        .all(|(_, source)| *source != CandidateSource::Corrected);
+    let nihao_ok = nihao.iter().any(|(text, _)| text == "你好");
+    if wo_ok && wo_clean && nihao_ok {
+        runner.pass("可切分串走正常全拼且无简拼/纠错噪声");
+    } else {
+        runner.fail(
+            "可切分串走正常全拼且无简拼/纠错噪声",
+            &format!("wo={wo:?} nihao={nihao:?}"),
+        );
+    }
+    // 含数字不触发简拼：引擎层数字键不进组合（T-049 由 TSF 层接管数字缩写语义，
+    // M6-R 多包断言已覆盖 `u1s1` 缩写出「永远的神」），简拼函数自身也拒绝数字。
+    engine.handle_escape();
+    let digit_rejected = !engine.handle_letter('1');
+    let initials_reject_digit =
+        zhu_ye_core::initial_candidates(dictionary.as_ref(), "u1s1").is_empty();
+    if digit_rejected && initials_reject_digit {
+        runner.pass("含数字不触发简拼（数字缩写键语义保留）");
+    } else {
+        runner.fail(
+            "含数字不触发简拼（数字缩写键语义保留）",
+            &format!(
+                "digit_rejected={digit_rejected} initials_reject_digit={initials_reject_digit}"
+            ),
+        );
+    }
+    // 确定性：同一串连续两次候选完全一致。
+    type_and(&mut engine, "nh");
+    let first = type_and(&mut engine, "nh");
+    let second = type_and(&mut engine, "nh");
+    if first == second {
+        runner.pass("简拼候选确定性");
+    } else {
+        runner.fail("简拼候选确定性", "两次结果不一致");
+    }
+
+    // ---- FR-024 模糊音与纠错 ----
+    let zongguo = type_and(&mut engine, "zongguo");
+    match zongguo
+        .iter()
+        .find(|(text, _)| text == "中国")
+        .map(|(_, source)| source)
+    {
+        Some(CandidateSource::Corrected) => {
+            runner.pass("模糊替换 zong→zhong 出中国且标注 Corrected");
+        }
+        other => runner.fail(
+            "模糊替换 zong→zhong 出中国且标注 Corrected",
+            &format!("实际: {other:?} 全量: {zongguo:?}"),
+        ),
+    }
+    // 模糊音映射 n↔l：`lan` 在真实词库整词命中（烂/蓝/兰…），按设计不触发纠错
+    // （O-03 无整词命中才纠错），此处验证映射与无词场景的函数级行为。
+    let lan_dictionary =
+        InMemoryDictionary::from_entries(vec![DictionaryEntry::new("男", "nan", 600)]);
+    let corrected_lan = zhu_ye_core::corrected_candidates(
+        &zhu_ye_core::SyllableTable::standard(),
+        &lan_dictionary,
+        "lan",
+    );
+    let has_lan_mapping = corrected_lan
+        .iter()
+        .any(|c| c.text == "男" && c.source == CandidateSource::Corrected);
+    if has_lan_mapping {
+        runner.pass("模糊替换 n↔l：lan→nan 映射生效");
+    } else {
+        runner.fail(
+            "模糊替换 n↔l：lan→nan 映射生效",
+            &format!("实际: {corrected_lan:?}"),
+        );
+    }
+    let lan = type_and(&mut engine, "lan");
+    if lan
+        .iter()
+        .all(|(_, source)| *source != CandidateSource::Corrected)
+    {
+        runner.pass("lan 整词命中时纠错不介入（防漂移）");
+    } else {
+        runner.fail(
+            "lan 整词命中时纠错不介入（防漂移）",
+            &format!("实际: {lan:?}"),
+        );
+    }
+    let niha = type_and(&mut engine, "niha");
+    if niha
+        .iter()
+        .any(|(text, source)| text == "你好" && *source == CandidateSource::Corrected)
+    {
+        runner.pass("少字母补全 ha→hao：niha 出你好");
+    } else {
+        runner.fail("少字母补全 ha→hao：niha 出你好", &format!("实际: {niha:?}"));
+    }
+    // 少字母补全二：`zhonggu` 在真实词库因「中古」整词命中不触发纠错（设计内），
+    // 函数级构造无「中古」词的词典验证 gu→guo 补全逻辑本身。
+    let zhonggu_dictionary =
+        InMemoryDictionary::from_entries(vec![DictionaryEntry::new("中国", "zhongguo", 5000)]);
+    let corrected_zhonggu = zhu_ye_core::corrected_candidates(
+        &zhu_ye_core::SyllableTable::standard(),
+        &zhonggu_dictionary,
+        "zhonggu",
+    );
+    let has_zhonggu = corrected_zhonggu
+        .iter()
+        .any(|c| c.text == "中国" && c.source == CandidateSource::Corrected);
+    if has_zhonggu {
+        runner.pass("少字母补全 gu→guo：zhonggu 出中国");
+    } else {
+        runner.fail(
+            "少字母补全 gu→guo：zhonggu 出中国",
+            &format!("实际: {corrected_zhonggu:?}"),
+        );
+    }
+    let zhonggu = type_and(&mut engine, "zhonggu");
+    if zhonggu
+        .iter()
+        .all(|(_, source)| *source != CandidateSource::Corrected)
+    {
+        runner.pass("zhonggu 整词命中（中古）时不叠加纠错");
+    } else {
+        runner.fail(
+            "zhonggu 整词命中（中古）时不叠加纠错",
+            &format!("实际: {zhonggu:?}"),
+        );
+    }
+    if nihao
+        .iter()
+        .all(|(_, source)| *source != CandidateSource::Corrected)
+    {
+        runner.pass("整词命中不触发纠错（nihao）");
+    } else {
+        runner.fail("整词命中不触发纠错（nihao）", &format!("实际: {nihao:?}"));
+    }
+    // 不可切分串不触发纠错：`ww` 会走简拼（wowo 窝窝）但不得出现 Corrected 来源。
+    let ww = type_and(&mut engine, "ww");
+    if ww
+        .iter()
+        .all(|(_, source)| *source != CandidateSource::Corrected)
+    {
+        runner.pass("不可切分串不触发纠错");
+    } else {
+        runner.fail("不可切分串不触发纠错", &format!("实际: {ww:?}"));
+    }
+    // 排位：zongguo 的中国候选位于主候选（非 Corrected）之后。
+    let zongguo_order = type_and(&mut engine, "zongguo");
+    let main_last = zongguo_order
+        .iter()
+        .rposition(|(_, source)| *source != CandidateSource::Corrected);
+    let corrected_first = zongguo_order
+        .iter()
+        .position(|(_, source)| *source == CandidateSource::Corrected);
+    match (main_last, corrected_first) {
+        (Some(main), Some(corrected)) if corrected >= main => {
+            runner.pass("纠错组追加于主候选之后");
+        }
+        _ => runner.fail(
+            "纠错组追加于主候选之后",
+            &format!("实际顺序: {zongguo_order:?}"),
+        ),
+    }
+    type_and(&mut engine, "zongguo");
+    let first = type_and(&mut engine, "zongguo");
+    let second = type_and(&mut engine, "zongguo");
+    if first == second {
+        runner.pass("纠错候选确定性");
+    } else {
+        runner.fail("纠错候选确定性", "两次结果不一致");
+    }
+
+    // ---- FR-025 整句/长句输入 ----
+    let sentence: Vec<String> = type_and(&mut engine, "woxiangmingtianqubeijing")
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    if sentence
+        .first()
+        .is_some_and(|text| text == "我想明天去北京")
+    {
+        runner.pass("整句 beam 出我想明天去北京且居首");
+    } else {
+        // 失败时输出 beam 顶层句子的分数，便于定位真实词库评分行为。
+        let scored = zhu_ye_core::sentence_candidates(
+            &zhu_ye_core::SyllableTable::standard(),
+            dictionary.as_ref(),
+            &file,
+            "woxiangmingtianqubeijing",
+        )
+        .into_iter()
+        .map(|c| format!("{}@{}", c.text, c.score))
+        .collect::<Vec<_>>();
+        // 诊断：尾部选择相关的 bigram 证据与整词词频。
+        let diag = [
+            ("我→想", file.frequency("我", "想")),
+            ("想→明天", file.frequency("想", "明天")),
+            ("明天→去", file.frequency("明天", "去")),
+            ("去→北京", file.frequency("去", "北京")),
+            ("去→被", file.frequency("去", "被")),
+            ("被→敬", file.frequency("被", "敬")),
+            ("想→名", file.frequency("想", "名")),
+            ("名→天", file.frequency("名", "天")),
+        ]
+        .into_iter()
+        .map(|(pair, freq)| format!("{pair}={freq}"))
+        .collect::<Vec<_>>();
+        let beijing = dictionary
+            .lookup("beijing")
+            .iter()
+            .take(3)
+            .map(|e| format!("beijing={}@{}", e.word, e.frequency))
+            .collect::<Vec<_>>();
+        let jing = dictionary
+            .lookup("jing")
+            .iter()
+            .take(3)
+            .map(|e| format!("jing={}@{}", e.word, e.frequency))
+            .collect::<Vec<_>>();
+        runner.fail(
+            "整句 beam 出我想明天去北京且居首",
+            &format!(
+                "实际前 5: {:?}；beam 分数: {:?}；bigram: {:?}；lookup: {:?}",
+                sentence.iter().take(5).collect::<Vec<_>>(),
+                scored,
+                diag,
+                [beijing, jing].concat()
+            ),
+        );
+    }
+    // 短串不启用整句：nihao 走现状（第一个候选仍是整词你好）。
+    let nihao_short: Vec<String> = type_and(&mut engine, "nihao")
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    if nihao_short.first().is_some_and(|text| text == "你好") {
+        runner.pass("短串不启用整句路径（行为不漂移）");
+    } else {
+        runner.fail(
+            "短串不启用整句路径（行为不漂移）",
+            &format!("实际: {nihao_short:?}"),
+        );
+    }
+    // 回退安全：长串总能产出 ≥1 候选且不崩溃。
+    let fallback = type_and(&mut engine, "woshiyigexuesheng");
+    if !fallback.is_empty() {
+        runner.pass("长串回退保底非空候选");
+    } else {
+        runner.fail("长串回退保底非空候选", "woshiyigexuesheng 无候选");
+    }
+    let sentence_first: Vec<String> = type_and(&mut engine, "woxiangmingtianqubeijing")
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    let sentence_second: Vec<String> = type_and(&mut engine, "woxiangmingtianqubeijing")
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    if sentence_first == sentence_second {
+        runner.pass("整句候选确定性");
+    } else {
+        runner.fail("整句候选确定性", "两次结果不一致");
+    }
+    Ok(())
 }
 
 fn seed_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
