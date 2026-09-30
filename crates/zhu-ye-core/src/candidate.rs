@@ -23,6 +23,8 @@ pub enum CandidateSource {
     Slang,
     /// 模糊音/纠错候选（M7，FR-024）；UI 不新增标签，仅 source 区分。
     Corrected,
+    /// 上屏联想候选（T-058/T-059，场景5）；仅出现在空闲候选窗，UI 不新增标签。
+    Suggestion,
 }
 
 /// 输入法候选。

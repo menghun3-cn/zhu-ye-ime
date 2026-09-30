@@ -80,6 +80,9 @@ pub struct InputEngine {
     cached_translation_candidates: Vec<Candidate>,
     /// 网络语包（M6-R）：提供字母/数字缩写查询；未启用时为 `None`。
     slang: Option<Arc<dyn Dictionary>>,
+    /// 上屏联想候选（T-058/T-059，场景5）：拼音为空且刚上屏过一个词时，
+    /// 由 bigram 后继检索生成（Top5 整词 + 两词短语）；输入字母即清空。
+    suggestion: Vec<String>,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -144,6 +147,7 @@ impl InputEngine {
             page_size: CANDIDATE_PAGE_SIZE,
             cached_translation_candidates: Vec::new(),
             slang: None,
+            suggestion: Vec::new(),
         }
     }
 
@@ -268,6 +272,19 @@ impl InputEngine {
         &self.composing
     }
 
+    /// 上屏联想是否处于活跃态（T-059，场景5）：
+    /// 拼音为空且刚上屏过一个词、bigram 后继检索出联想候选。
+    #[must_use]
+    pub fn suggestion_active(&self) -> bool {
+        self.composing.is_empty() && !self.suggestion.is_empty()
+    }
+
+    /// 当前上屏联想候选列表（T-059）；非联想态为空。
+    #[must_use]
+    pub fn suggestion_list(&self) -> &[String] {
+        &self.suggestion
+    }
+
     /// 参与上下文排序的前词；由最近一次成功提交维护。
     #[must_use]
     pub fn previous_word(&self) -> Option<&str> {
@@ -364,6 +381,8 @@ impl InputEngine {
         }
         self.composing.push(c);
         self.refresh_candidates();
+        // 输入字母即退出上屏联想态（T-059）。
+        self.suggestion.clear();
         self.page = 0;
         true
     }
@@ -396,8 +415,15 @@ impl InputEngine {
     }
 
     /// 空格提交当前选中行候选（T-039：上下键移动选中行后回车/空格跟随后者）；
-    /// 无候选时按设计上屏拼音原文。
+    /// 上屏联想态提交选中联想词（T-059）；无候选时按设计上屏拼音原文。
     pub fn handle_space(&mut self) -> Option<String> {
+        if self.suggestion_active() {
+            let index = self
+                .selected_on_page
+                .min(self.suggestion.len().saturating_sub(1));
+            let text = self.suggestion.get(index)?.clone();
+            return self.commit_suggestion(text);
+        }
         if !self.is_active() {
             return None;
         }
@@ -410,7 +436,7 @@ impl InputEngine {
         self.commit_candidate(candidate_owned(candidate))
     }
 
-    /// Enter 上屏拼音原文。
+    /// Enter 上屏拼音原文；上屏联想态 Enter 不作为联想提交（放行给宿主换行）。
     pub fn handle_enter(&mut self) -> Option<String> {
         if !self.is_active() {
             return None;
@@ -418,20 +444,31 @@ impl InputEngine {
         let text = self.composing.clone();
         self.clear_composition();
         self.previous_word = None;
+        self.refresh_suggestion();
         Some(text)
     }
 
-    /// Esc 取消本次组合，不产生提交文本。
+    /// Esc 取消本次组合，不产生提交文本；上屏联想态 Esc 关闭联想窗。
     pub fn handle_escape(&mut self) -> bool {
+        if self.suggestion_active() {
+            self.suggestion.clear();
+            return true;
+        }
         if !self.is_active() {
             return false;
         }
         self.clear_composition();
+        self.refresh_suggestion();
         true
     }
 
     /// 按 1-9 选择当前层第 `index` 个候选（index 从 0 开始）；越界时回退到拼音原文。
+    /// 上屏联想态按数字选择联想词，越界不产生提交（防吞键）。
     pub fn select_index(&mut self, index: usize) -> Option<String> {
+        if self.suggestion_active() {
+            let text = self.suggestion.get(index)?.clone();
+            return self.commit_suggestion(text);
+        }
         if !self.is_active() {
             return None;
         }
@@ -483,9 +520,15 @@ impl InputEngine {
         self.clear_composition();
     }
 
-    /// 为 TSF 层提供提交预览：空格应上屏的当前选中行候选。
+    /// 为 TSF 层提供提交预览：空格应上屏的当前选中行候选（含上屏联想，T-059）。
     #[must_use]
     pub fn preview_space(&self) -> Option<String> {
+        if self.suggestion_active() {
+            let index = self
+                .selected_on_page
+                .min(self.suggestion.len().saturating_sub(1));
+            return Some(self.suggestion[index].clone());
+        }
         self.is_active().then(|| {
             let index = self
                 .selected_on_page
@@ -497,9 +540,12 @@ impl InputEngine {
         })
     }
 
-    /// 为 TSF 层提供数字选择预览：第 index 个候选或拼音原文。
+    /// 为 TSF 层提供数字选择预览：第 index 个候选或拼音原文（含上屏联想，T-059）。
     #[must_use]
     pub fn preview_selection(&self, index: usize) -> Option<String> {
+        if self.suggestion_active() {
+            return self.suggestion.get(index).cloned();
+        }
         self.is_active().then(|| {
             self.visible_candidates()
                 .get(index)
@@ -522,9 +568,32 @@ impl InputEngine {
     }
 
     /// 构建候选窗快照；候选窗渲染与 TSF 联动都从这里取数。
+    ///
+    /// 上屏联想态（T-059）：组合串为空、联想候选置入 items，
+    /// 候选窗因此继续显示（TSF 层以 `items` 是否为空判断是否隐藏）。
     #[must_use]
     pub fn candidate_ui_view(&self) -> CandidateUiView {
         let page_size = self.page_size.max(1);
+        if self.suggestion_active() {
+            return CandidateUiView {
+                composition: String::new(),
+                pinyin_hint: String::new(),
+                page: 0,
+                page_size,
+                page_count: 1,
+                selected: self.selected_on_page,
+                translation_mode: false,
+                items: self
+                    .suggestion
+                    .iter()
+                    .map(|text| CandidateUiItem {
+                        text: text.clone(),
+                        translation: String::new(),
+                        source: zhu_ye_core::candidate::CandidateSource::Suggestion,
+                    })
+                    .collect(),
+            };
+        }
         if self.mode != InputMode::Chinese {
             return CandidateUiView {
                 composition: self.composing.clone(),
@@ -574,13 +643,40 @@ impl InputEngine {
         }
         self.clear_composition();
         self.previous_word = Some(text.clone());
+        // 上屏后立即按新前词重算联想候选（T-059：连续联想）。
+        self.refresh_suggestion();
         Some(text)
     }
 
     fn commit_raw(&mut self, text: String) -> Option<String> {
         self.clear_composition();
         self.previous_word = None;
+        self.refresh_suggestion();
         Some(text)
+    }
+
+    /// 提交上屏联想候选（T-059）：作为新的前词继续联想，不记录用户词
+    /// （联想候选无可靠音节映射，避免污染用户词库）。
+    fn commit_suggestion(&mut self, text: String) -> Option<String> {
+        self.suggestion.clear();
+        self.previous_word = Some(text.clone());
+        self.refresh_suggestion();
+        Some(text)
+    }
+
+    /// 按 bigram 后继检索刷新上屏联想候选（T-058 检索层入口）。
+    ///
+    /// 联想只在"拼音为空且刚上屏过一个词"时出现；输入串非空或前词缺失即清空。
+    fn refresh_suggestion(&mut self) {
+        if !self.composing.is_empty() {
+            self.suggestion.clear();
+            return;
+        }
+        let Some(previous) = self.previous_word.as_deref() else {
+            self.suggestion.clear();
+            return;
+        };
+        self.suggestion = zhu_ye_core::suggestion_candidates(self.bigram.as_ref(), previous);
     }
 
     fn record_user_word(&mut self, text: &str, pinyin: &str) {
@@ -1101,6 +1197,91 @@ mod tests {
         assert_eq!(engine.handle_space().as_deref(), Some("你好"));
         type_text(&mut engine, "de");
         assert_eq!(engine.candidates()[0].text, "得");
+    }
+
+    fn suggestion_engine() -> InputEngine {
+        let mut bigram = InMemoryBigramModel::new();
+        bigram.insert("你好", "世界", 120);
+        bigram.insert("你好", "中国", 80);
+        bigram.insert("世界", "你好", 90);
+        bigram.insert("世界", "中国", 60);
+        bigram.insert("中国", "你好", 50);
+        bigram.insert("中国", "世界", 40);
+        InputEngine::with_bigram(m1_seed_dictionary(), Arc::new(bigram))
+    }
+
+    fn commit_nihao(engine: &mut InputEngine) {
+        type_text(engine, "nihao");
+        assert_eq!(engine.handle_space().as_deref(), Some("你好"));
+    }
+
+    #[test]
+    fn 上屏后出现联想且数字选择上屏并继续联想() {
+        let mut engine = suggestion_engine();
+        commit_nihao(&mut engine);
+        assert!(engine.suggestion_active());
+        let ui = engine.candidate_ui_view();
+        // 联想态组合串为空，候选窗 items 置入联想列表（T-059 显示依据）。
+        assert_eq!(ui.composition, "");
+        let texts: Vec<&str> = ui.items.iter().map(|i| i.text.as_str()).collect();
+        // 整词（世界/中国）在前，短语（你好+后继）置后，符合 T-058 候选契约。
+        assert_eq!(texts, vec!["世界", "中国", "你好世界", "你好中国"]);
+        assert_eq!(engine.previous_word(), Some("你好"));
+
+        // 数字选择联想词上屏，并以联想词为前词继续联想。
+        assert_eq!(engine.select_index(1).as_deref(), Some("中国"));
+        assert!(engine.suggestion_active());
+        assert_eq!(engine.previous_word(), Some("中国"));
+        let after: Vec<String> = engine
+            .candidate_ui_view()
+            .items
+            .iter()
+            .map(|i| i.text.clone())
+            .collect();
+        assert_eq!(after, vec!["你好", "世界", "中国你好", "中国世界"]);
+    }
+
+    #[test]
+    fn 输入字母退出联想态() {
+        let mut engine = suggestion_engine();
+        commit_nihao(&mut engine);
+        assert!(engine.suggestion_active());
+        type_text(&mut engine, "n");
+        assert!(!engine.suggestion_active());
+        assert_eq!(engine.composing(), "n");
+    }
+
+    #[test]
+    fn 联想态回车与越界数字不产生提交esc关闭联想() {
+        let mut engine = suggestion_engine();
+        commit_nihao(&mut engine);
+        // 越界数字（第 9 条不存在）放行，不吞键也不上屏空串。
+        assert_eq!(engine.select_index(9), None);
+        assert!(engine.suggestion_active());
+        // 联想态 Enter 放行给宿主（不提交联想词）。
+        assert_eq!(engine.handle_enter(), None);
+        assert!(engine.suggestion_active());
+        // Esc 关闭联想窗。
+        assert!(engine.handle_escape());
+        assert!(!engine.suggestion_active());
+    }
+
+    #[test]
+    fn 联想态空格上屏当前选中联想词() {
+        let mut engine = suggestion_engine();
+        commit_nihao(&mut engine);
+        assert_eq!(engine.handle_space().as_deref(), Some("世界"));
+        assert!(engine.suggestion_active());
+        assert_eq!(engine.previous_word(), Some("世界"));
+    }
+
+    #[test]
+    fn 无bigram数据时上屏不联想() {
+        let mut engine =
+            InputEngine::with_bigram(m1_seed_dictionary(), Arc::new(InMemoryBigramModel::new()));
+        commit_nihao(&mut engine);
+        assert!(!engine.suggestion_active());
+        assert!(engine.candidate_ui_view().items.is_empty());
     }
 
     #[test]

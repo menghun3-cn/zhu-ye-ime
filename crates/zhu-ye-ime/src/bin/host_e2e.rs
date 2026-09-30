@@ -73,6 +73,14 @@ fn main() -> ExitCode {
             };
             run_m7_checks(Path::new(path))
         }
+        // T-059 上屏联想验收（场景5）：上屏后空闲候选窗展示 bigram 后继联想。
+        Some("--m8") => {
+            let Some(path) = args.get(1).map(String::as_str) else {
+                eprintln!("用法: host-e2e --m8 <词典文件>");
+                return ExitCode::from(2);
+            };
+            run_m8_checks(Path::new(path))
+        }
         // M6-R 多包回归：--multi-pack <base.zyct> <pack1.zyct> [pack2.zyct ...]
         Some("--multi-pack") => {
             let paths: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
@@ -644,6 +652,107 @@ fn m7_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     } else {
         runner.fail("反查中文键不越界（T-056 回归）", "en_to_zh(谁) 预期 None");
     }
+    Ok(())
+}
+
+/// T-059 上屏联想验收入口（命令 `--m8 <词典文件>`）。
+fn run_m8_checks(path: &Path) -> ExitCode {
+    let mut runner = Runner {
+        passed: 0,
+        failed: 0,
+    };
+    if let Err(error) = m8_checks(path, &mut runner) {
+        runner.fail("上屏联想检查执行", &error);
+    }
+    runner.finish()
+}
+
+/// T-059 上屏联想断言组（场景5：上屏后空闲候选窗展示 bigram 后继联想）。
+///
+/// 独立词典加载，与 TSF 无关，主机侧即可断言：上屏进入联想态、
+/// 整词在前短语置后、数字选择续联、输入字母退出、Esc 关闭。
+fn m8_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
+    let file = DictionaryFile::open(path)
+        .map_err(|error| format!("打开联想验收词典 {path:?} 失败: {error}"))?;
+    let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
+    let mut engine = InputEngine::with_bigram(dictionary.clone(), Arc::new(file.clone()));
+
+    // 上屏「今天」，随后进入联想态。
+    type_text(&mut engine, "jintian");
+    let committed = engine.handle_space();
+    if committed.as_deref() != Some("今天") {
+        engine.handle_escape();
+        return Err(format!("上屏 jintian 未得到「今天」: {committed:?}"));
+    }
+    if !engine.suggestion_active() {
+        return Err("上屏后未进入联想态".to_owned());
+    }
+    runner.pass("上屏「今天」后进入联想态");
+    let list: Vec<String> = engine.suggestion_list().to_vec();
+    // T-058 实测契约：今天→的/是/早上/我/在（整词），今日短语置后。
+    if list.first().map(String::as_str) == Some("的") {
+        runner.pass("联想首条为高频后继「的」");
+    } else {
+        runner.fail("联想首条为高频后继「的」", &format!("实际: {list:?}"));
+    }
+    let first_five = list.iter().take(5).collect::<Vec<_>>();
+    if first_five.iter().all(|w| !w.starts_with("今天"))
+        && list.iter().any(|w| w.starts_with("今天"))
+    {
+        runner.pass("联想整词在前、短语（今天+后继）置后");
+    } else {
+        runner.fail(
+            "联想整词在前、短语（今天+后继）置后",
+            &format!("实际: {list:?}"),
+        );
+    }
+    // 联想态候选窗快照：组合串为空但 items 携带联想列表（TSF 显示依据）。
+    let view = engine.candidate_ui_view();
+    if view.composition.is_empty() && !view.items.is_empty() {
+        runner.pass("联想态候选窗快照组合串为空且 items 非空");
+    } else {
+        runner.fail(
+            "联想态候选窗快照组合串为空且 items 非空",
+            &format!("composition={:?} items={:?}", view.composition, view.items),
+        );
+    }
+
+    // 数字选择第一条联想「的」上屏：作为新前词继续联想（连续联想）。
+    let picked = engine.select_index(0);
+    if picked.as_deref() != Some("的") {
+        return Err(format!("选择联想首条未上屏「的」: {picked:?}"));
+    }
+    if engine.suggestion_active() && !engine.suggestion_list().is_empty() {
+        runner.pass("选择联想词上屏并继续联想（前词更新为「的」）");
+    } else {
+        runner.fail(
+            "选择联想词上屏并继续联想（前词更新为「的」）",
+            "「的」的后继在真实语料中应非空",
+        );
+    }
+    // Esc 关闭联想窗。
+    if engine.handle_escape() && !engine.suggestion_active() {
+        runner.pass("Esc 关闭联想窗");
+    } else {
+        runner.fail("Esc 关闭联想窗", "联想态 Esc 应清空联想列表");
+    }
+
+    // 再上屏一次，用输入字母验证退出联想（回到正常输入路径）。
+    type_text(&mut engine, "jintian");
+    engine.handle_space();
+    if !engine.suggestion_active() {
+        return Err("第二次上屏后未进入联想态".to_owned());
+    }
+    type_text(&mut engine, "n");
+    if !engine.suggestion_active() && engine.composing() == "n" {
+        runner.pass("输入字母退出联想态回到组合输入");
+    } else {
+        runner.fail(
+            "输入字母退出联想态回到组合输入",
+            "字母应清空联想并进入拼音组合",
+        );
+    }
+    engine.handle_escape();
     Ok(())
 }
 
