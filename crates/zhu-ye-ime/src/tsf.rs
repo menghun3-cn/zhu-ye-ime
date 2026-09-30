@@ -42,7 +42,8 @@ use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
     ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfKeyEventSink,
     ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
-    ITfTextInputProcessor_Impl, ITfThreadMgr, TF_ES_READWRITE, TF_ES_SYNC, TF_IAS_QUERYONLY,
+    ITfTextInputProcessor_Impl, ITfThreadMgr, TF_DEFAULT_SELECTION, TF_ES_READWRITE, TF_ES_SYNC,
+    TF_IAS_QUERYONLY, TF_SELECTION,
 };
 use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
@@ -481,15 +482,25 @@ fn plan_action(
             if engine.mode() != InputMode::Chinese {
                 return None;
             }
+            let index = usize::from(digit as u8).checked_sub(usize::from(b'1'));
+            // T-059：上屏联想态数字键直接选择联想候选；越界放行给宿主
+            // （不吞键、不上屏空串）。
+            if engine.suggestion_active() {
+                return index
+                    .filter(|i| *i < engine.suggestion_list().len())
+                    .map(KeyAction::Select);
+            }
             if should_compose_digit(engine, digit) {
                 return Some(KeyAction::Digit(digit));
             }
-            let index = usize::from(digit as u8).checked_sub(usize::from(b'1'));
             match index {
                 Some(index) if engine.is_active() => Some(KeyAction::Select(index)),
                 _ => None,
             }
         }
+        // T-059：上屏联想态空格提交选中联想词、Esc 关闭联想窗；
+        // 其余功能键（Enter/Backspace/翻页/选择）放行给宿主。
+        KeyAction::Space | KeyAction::Escape if engine.suggestion_active() => Some(action),
         KeyAction::ToggleMode if !engine.is_active() => Some(action),
         KeyAction::ToggleMode => None,
         _ if engine.is_active() => Some(action),
@@ -644,16 +655,21 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
 
 /// 用引擎最新状态刷新候选窗。`edit` 提供编辑会话内的上下文以计算组合区坐标。
 ///
-/// T-031：组合串非空即显示候选窗；无候选词时只画页眉条（组合串与拼音提示），
-/// 仅当组合串为空（上屏/取消后）才隐藏窗口。
+/// T-031：组合串非空即显示候选窗；无候选词时只画页眉条（组合串与拼音提示）。
+/// T-059：上屏联想态（组合串为空但联想 items 非空）也显示候选窗，定位在
+/// 文档插入点（selection 顶部）；仅当组合串为空且无任何候选时才隐藏窗口。
 fn refresh_candidate_window(state: &Rc<Mutex<EngineState>>, edit: Option<(&ITfContext, u32)>) {
     let view = state.lock().unwrap().engine.candidate_ui_view();
-    if view.composition.is_empty() {
-        debug_log("zhu-ye: cand-hide (no composition)");
+    if view.composition.is_empty() && view.items.is_empty() {
+        debug_log("zhu-ye: cand-hide (no composition, no items)");
         state.lock().unwrap().candidate_window.hide();
         return;
     }
-    let placement = edit.and_then(|(context, ec)| composition_placement(state, context, ec));
+    let placement = if view.composition.is_empty() {
+        edit.and_then(|(context, ec)| selection_placement(context, ec))
+    } else {
+        edit.and_then(|(context, ec)| composition_placement(state, context, ec))
+    };
     debug_log(&format!(
         "zhu-ye: cand-show items={} first={:?}",
         view.visible_items().len(),
@@ -675,6 +691,31 @@ fn composition_placement(
     let composition = state.lock().unwrap().composition.clone()?;
     let view = unsafe { context.GetActiveView() }.ok()?;
     let range = unsafe { composition.GetRange() }.ok()?;
+    let mut rect = RECT::default();
+    let mut clipped = BOOL(0);
+    unsafe {
+        view.GetTextExt(ec, &range, &mut rect, &mut clipped).ok()?;
+    }
+    Some(CandidateWindowPlacement {
+        anchor: POINT {
+            x: rect.left,
+            y: rect.bottom,
+        },
+    })
+}
+
+/// 编辑会话内取文档当前插入点（selection 起点）在屏幕上的底部坐标，
+/// 用于上屏联想候选窗（T-059，组合串为空无组成区范围）定位。
+fn selection_placement(context: &ITfContext, ec: u32) -> Option<CandidateWindowPlacement> {
+    let mut selection = [TF_SELECTION::default()];
+    let mut fetched: u32 = 0;
+    unsafe {
+        context
+            .GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched)
+            .ok()?;
+    }
+    let range = (*selection[0].range).clone()?;
+    let view = unsafe { context.GetActiveView() }.ok()?;
     let mut rect = RECT::default();
     let mut clipped = BOOL(0);
     unsafe {

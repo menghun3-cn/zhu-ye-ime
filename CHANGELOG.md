@@ -16,6 +16,7 @@
 - host-e2e `--m7` 增 4 项多音/反查断言（26/26）（T-056）
 - 命中率评测基础设施：`zhu-ye-dict eval-set` 生成词样本（CEDICT∩wordfreq，2000 条）+ `zhu-ye-cli eval` 判定 Top1/Top3/整句并按词频分档、MISS 清单；评测集入库 `data/eval/`，real.zyct 首轮基准 Top1 84.7% / Top3 97.2% / 整句首候选 21.0%（两次运行一致）（T-057）
 - 上下文联想检索层：`BigramModel::successors` 前词后继检索（bigram 表按前词连续、下界二分+区段扫描，零格式改动）+ `suggestion_candidates` 联想候选（Top5 整词 + 至多 3 条"前词+后继"两词短语）；`zhu-ye-cli suggest` 抓手（T-058）
+- 上下文联想引擎承接：上屏后空闲候选窗展示 bigram 后继联想（连续联想）；联想态数字键直接上屏、空格选词、Esc 关闭、输入字母即退出回主输入路径；联想候选标注 Suggestion 来源；host-e2e `--m8` 真实词典断言组 7/7（T-059）
 
 ## [0.1.0] - 2026-09-23
 

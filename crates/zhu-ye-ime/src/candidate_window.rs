@@ -90,10 +90,11 @@ impl CandidateWindow {
         }
     }
 
-    /// 更新候选视图；组合串为空时隐藏窗口，否则创建（如未创建）并显示。
-    /// 无候选词时也显示——只画页眉条（组合串与拼音提示），见 T-031。
+    /// 更新候选视图；组合串为空且无任何候选项（含上屏联想，T-059）时隐藏窗口，
+    /// 否则创建（如未创建）并显示。无候选词时也显示——只画页眉条
+    /// （组合串与拼音提示），见 T-031。
     pub fn update(&mut self, view: CandidateUiView, placement: Option<CandidateWindowPlacement>) {
-        if view.composition.is_empty() {
+        if view.composition.is_empty() && view.items.is_empty() {
             self.hide();
             return;
         }
