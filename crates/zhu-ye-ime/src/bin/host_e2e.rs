@@ -607,6 +607,43 @@ fn m7_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     } else {
         runner.fail("整句候选确定性", "两次结果不一致");
     }
+    // ---- T-056 多音缺读补丁（谁 shui / 熟 shou）与反查越界回归 ----
+    let shui: Vec<String> = type_and(&mut engine, "shui")
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    if shui.iter().any(|text| text == "谁") {
+        runner.pass("多音补丁 shui 出谁（主诉修复）");
+    } else {
+        runner.fail("多音补丁 shui 出谁（主诉修复）", &format!("实际: {shui:?}"));
+    }
+    let shei: Vec<String> = type_and(&mut engine, "shei")
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    if shei.iter().any(|text| text == "谁") {
+        runner.pass("多音补丁不覆盖原读音 shei 仍出谁");
+    } else {
+        runner.fail(
+            "多音补丁不覆盖原读音 shei 仍出谁",
+            &format!("实际: {shei:?}"),
+        );
+    }
+    let shou: Vec<String> = type_and(&mut engine, "shou")
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    if shou.iter().any(|text| text == "熟") {
+        runner.pass("多音补丁 shou 出熟（口语音）");
+    } else {
+        runner.fail("多音补丁 shou 出熟（口语音）", &format!("实际: {shou:?}"));
+    }
+    // 反查越界回归：中文键（UTF-8 字节大于全部英文反查键）不得 panic。
+    if file.en_to_zh("谁").is_none() {
+        runner.pass("反查中文键不越界（T-056 回归）");
+    } else {
+        runner.fail("反查中文键不越界（T-056 回归）", "en_to_zh(谁) 预期 None");
+    }
     Ok(())
 }
 
