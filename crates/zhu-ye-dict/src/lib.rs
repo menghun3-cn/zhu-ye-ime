@@ -35,6 +35,9 @@ pub use m6::{
 pub mod slang;
 pub use slang::{build_slang, SlangReport};
 
+pub mod eval;
+pub use eval::{generate_word_eval_set, render_eval_set, EvalSample};
+
 /// 词典二进制格式版本。
 #[must_use]
 pub const fn dict_schema_version() -> u32 {

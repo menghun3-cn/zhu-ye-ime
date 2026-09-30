@@ -14,9 +14,10 @@ use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
     audit_coverage, build_base, build_manifest, build_pack, build_real_bigrams,
-    build_real_dictionary, build_slang, build_v2, dict_schema_version, load_frequency_map,
-    load_patch_table, load_standard_readings, parse_cedict_line, pipeline_status, polyphone_gaps,
-    seed_bigrams, seed_entries, source_check, split_pinyin_syllables, today, verify_manifest,
+    build_real_dictionary, build_slang, build_v2, dict_schema_version, generate_word_eval_set,
+    load_frequency_map, load_patch_table, load_standard_readings, parse_cedict_line,
+    pipeline_status, polyphone_gaps, render_eval_set, seed_bigrams, seed_entries, source_check,
+    split_pinyin_syllables, today, verify_manifest,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -45,6 +46,7 @@ fn run() -> Result<(), String> {
         Some("build") => build_command(args.get(2).map(PathBuf::from)),
         Some("import") => import_command(&args),
         Some("audit-polyphone") => audit_polyphone_command(&args),
+        Some("eval-set") => eval_set_command(&args),
         Some("inspect") => inspect_command(required_path(&args, 2)?),
         Some("verify") => verify_command(required_path(&args, 2)?),
         Some("source-check") => source_check_command(),
@@ -83,6 +85,9 @@ fn print_usage() {
     );
     println!(
         "  audit-polyphone <CC-CEDICT> <kTGHZ2013> [--freq 文件] [--min-freq N]  多音缺读审计（T-056）"
+    );
+    println!(
+        "  eval-set <CC-CEDICT> <词频> <输出.tsv> [--top N]  生成命中率评测词样本（T-057，N 默认 2000）"
     );
     println!(
         "  build-slang           构建网络语包（种子表 + 把关抽查，输出 slang.zyct 与 slang.gate.json）（M6）"
@@ -545,6 +550,53 @@ fn import_command(args: &[String]) -> Result<(), String> {
             unique_pairs = bigram_stats.unique_pairs
         );
     }
+    Ok(())
+}
+
+/// `eval-set <CC-CEDICT> <词频> <输出.tsv> [--top N]`：
+/// 生成命中率评测词样本（T-057，N 默认 2000）。
+///
+/// 清洗口径与 real dict 导入一致（纯 CJK、音节数==字数、无调归一化、同词保留首读），
+/// 输出 `词<TAB>拼音<TAB>词频` TSV，供 `zhu-ye-cli eval` 判定 Top1/Top3。
+fn eval_set_command(args: &[String]) -> Result<(), String> {
+    let cedict_path = required_path(args, 2)?;
+    let freq_path = required_path(args, 3)?;
+    let out_path = required_path(args, 4)?;
+    let mut top = 2000usize;
+    let mut index = 5;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--top" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--top 缺少数值参数".to_owned())?
+                    .parse::<usize>()
+                    .map_err(|_| "--top 必须是正整数".to_owned())?;
+                if value == 0 {
+                    return Err("--top 必须大于 0".to_owned());
+                }
+                top = value;
+                index += 1;
+            }
+            other => return Err(format!("未知参数: {other}")),
+        }
+    }
+
+    let cedict = std::fs::read_to_string(&cedict_path)
+        .map_err(|error| format!("读取 CEDICT 失败（{}）: {error}", cedict_path.display()))?;
+    let frequency = std::fs::read_to_string(&freq_path)
+        .map_err(|error| format!("读取词频失败（{}）: {error}", freq_path.display()))?;
+    let samples = generate_word_eval_set(&cedict, &frequency, top);
+    let rendered = render_eval_set(&samples);
+    std::fs::write(&out_path, rendered)
+        .map_err(|error| format!("写入评测样本失败（{}）: {error}", out_path.display()))?;
+    println!(
+        "评测词样本: 写入 {}，共 {} 条（--top {}，与 wordfreq 交集后按词频降序截取）",
+        out_path.display(),
+        samples.len(),
+        top
+    );
     Ok(())
 }
 

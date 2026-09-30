@@ -14,6 +14,7 @@
 - `zhu-ye-cli bench` 新增 M7 三路径延迟场景（简拼/纠错/整句，回填验收标准 8.5）（T-055）
 - 多音缺读补丁管线：`shui`→谁、`shou`→熟；构建期只增不改补读音词条（kTGHZ2013 规范读音对照 + 人工把关补丁表 + `import --polyphone` + `audit-polyphone` 审计命令）；修复 `dict -r` 中文键反查越界 panic（T-056）
 - host-e2e `--m7` 增 4 项多音/反查断言（26/26）（T-056）
+- 命中率评测基础设施：`zhu-ye-dict eval-set` 生成词样本（CEDICT∩wordfreq，2000 条）+ `zhu-ye-cli eval` 判定 Top1/Top3/整句并按词频分档、MISS 清单；评测集入库 `data/eval/`，real.zyct 首轮基准 Top1 84.7% / Top3 97.2% / 整句首候选 21.0%（两次运行一致）（T-057）
 
 ## [0.1.0] - 2026-09-23
 

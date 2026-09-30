@@ -26,6 +26,7 @@ fn main() {
         Some("user") => user_command(args),
         Some("dict") => dict_command(args),
         Some("rank") => rank_command(args),
+        Some("eval") => eval_command(args),
         _ => print_usage(),
     }
 }
@@ -42,6 +43,7 @@ fn print_usage() {
     println!("  dict <文件> -r 英文  加载 v2 词典并通过译文反查中文");
     println!("  dict update [check|apply|status]  触发词典更新器（M6-U，S-5）");
     println!("  rank <文件> <拼音> [前词]  加载 v2 词典并按上下文输出排序候选");
+    println!("  eval <文件> <词样本.tsv> [整句样本.tsv] [--out-miss 文件]  命中率评测（T-057）");
 }
 
 /// `dict update` 子命令（M6-U，S-5）：触发独立更新器 exe。
@@ -569,5 +571,242 @@ fn rank_command(args: Vec<String>) {
             }
         }
         Err(error) => println!("加载失败: {error}"),
+    }
+}
+
+/// `eval` 子命令（T-057）：命中率评测。
+///
+/// 词样本（`词<TAB>拼音<TAB>词频`）逐条走主候选路径（`generate_candidates` +
+/// `StaticRankingModel`，无前词冷启动），判定 Top1（首候选==目标词）与 Top3
+/// （前 3 位含目标词），并按词频分档报告 Top1 以暴露低频段退化；
+/// 整句样本（`期望句<TAB>拼音串`）走 `sentence_candidates` 整句路径，
+/// 判定首候选==期望句。Top1 未命中的词样本与整句未命中写入 MISS 文件。
+/// 全程确定性输入 -> 确定性输出（用户词典置空）。
+fn eval_command(args: Vec<String>) {
+    let Some(path) = args.get(2).map(String::as_str) else {
+        println!("用法: zhu-ye-cli eval <词典文件> <词样本.tsv> [整句样本.tsv] [--out-miss 文件]");
+        return;
+    };
+    let Some(word_set) = args.get(3).map(String::as_str) else {
+        println!("用法: zhu-ye-cli eval <词典文件> <词样本.tsv> [整句样本.tsv] [--out-miss 文件]");
+        return;
+    };
+    let rest = &args[4..];
+    let mut sentence_set: Option<String> = None;
+    let mut out_miss = "eval-miss.tsv".to_owned();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--out-miss" => {
+                i += 1;
+                if let Some(value) = rest.get(i) {
+                    out_miss = value.clone();
+                }
+            }
+            value if !value.starts_with("--") && sentence_set.is_none() => {
+                sentence_set = Some(value.to_owned());
+            }
+            other => {
+                println!("未知参数: {other}");
+                return;
+            }
+        }
+        i += 1;
+    }
+    let text = match std::fs::read_to_string(Path::new(word_set)) {
+        Ok(text) => text,
+        Err(error) => {
+            println!("读取词样本失败: {error}");
+            return;
+        }
+    };
+    let file = match DictionaryFile::open(Path::new(path)) {
+        Ok(file) => Arc::new(file),
+        Err(error) => {
+            println!("加载失败: {error}");
+            return;
+        }
+    };
+    let dictionary: Arc<dyn Dictionary> = file.clone();
+    let bigram: Arc<dyn BigramModel> = file.clone();
+    let model = StaticRankingModel::new(RankingConfig::default(), bigram.clone());
+    let user = UserDictionary::new();
+    let table = SyllableTable::standard();
+    let mut miss_lines: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut top1 = 0usize;
+    let mut top3 = 0usize;
+    let mut buckets: [BucketStats; 4] = [BucketStats::new(); 4];
+
+    // ---- 词样本：Top1 / Top3 + 词频分档 ----
+    for line in text.lines() {
+        let Some((word, pinyin, freq)) = parse_sample_line(line) else {
+            continue;
+        };
+        let candidates = generate_candidates(&table, dictionary.as_ref(), pinyin);
+        let ranked = model.rank(candidates, &RankingContext::new(None, &user));
+        total += 1;
+        let top1_hit = ranked.first().is_some_and(|c| c.text == word);
+        buckets[bucket_index(freq)].record(top1_hit);
+        if top1_hit {
+            top1 += 1;
+            top3 += 1;
+        } else {
+            if ranked.iter().take(3).any(|c| c.text == word) {
+                top3 += 1;
+            }
+            miss_lines.push(format!(
+                "词\t{word}\t{pinyin}\t{}",
+                ranked.first().map(|c| c.text.as_str()).unwrap_or("-")
+            ));
+        }
+    }
+    println!(
+        "词样本: N={total} Top1={:.1}% Top3={:.1}%",
+        100.0 * top1 as f64 / total.max(1) as f64,
+        100.0 * top3 as f64 / total.max(1) as f64
+    );
+    for (index, label) in BUCKET_LABELS.iter().enumerate() {
+        println!(
+            "  档位 {label}: n={} Top1={:.1}%",
+            buckets[index].total,
+            100.0 * buckets[index].top1 as f64 / buckets[index].total.max(1) as f64
+        );
+    }
+
+    // ---- 整句样本：首候选命中 ----
+    if let Some(sentence_set) = sentence_set {
+        let sentence_text = match std::fs::read_to_string(Path::new(&sentence_set)) {
+            Ok(text) => text,
+            Err(error) => {
+                println!("读取整句样本失败: {error}");
+                return;
+            }
+        };
+        let mut sentence_total = 0usize;
+        let mut sentence_hit = 0usize;
+        for line in sentence_text.lines() {
+            let Some((expected, pinyin)) = parse_sentence_line(line) else {
+                continue;
+            };
+            let candidates =
+                sentence_candidates(&table, dictionary.as_ref(), bigram.as_ref(), pinyin);
+            sentence_total += 1;
+            if candidates.first().is_some_and(|c| c.text == expected) {
+                sentence_hit += 1;
+            } else {
+                miss_lines.push(format!(
+                    "句\t{expected}\t{pinyin}\t{}",
+                    candidates.first().map(|c| c.text.as_str()).unwrap_or("-")
+                ));
+            }
+        }
+        println!(
+            "整句: N={sentence_total} 首候选命中={:.1}%",
+            100.0 * sentence_hit as f64 / sentence_total.max(1) as f64
+        );
+    }
+
+    match std::fs::write(Path::new(&out_miss), miss_lines.join("\n") + "\n") {
+        Ok(()) => println!("MISS 清单已写入 {out_miss}（{} 条）", miss_lines.len()),
+        Err(error) => println!("MISS 清单写入失败（{out_miss}）: {error}"),
+    }
+}
+
+/// 词频分档阈值与标签（≥1M / ≥100k / ≥10k / 其余）。
+const BUCKET_LABELS: [&str; 4] = ["≥1,000,000", "≥100,000", "≥10,000", "<10,000"];
+
+fn bucket_index(freq: u64) -> usize {
+    if freq >= 1_000_000 {
+        0
+    } else if freq >= 100_000 {
+        1
+    } else if freq >= 10_000 {
+        2
+    } else {
+        3
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BucketStats {
+    total: usize,
+    top1: usize,
+}
+
+impl BucketStats {
+    fn new() -> Self {
+        Self { total: 0, top1: 0 }
+    }
+
+    fn record(&mut self, top1_hit: bool) {
+        self.total += 1;
+        if top1_hit {
+            self.top1 += 1;
+        }
+    }
+}
+
+/// 解析词样本行 `词<TAB>拼音<TAB>词频`。
+fn parse_sample_line(line: &str) -> Option<(&str, &str, u64)> {
+    let mut parts = line.splitn(3, '\t');
+    let word = parts.next()?.trim();
+    let pinyin = parts.next()?.trim();
+    let freq = parts.next()?.trim().parse::<u64>().ok()?;
+    if word.is_empty() || pinyin.is_empty() {
+        None
+    } else {
+        Some((word, pinyin, freq))
+    }
+}
+
+/// 解析整句样本行 `期望句<TAB>拼音串`。
+fn parse_sentence_line(line: &str) -> Option<(&str, &str)> {
+    let mut parts = line.splitn(2, '\t');
+    let expected = parts.next()?.trim();
+    let pinyin = parts.next()?.trim();
+    if expected.is_empty() || pinyin.is_empty() {
+        None
+    } else {
+        Some((expected, pinyin))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_line_parses_valid_row() {
+        let (word, pinyin, freq) = parse_sample_line("你好\tnihao\t900").unwrap();
+        assert_eq!((word, pinyin, freq), ("你好", "nihao", 900));
+    }
+
+    #[test]
+    fn sample_line_rejects_malformed_rows() {
+        assert!(parse_sample_line("你好\tnihao").is_none()); // 缺词频
+        assert!(parse_sample_line("\tnihao\t900").is_none()); // 空词
+        assert!(parse_sample_line("你好\t\t900").is_none()); // 空拼音
+        assert!(parse_sample_line("你好\tnihao\tabc").is_none()); // 坏词频
+    }
+
+    #[test]
+    fn sentence_line_parses_valid_row() {
+        let (expected, pinyin) = parse_sentence_line("明天见\tmingtianjian").unwrap();
+        assert_eq!((expected, pinyin), ("明天见", "mingtianjian"));
+        assert!(parse_sentence_line("明天见").is_none()); // 缺拼音
+        assert!(parse_sentence_line("\tmingtianjian").is_none()); // 空期望句
+    }
+
+    #[test]
+    fn bucket_index_boundaries() {
+        assert_eq!(bucket_index(1_000_000), 0);
+        assert_eq!(bucket_index(u64::MAX), 0);
+        assert_eq!(bucket_index(999_999), 1);
+        assert_eq!(bucket_index(100_000), 1);
+        assert_eq!(bucket_index(99_999), 2);
+        assert_eq!(bucket_index(10_000), 2);
+        assert_eq!(bucket_index(9_999), 3);
+        assert_eq!(bucket_index(0), 3);
     }
 }
