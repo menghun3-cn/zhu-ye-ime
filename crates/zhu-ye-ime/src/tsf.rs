@@ -35,9 +35,9 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_0, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN,
-    VK_ESCAPE, VK_MENU, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE,
-    VK_TAB, VK_UP, VK_Z,
+    GetKeyState, VIRTUAL_KEY, VK_0, VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN,
+    VK_ESCAPE, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_RETURN,
+    VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
@@ -82,6 +82,9 @@ enum KeyAction {
     Letter(char),
     /// 数字进入组合串（T-049）：仅当它是某含数字缩写键的组成部分。
     Digit(char),
+    /// 邮箱/网址格式字符 `@`/`.`/`/`/`:` 进入组合串（场景6，T-065/T-066）：
+    /// 由 `plan_action` 按引擎 `is_format_key` 判定吃键，组合态进串、其余放行宿主。
+    FormatChar(char),
     /// 退格删除组合末尾字母。
     Backspace,
     /// 空格提交第一候选或拼音原文。
@@ -132,6 +135,7 @@ impl KeyAction {
             self,
             KeyAction::Letter(_)
                 | KeyAction::Digit(_)
+                | KeyAction::FormatChar(_)
                 | KeyAction::Backspace
                 | KeyAction::Space
                 | KeyAction::Enter
@@ -322,7 +326,13 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Result<BOOL> {
-        let action = plan_action(wparam, lparam, key_modifiers_down(), self.state());
+        let action = plan_action(
+            wparam,
+            lparam,
+            key_modifiers_down(),
+            shift_key_down(),
+            self.state(),
+        );
         debug_log(&format!(
             "zhu-ye: TestKeyDown 0x{:X} -> {:?}",
             wparam.0, action
@@ -340,7 +350,13 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     }
 
     fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
-        let Some(action) = plan_action(wparam, lparam, key_modifiers_down(), self.state()) else {
+        let Some(action) = plan_action(
+            wparam,
+            lparam,
+            key_modifiers_down(),
+            shift_key_down(),
+            self.state(),
+        ) else {
             return Ok(BOOL(0));
         };
 
@@ -437,7 +453,9 @@ fn is_repeat(lparam: LPARAM) -> bool {
 }
 
 /// 将虚拟键码归类为输入动作；与本输入法无关的键返回 `None`。
-fn classify_key(wparam: WPARAM, lparam: LPARAM) -> Option<KeyAction> {
+/// `shift` 为按键时刻 Shift 修饰是否按下（英文布局决定 `@`/`:` 等上档字符，
+/// 由调用方用真实键盘状态查询后传入，便于测试注入）。
+fn classify_key(wparam: WPARAM, lparam: LPARAM, shift: bool) -> Option<KeyAction> {
     let code = VIRTUAL_KEY(wparam.0 as u16).0;
     match code {
         code if (VK_A.0..=VK_Z.0).contains(&code) => {
@@ -446,6 +464,13 @@ fn classify_key(wparam: WPARAM, lparam: LPARAM) -> Option<KeyAction> {
                 char::from_u32(u32::from(letter)).unwrap(),
             ))
         }
+        // T-066：英文布局 Shift+2 = `@`（场景6 邮箱键路；是否进组合由
+        // `plan_action` 按引擎 `is_format_key` 判定，空闲态放行宿主）。
+        code if code == VK_2.0 && shift => Some(KeyAction::FormatChar('@')),
+        // T-066：英文布局 `:`（Shift+`;`，VK_OEM_1+Shift）；无 Shift 的 `;` 放行宿主。
+        code if code == VK_OEM_1.0 && shift => Some(KeyAction::FormatChar(':')),
+        // T-066：英文布局 `/`（VK_OEM_2，无 Shift；Shift+`/` 的 `?` 放行宿主）。
+        code if code == VK_OEM_2.0 && !shift => Some(KeyAction::FormatChar('/')),
         code if code == VK_BACK.0 => Some(KeyAction::Backspace),
         code if code == VK_SPACE.0 => Some(KeyAction::Space),
         code if code == VK_RETURN.0 => Some(KeyAction::Enter),
@@ -477,6 +502,11 @@ fn key_modifiers_down() -> bool {
     unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 || GetKeyState(i32::from(VK_MENU.0)) < 0 }
 }
 
+/// 判断 Shift 修饰键是否按下（英文布局上档字符判定，T-066）。
+fn shift_key_down() -> bool {
+    unsafe { GetKeyState(i32::from(VK_SHIFT.0)) < 0 }
+}
+
 /// 从 `ITfThreadMgr` 取出按键管理器。
 ///
 /// TSF 中 `ITfKeystrokeMgr` 由线程管理器对象一并实现，通过
@@ -500,12 +530,13 @@ fn plan_action(
     wparam: WPARAM,
     lparam: LPARAM,
     modifier_held: bool,
+    shift_held: bool,
     state: &Rc<Mutex<EngineState>>,
 ) -> Option<KeyAction> {
     if modifier_held {
         return None;
     }
-    let action = classify_key(wparam, lparam)?;
+    let action = classify_key(wparam, lparam, shift_held)?;
     let engine = &mut state.lock().unwrap().engine;
 
     // 数字/v 模式的自动退出：遇到与模式无关的键先退出模式，按键本身按常规处理
@@ -537,13 +568,25 @@ fn plan_action(
         }
         KeyAction::Letter(_) => (engine.mode() == InputMode::Chinese).then_some(action),
         KeyAction::Dot => {
-            // 仅数字格式模式内吃键（追加小数点），否则放行宿主直出标点。
+            // FR-027：数字格式模式内追加小数点（金额小数位）。
+            // T-066：否则组合态邮箱/网址上下文中 `.` 进组合串（按引擎 `is_format_key`），
+            // 普通拼音组合后的 `.` 照旧放行宿主直出标点。
             if engine.mode() == InputMode::Chinese && engine.digit_active() {
                 Some(KeyAction::BufferDigit('.'))
+            } else if engine.mode() == InputMode::Chinese && engine.is_format_key('.') {
+                Some(KeyAction::FormatChar('.'))
             } else {
                 None
             }
         }
+        // T-066：`@`/`:`/`/` 是否进组合串由引擎判定（组合态邮箱/网址上下文为真，
+        // 空闲态/普通拼音/英文模式为假并放行宿主）。
+        KeyAction::FormatChar(c)
+            if engine.mode() == InputMode::Chinese && engine.is_format_key(c) =>
+        {
+            Some(action)
+        }
+        KeyAction::FormatChar(_) => None,
         // T-049：数字键在中文模式下先判断是否为"含数字缩写键"的组成部分
         // （如 `996`/`u1s1`），是则进组合串；否则回落原有语义——
         // 有候选时选词（FR-006），空闲态数字进入数字格式模式（FR-027）。
@@ -664,7 +707,10 @@ fn apply_action(
     action: KeyAction,
 ) -> Result<()> {
     match action {
-        KeyAction::Letter(_) | KeyAction::Digit(_) | KeyAction::Backspace => {
+        KeyAction::Letter(_)
+        | KeyAction::Digit(_)
+        | KeyAction::FormatChar(_)
+        | KeyAction::Backspace => {
             let text = compose_text(state, action);
             update_composition(state, context, sink, ec, &text)?;
         }
@@ -764,7 +810,7 @@ fn compose_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
     let text = {
         let engine = &mut state.lock().unwrap().engine;
         match action {
-            KeyAction::Letter(c) | KeyAction::Digit(c) => {
+            KeyAction::Letter(c) | KeyAction::Digit(c) | KeyAction::FormatChar(c) => {
                 format!("{}{}", engine.composing(), c)
             }
             // FR-028：v 模式回退拼音时组合串为 `v`+字母（引擎尚未同步）。
@@ -821,6 +867,9 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
         }
         KeyAction::Digit(c) => {
             let _ = engine.handle_digit(c);
+        }
+        KeyAction::FormatChar(c) => {
+            let _ = engine.handle_format_char(c);
         }
         KeyAction::Backspace => {
             let _ = engine.handle_backspace();
@@ -1419,71 +1468,83 @@ mod tests {
     #[test]
     fn 键分类覆盖字母与功能键() {
         assert_eq!(
-            classify_key(WPARAM(VK_A.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_A.0 as usize), LPARAM(0), false),
             Some(KeyAction::Letter('a'))
         );
         assert_eq!(
-            classify_key(WPARAM(VK_Z.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_Z.0 as usize), LPARAM(0), false),
             Some(KeyAction::Letter('z'))
         );
         assert_eq!(
-            classify_key(WPARAM(VK_BACK.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_BACK.0 as usize), LPARAM(0), false),
             Some(KeyAction::Backspace)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_SPACE.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false),
             Some(KeyAction::Space)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_RETURN.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_RETURN.0 as usize), LPARAM(0), false),
             Some(KeyAction::Enter)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), false),
             Some(KeyAction::Escape)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_1.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_1.0 as usize), LPARAM(0), false),
             Some(KeyAction::Digit('1'))
         );
         assert_eq!(
-            classify_key(WPARAM(VK_9.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_9.0 as usize), LPARAM(0), false),
             Some(KeyAction::Digit('9'))
         );
         assert_eq!(
-            classify_key(WPARAM(VK_0.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_0.0 as usize), LPARAM(0), false),
             Some(KeyAction::Digit('0'))
         );
-        assert_eq!(classify_key(WPARAM(0x00A0), LPARAM(0)), None);
+        assert_eq!(classify_key(WPARAM(0x00A0), LPARAM(0), false), None);
     }
 
     #[test]
     fn 未激活组合时功能键放行字母进入引擎() {
         let state = Rc::new(Mutex::new(EngineState::new()));
         assert_eq!(
-            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Letter('a'))
         );
         assert_eq!(
-            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, false, &state),
             None
         );
         assert_eq!(
-            plan_action(WPARAM(VK_RETURN.0 as usize), LPARAM(0), false, &state),
+            plan_action(
+                WPARAM(VK_RETURN.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
             None
         );
         assert_eq!(
-            plan_action(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), false, &state),
+            plan_action(
+                WPARAM(VK_ESCAPE.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
             None
         );
 
         state.lock().unwrap().engine.handle_letter('a');
         assert_eq!(
-            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Space)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Select(0))
         );
     }
@@ -1495,20 +1556,20 @@ mod tests {
         let state = Rc::new(Mutex::new(EngineState::new()));
         // 空组合、无候选：进入数字格式模式（FR-027，引擎替代宿主直出数字）。
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::BufferDigit('1'))
         );
         // 有候选：数字仍是选词（FR-006 不回归）。
         state.lock().unwrap().engine.handle_letter('n');
         state.lock().unwrap().engine.handle_letter('i');
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Select(0))
         );
         // 英文模式下数字一律放行。
         state.lock().unwrap().engine.toggle_mode();
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
             None
         );
     }
@@ -1527,18 +1588,18 @@ mod tests {
 
         // `9` 是 `996` 的前缀：进组合串而非选词。
         assert_eq!(
-            plan_action(WPARAM(VK_9.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_9.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Digit('9'))
         );
         // `u` 是 `u1s1` 的前缀：字母照常进入组合。
         assert_eq!(
-            plan_action(WPARAM(0x55), LPARAM(0), false, &state),
+            plan_action(WPARAM(0x55), LPARAM(0), false, false, &state),
             Some(KeyAction::Letter('u'))
         );
         state.lock().unwrap().engine.handle_letter('u');
         // 组合 `u` 之后按 `1`：仍是 `u1s1` 前缀，进组合串。
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Digit('1'))
         );
     }
@@ -1547,20 +1608,23 @@ mod tests {
     fn ctrl或alt修饰键一律放行给宿主() {
         let state = Rc::new(Mutex::new(EngineState::new()));
         assert_eq!(
-            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), true, &state),
+            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), true, false, &state),
             None
         );
         assert_eq!(
-            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), true, &state),
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), true, false, &state),
             None
         );
 
         // 组合进行中按 Ctrl+S 等系统组合键也不被输入法吞掉。
         state.lock().unwrap().engine.handle_letter('n');
-        assert_eq!(plan_action(WPARAM(0x53), LPARAM(0), true, &state), None);
+        assert_eq!(
+            plan_action(WPARAM(0x53), LPARAM(0), true, false, &state),
+            None
+        );
         // 无修饰键时字母仍正常进入组合。
         assert_eq!(
-            plan_action(WPARAM(0x53), LPARAM(0), false, &state),
+            plan_action(WPARAM(0x53), LPARAM(0), false, false, &state),
             Some(KeyAction::Letter('s'))
         );
     }
@@ -1614,43 +1678,43 @@ mod tests {
     #[test]
     fn 键分类覆盖shift_tab与翻页键() {
         assert_eq!(
-            classify_key(WPARAM(VK_SHIFT.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), false),
             Some(KeyAction::ToggleMode)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_TAB.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_TAB.0 as usize), LPARAM(0), false),
             Some(KeyAction::ToggleLayer)
         );
         // T-033：`-` 上翻、`=`/`+` 下翻；逗号句号不再映射翻页。
         assert_eq!(
-            classify_key(WPARAM(VK_OEM_MINUS.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_OEM_MINUS.0 as usize), LPARAM(0), false),
             Some(KeyAction::PageUp)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0), false),
             Some(KeyAction::PageDown)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0), false),
             None
         );
         // FR-027：`.`（VK_OEM_PERIOD/小键盘 VK_DECIMAL）归为 Dot，
         // 数字格式模式内追加小数、模式外放行宿主。
         assert_eq!(
-            classify_key(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false),
             Some(KeyAction::Dot)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_DECIMAL.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_DECIMAL.0 as usize), LPARAM(0), false),
             Some(KeyAction::Dot)
         );
         // T-039：上下方向键移动页内选中行。
         assert_eq!(
-            classify_key(WPARAM(VK_UP.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_UP.0 as usize), LPARAM(0), false),
             Some(KeyAction::SelectUp)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_DOWN.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_DOWN.0 as usize), LPARAM(0), false),
             Some(KeyAction::SelectDown)
         );
     }
@@ -1658,11 +1722,11 @@ mod tests {
     #[test]
     fn shift长按重复事件不重复切换() {
         assert_eq!(
-            classify_key(WPARAM(VK_SHIFT.0 as usize), LPARAM(0)),
+            classify_key(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), false),
             Some(KeyAction::ToggleMode)
         );
         assert_eq!(
-            classify_key(WPARAM(VK_SHIFT.0 as usize), LPARAM(0x4000_0000)),
+            classify_key(WPARAM(VK_SHIFT.0 as usize), LPARAM(0x4000_0000), false),
             None
         );
         assert!(is_repeat(LPARAM(0x4000_0000)));
@@ -1673,16 +1737,16 @@ mod tests {
     fn shift与组合内功能键放行策略正确() {
         let state = Rc::new(Mutex::new(EngineState::new()));
         assert_eq!(
-            plan_action(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::ToggleMode)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, false, &state),
             None
         );
         // T-039：无组合时方向键放行给宿主（不干扰光标移动）。
         assert_eq!(
-            plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), false, false, &state),
             None
         );
 
@@ -1690,33 +1754,45 @@ mod tests {
         // Tab 与 `=`/`+` 翻页照常吃下。
         state.lock().unwrap().engine.handle_letter('n');
         assert_eq!(
-            plan_action(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), false, false, &state),
             None
         );
         assert_eq!(
-            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::ToggleLayer)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0), false, &state),
+            plan_action(
+                WPARAM(VK_OEM_PLUS.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
             Some(KeyAction::PageDown)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_OEM_MINUS.0 as usize), LPARAM(0), false, &state),
+            plan_action(
+                WPARAM(VK_OEM_MINUS.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
             Some(KeyAction::PageUp)
         );
         // T-039：组合活跃时方向键吃下并移动选中行；无组合时放行给宿主。
         assert_eq!(
-            plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::SelectDown)
         );
         assert_eq!(
-            plan_action(WPARAM(VK_UP.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_UP.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::SelectUp)
         );
         // 修饰键按下时放行（方向键不参与系统组合，这里保证 Ctrl/Alt 场景不吞键）。
         assert_eq!(
-            plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), true, &state),
+            plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), true, false, &state),
             None
         );
     }
@@ -1759,11 +1835,17 @@ mod tests {
         sync_engine(&state, KeyAction::ToggleMode);
         assert_eq!(state.lock().unwrap().engine.mode(), InputMode::English);
         assert_eq!(
-            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_TAB.0 as usize), LPARAM(0), false, false, &state),
             None
         );
         assert_eq!(
-            plan_action(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0), false, &state),
+            plan_action(
+                WPARAM(VK_OEM_PLUS.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
             None
         );
     }
@@ -1794,7 +1876,7 @@ mod tests {
         let state = Rc::new(Mutex::new(EngineState::new()));
         // 首数字键：启动数字模式并直插上屏（引擎累积），不再放行宿主。
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::BufferDigit('1'))
         );
         sync_engine(&state, KeyAction::BufferDigit('1'));
@@ -1802,12 +1884,12 @@ mod tests {
         assert!(state.lock().unwrap().engine.digit_active());
         // 后续数字继续累积。
         assert_eq!(
-            plan_action(WPARAM(VK_0.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_0.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::BufferDigit('0'))
         );
         // 不足 5 位时无格式候选，数字越界仍继续追加。
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::BufferDigit('1'))
         );
     }
@@ -1817,12 +1899,12 @@ mod tests {
         let state = digit_state();
         // 8 位日期、4 个格式候选：`1` 选中第 0 项走替换。
         assert_eq!(
-            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::SelectAndReplace(0))
         );
         // 越界数字（5 及以上）继续追加，不吞键。
         assert_eq!(
-            plan_action(WPARAM(VK_5.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_5.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::BufferDigit('5'))
         );
         // 替换预览：第 2 个候选 + 替换长度为 buffer UTF-16 长度（8 位日期）。
@@ -1844,14 +1926,20 @@ mod tests {
         }
         // `.` 在数字模式内追加（金额小数）。
         assert_eq!(
-            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false, &state),
+            plan_action(
+                WPARAM(VK_OEM_PERIOD.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
             Some(KeyAction::BufferDigit('.'))
         );
         sync_engine(&state, KeyAction::BufferDigit('.'));
         assert_eq!(state.lock().unwrap().engine.digit_text(), "12345.");
         // 数字模式退格删尾部位。
         assert_eq!(
-            plan_action(WPARAM(VK_BACK.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_BACK.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::DigitBackspace)
         );
         sync_engine(&state, KeyAction::DigitBackspace);
@@ -1863,12 +1951,18 @@ mod tests {
         let state = digit_state();
         // 空格 = 选中当前选中行（默认 0）。
         assert_eq!(
-            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::SelectAndReplace(0))
         );
         // Esc 退出数字模式（数字正文保留，引擎清 buffer）。
         assert_eq!(
-            plan_action(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), false, &state),
+            plan_action(
+                WPARAM(VK_ESCAPE.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
             Some(KeyAction::Escape)
         );
         sync_engine(&state, KeyAction::Escape);
@@ -1881,7 +1975,7 @@ mod tests {
         let state = digit_state();
         // 字母键：退出数字模式并把字母交给拼音（plan 已同步退出）。
         assert_eq!(
-            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Letter('a'))
         );
         assert!(!state.lock().unwrap().engine.digit_active());
@@ -1904,7 +1998,7 @@ mod tests {
     fn 空闲态v进入v模式组合态v走拼音() {
         let state = Rc::new(Mutex::new(EngineState::new()));
         assert_eq!(
-            plan_action(WPARAM(VK_V.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_V.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::VStart)
         );
         sync_engine(&state, KeyAction::VStart);
@@ -1923,20 +2017,20 @@ mod tests {
         sync_engine(&state, KeyAction::VStart);
         // 等待类型码：`x` 出数学符号组。
         assert_eq!(
-            plan_action(WPARAM(VK_X.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_X.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::VCode('x'))
         );
         sync_engine(&state, KeyAction::VCode('x'));
         assert_eq!(state.lock().unwrap().engine.v_symbol_count(), 9);
         // 已出组：数字 = 选择符号。
         assert_eq!(
-            plan_action(WPARAM(VK_2.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_2.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Select(1))
         );
         // `0` 无义：退出 v 模式并放行宿主。
         let zero = v_code_state();
         assert_eq!(
-            plan_action(WPARAM(VK_0.0 as usize), LPARAM(0), false, &zero),
+            plan_action(WPARAM(VK_0.0 as usize), LPARAM(0), false, false, &zero),
             None
         );
         assert!(!zero.lock().unwrap().engine.v_active());
@@ -1947,7 +2041,7 @@ mod tests {
         let state = v_code_state();
         // `i`（vi）回退拼音：动作是 VConsume，组合文本 = "vi"。
         assert_eq!(
-            plan_action(WPARAM(VK_I.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_I.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::VConsume('i'))
         );
         sync_engine(&state, KeyAction::VConsume('i'));
@@ -1961,13 +2055,13 @@ mod tests {
         let state = v_code_state();
         // 空格 = 选第 1 个符号（commit 直插后引擎提交符号）。
         assert_eq!(
-            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Space)
         );
         // Esc 退出 v 模式。
         let esc = v_code_state();
         assert_eq!(
-            plan_action(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), false, &esc),
+            plan_action(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), false, false, &esc),
             Some(KeyAction::Escape)
         );
         sync_engine(&esc, KeyAction::Escape);
@@ -1975,7 +2069,13 @@ mod tests {
         // Enter 与 v 模式无关：先退出 v 模式再放行宿主。
         let enter = v_code_state();
         assert_eq!(
-            plan_action(WPARAM(VK_RETURN.0 as usize), LPARAM(0), false, &enter),
+            plan_action(
+                WPARAM(VK_RETURN.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &enter
+            ),
             None
         );
         assert!(!enter.lock().unwrap().engine.v_active());
@@ -1985,7 +2085,7 @@ mod tests {
     fn v模式退格回退类型码() {
         let state = v_code_state();
         assert_eq!(
-            plan_action(WPARAM(VK_BACK.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_BACK.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::VBackspace)
         );
         sync_engine(&state, KeyAction::VBackspace);
@@ -2000,7 +2100,7 @@ mod tests {
     fn v模式再按v回退拼音不重复启动() {
         let state = v_code_state();
         assert_eq!(
-            plan_action(WPARAM(VK_V.0 as usize), LPARAM(0), false, &state),
+            plan_action(WPARAM(VK_V.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::VConsume('v'))
         );
         sync_engine(&state, KeyAction::VConsume('v'));
@@ -2012,9 +2112,185 @@ mod tests {
     fn 数字模式外小数点放行宿主() {
         let state = Rc::new(Mutex::new(EngineState::new()));
         assert_eq!(
-            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false, &state),
+            plan_action(
+                WPARAM(VK_OEM_PERIOD.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
             None,
             "非数字模式 `.` 放行给宿主直出标点"
+        );
+    }
+
+    /// 构造组合串为 `text` 的 state（T-066）：字母走 Letter、数字走 Digit、
+    /// 其余（`@`/`.`/`/`/`:`）走 FormatChar。
+    fn format_state(text: &str) -> Rc<Mutex<EngineState>> {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        for c in text.chars() {
+            let action = match c {
+                'a'..='z' => KeyAction::Letter(c),
+                '0'..='9' => KeyAction::Digit(c),
+                _ => KeyAction::FormatChar(c),
+            };
+            sync_engine(&state, action);
+        }
+        state
+    }
+
+    #[test]
+    fn shift加2归类at组合态进串空闲放行() {
+        // 键分类：Shift+2 => `@`；无 Shift 的 2 仍是数字。
+        assert_eq!(
+            classify_key(WPARAM(VK_2.0 as usize), LPARAM(0), true),
+            Some(KeyAction::FormatChar('@'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_2.0 as usize), LPARAM(0), false),
+            Some(KeyAction::Digit('2'))
+        );
+        // 组合态 Shift+2：吃键进 `@`。
+        let state = format_state("me");
+        assert_eq!(
+            plan_action(WPARAM(VK_2.0 as usize), LPARAM(0), false, true, &state),
+            Some(KeyAction::FormatChar('@'))
+        );
+        // 空闲态：放行宿主（`@` 不冷启动组合，D-11）。
+        let idle = Rc::new(Mutex::new(EngineState::new()));
+        assert_eq!(
+            plan_action(WPARAM(VK_2.0 as usize), LPARAM(0), false, true, &idle),
+            None
+        );
+        // 英文模式：放行宿主。
+        let english = Rc::new(Mutex::new(EngineState::new()));
+        sync_engine(&english, KeyAction::ToggleMode);
+        assert_eq!(
+            plan_action(WPARAM(VK_2.0 as usize), LPARAM(0), false, true, &english),
+            None
+        );
+    }
+
+    #[test]
+    fn at进串后邮箱态候选与提交预览() {
+        let state = format_state("me");
+        sync_engine(&state, KeyAction::FormatChar('@'));
+        assert_eq!(state.lock().unwrap().engine.composing(), "me@");
+        let candidates = state
+            .lock()
+            .unwrap()
+            .engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(candidates, vec!["me@.com", "me@.cn", "me@.net"]);
+        // 空格提交预览返回符合预期（邮箱态首候选）。
+        assert_eq!(
+            commit_text(&state, KeyAction::Space),
+            "me@.com",
+            "空格预览 = 邮箱补全首候选"
+        );
+    }
+
+    #[test]
+    fn 冒号与斜杠仅网址意图进串() {
+        // 键分类：Shift+`;` => `:`；`;` 放行宿主；`/` 无 Shift；Shift+`/`（`?`）放行。
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), true),
+            Some(KeyAction::FormatChar(':'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), false),
+            None
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_2.0 as usize), LPARAM(0), false),
+            Some(KeyAction::FormatChar('/'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_2.0 as usize), LPARAM(0), true),
+            None
+        );
+        // `http` 演进：`:` 与 `/` 逐键进串，最终命中网址态。
+        let state = format_state("http");
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), false, true, &state),
+            Some(KeyAction::FormatChar(':'))
+        );
+        sync_engine(&state, KeyAction::FormatChar(':'));
+        assert_eq!(state.lock().unwrap().engine.composing(), "http:");
+        for _ in 0..2 {
+            assert_eq!(
+                plan_action(WPARAM(VK_OEM_2.0 as usize), LPARAM(0), false, false, &state),
+                Some(KeyAction::FormatChar('/'))
+            );
+            sync_engine(&state, KeyAction::FormatChar('/'));
+        }
+        assert_eq!(state.lock().unwrap().engine.composing(), "http://");
+        // 结构相似但非网址意图（httpw）：`:` 放行宿主。
+        let bad = format_state("httpw");
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), false, true, &bad),
+            None
+        );
+        // 普通拼音组合后的 `/`：放行宿主（不改变既有标点直出语义）。
+        let nihao = format_state("nihao");
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_2.0 as usize), LPARAM(0), false, false, &nihao),
+            None
+        );
+    }
+
+    #[test]
+    fn 组合态点键邮箱网址进串() {
+        // 邮箱态：`me@16` 后按 `.` 进串。
+        let email = format_state("me@16");
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_PERIOD.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &email
+            ),
+            Some(KeyAction::FormatChar('.'))
+        );
+        // 网址意图：`www` 后按 `.` 进串。
+        let www = format_state("www");
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_PERIOD.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &www
+            ),
+            Some(KeyAction::FormatChar('.'))
+        );
+        // 普通拼音：`nihao` 后按 `.` 放行宿主（既有行为不回退）。
+        let nihao = format_state("nihao");
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_PERIOD.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &nihao
+            ),
+            None
+        );
+        // 完整邮箱串继续演进：me@163.com 已含点 → 单候选直通。
+        let full = format_state("me@163.c");
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_PERIOD.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &full
+            ),
+            Some(KeyAction::FormatChar('.'))
         );
     }
 }

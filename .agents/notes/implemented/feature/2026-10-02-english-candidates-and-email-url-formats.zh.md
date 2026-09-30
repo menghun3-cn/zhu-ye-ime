@@ -36,9 +36,17 @@ Status: implemented
 邮箱/网址为确定性的 core 模块 `email_url.rs`
 （`detect_format`/`email_candidates`/`url_candidates`）：`@` 前至少有 1 字符 → 邮箱分支
 （`.com/.cn/.net`，至多 3 条）；`www.`/`http://`/`https://` 前缀（大小写不敏感）→ 网址
-分支（`.com/.cn/.org`，至多 3 条）；串已含 `.` 视为完整，单候选直通。引擎在拼音路径
-之前先按格式类别路由。`handle_format_char` 在组合态接收 `@ . / :` 进串、空闲态返回
-`false`——`@` 从不冷启动组合，由宿主放行（TSF 键路归 T-066）。
+分支（`.com/.cn/.org`，至多 3 条）；串已含 `.` 视为完整，单候选直通。`@` 尾空（`me@`）
+同样补全——组合态按 `@` 后第一帧就要出候选（T-066）。引擎在拼音路径之前先按格式类别
+路由。`handle_format_char` 在组合态接收 `@ . / :` 进串、空闲态返回 `false`——`@` 从不
+冷启动组合，由宿主放行。
+
+TSF 层新增统一动作 `KeyAction::FormatChar(char)`：`classify_key` 产出 `@`（Shift+2）、
+`:`（Shift+OEM_1）、`/`（OEM_2），既有 `Dot`（VK_OEM_PERIOD）由 `plan_action` 重定向；
+`plan_action` 查询引擎 `is_format_key`——仅在组合态且处于邮箱/网址上下文或网址意图演进
+（`www`/`http`/`https` 及其 `:`/`/` 中间态，如 `http:`→`http:/`→`http://` 逐键）时吃键。
+普通拼音组合（`nihao`+`.`）、空闲态与英文模式返回 `false` 放行宿主，因此"拼音组合中
+`.` 直出标点"的既有行为不回退。
 
 ## Alternatives considered
 
