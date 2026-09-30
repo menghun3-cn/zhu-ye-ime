@@ -1,0 +1,5 @@
+# 翻译配对一致性记录（由 verify-translation-pairs.ps1 使用）
+#   git hash-object 2026-09-30-hit-rate-eval-baseline.md
+#   git hash-object 2026-09-30-hit-rate-eval-baseline.zh.md
+2026-09-30-hit-rate-eval-baseline.md: 647397fd94f6e0a185153a881d7c1e9a52a80780
+2026-09-30-hit-rate-eval-baseline.zh.md: 8ddf7bb60ee4033e554b482facd7746bc53ae494
