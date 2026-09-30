@@ -49,10 +49,23 @@ Email/URL handling is a deterministic core module `email_url.rs`
 character before it selects the email branch (`.com/.cn/.net`, ≤3), and a
 `www.` / `http://` / `https://` prefix (case-insensitive) selects the URL branch
 (`.com/.cn/.org`, ≤3); a string that already contains a `.` is treated as complete
-and passes through as a single candidate. The engine routes on the format kind
-before any pinyin path. `handle_format_char` admits `@ . / :` into the composition
-while active and returns `false` from an idle state, so `@` never cold-starts a
-composition and the host releases it (TSF key routing is covered by T-066).
+and passes through as a single candidate. An `@` immediately at the end (`me@`)
+also yields completion, because the composed frame right after `@` must already
+offer candidates (T-066). The engine routes on the format kind before any pinyin
+path. `handle_format_char` admits `@ . / :` into the composition while active and
+returns `false` from an idle state, so `@` never cold-starts a composition and the
+host releases it.
+
+The TSF layer adds one uniform `KeyAction::FormatChar(char)`: `classify_key`
+produces `@` (Shift+2), `:` (Shift+OEM_1), `/` (OEM_2), and the existing `Dot`
+(VK_OEM_PERIOD) is redirected by `plan_action`. `plan_action` consults the engine's
+`is_format_key`, which admits each key only in a meaningful email/URL context: the
+composition is active and either already in the email/URL state or mid-way through
+a URL intent (`www`/`http`/`https` and their `:`/`/` intermediate forms, so `http:`
+→ `http:/` → `http://` key by key). Ordinary pinyin compositions (`nihao` + `.`),
+idle state, and English mode all return `false` and release the key to the host, so
+the pre-existing "`.` becomes literal punctuation during pinyin" behavior is
+unchanged.
 
 ## Alternatives considered
 

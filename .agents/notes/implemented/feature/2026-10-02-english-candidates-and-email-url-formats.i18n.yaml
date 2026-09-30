@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object README.md
 #   git hash-object README.zh.md
-2026-10-02-english-candidates-and-email-url-formats.md: ffb92be95cd225baa5bdf332717d22b63ae11884
-2026-10-02-english-candidates-and-email-url-formats.zh.md: 64f19f2e70c55afff4a7268c9070c375ca527446
+2026-10-02-english-candidates-and-email-url-formats.md: 7f5582f04c1c7762f8aee693e8333defe582658f
+2026-10-02-english-candidates-and-email-url-formats.zh.md: abda47cbbe32dec9fc6f7abe44fe7e048f6e0192

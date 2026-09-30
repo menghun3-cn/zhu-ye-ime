@@ -89,6 +89,15 @@ fn main() -> ExitCode {
             };
             run_m9_checks(Path::new(path))
         }
+        // 场景6 中英混输验收（FR-030/031/032，验收标准 10.1）：英文拼写补全、
+        // 大小写原形、拼音不介入、缩写不回退、邮箱/网址补全与直通、退出交互。
+        Some("--m10") => {
+            let Some(path) = args.get(1).map(String::as_str) else {
+                eprintln!("用法: host-e2e --m10 <词典文件>");
+                return ExitCode::from(2);
+            };
+            run_m10_checks(Path::new(path))
+        }
         // M6-R 多包回归：--multi-pack <base.zyct> <pack1.zyct> [pack2.zyct ...]
         Some("--multi-pack") => {
             let paths: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
@@ -965,6 +974,229 @@ fn m9_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     Ok(())
 }
 
+/// 场景6 中英混输验收入口（命令 `--m10 <词典文件>`）。
+fn run_m10_checks(path: &Path) -> ExitCode {
+    let mut runner = Runner {
+        passed: 0,
+        failed: 0,
+    };
+    if let Err(error) = m10_checks(path, &mut runner) {
+        runner.fail("中英混输检查执行", &error);
+    }
+    runner.finish()
+}
+
+/// 场景6 中英混输断言组（FR-030/FR-031/FR-032，验收标准 10.1）。
+///
+/// 英文候选与邮箱/网址补全均不依赖词典（EN_WORDS 内嵌、格式规则纯字符串），
+/// 因此任何词典文件（种子或真实）都能完整断言；`yyds` 缩写断言依赖词典含
+/// 网络语词条，缺失时按 m7 惯例 SKIP。
+fn m10_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
+    let file = DictionaryFile::open(path)
+        .map_err(|error| format!("打开 M10 验收词典 {path:?} 失败: {error}"))?;
+    let dictionary: Arc<dyn Dictionary> = Arc::new(file.clone());
+
+    let mut engine = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    engine.handle_escape();
+
+    // ---- FR-030 英文拼写补全（不可切分整串才触发）----
+    type_text(&mut engine, "pytho");
+    let cands: Vec<(String, CandidateSource)> = engine
+        .candidates()
+        .iter()
+        .map(|c| (c.text.clone(), c.source.clone()))
+        .collect();
+    if cands
+        .first()
+        .is_some_and(|(text, source)| text == "python" && *source == CandidateSource::EnWord)
+    {
+        runner.pass("拼写补全 pytho → python（10.1-用例1）");
+    } else {
+        runner.fail(
+            "拼写补全 pytho → python（10.1-用例1）",
+            &format!("实际: {cands:?}"),
+        );
+    }
+
+    // 大小写原形：iphon → iPhone（D-09 不猜测大小写，表内原形）。
+    engine.handle_escape();
+    type_text(&mut engine, "iphon");
+    let iphon = engine
+        .candidates()
+        .iter()
+        .any(|c| c.text == "iPhone" && c.source == CandidateSource::EnWord);
+    if iphon {
+        runner.pass("大小写原形 iphon → iPhone（10.1-用例2）");
+    } else {
+        runner.fail("大小写原形 iphon → iPhone（10.1-用例2）", "未命中 iPhone");
+    }
+
+    // 拼音不介入：可切分串绝不进入英文路径（D-10）。
+    engine.handle_escape();
+    type_text(&mut engine, "nihao");
+    let nihao_clean = engine
+        .candidates()
+        .iter()
+        .all(|c| c.source != CandidateSource::EnWord && c.source != CandidateSource::EmailUrl);
+    if nihao_clean && engine.candidates().iter().any(|c| c.text == "你好") {
+        runner.pass("拼音串不介入英文/格式路径（10.1-用例3）");
+    } else {
+        runner.fail(
+            "拼音串不介入英文/格式路径（10.1-用例3）",
+            "出现英文/格式候选",
+        );
+    }
+
+    // 缩写组不回退：yyds 无英文命中时原样走网络语缩写路径（保 Slang）。
+    engine.handle_escape();
+    type_text(&mut engine, "yyds");
+    let yyds_hit = engine
+        .candidates()
+        .iter()
+        .any(|c| c.text == "永远的神" && c.source == CandidateSource::Slang);
+    let yyds_has_en = engine
+        .candidates()
+        .iter()
+        .any(|c| c.source == CandidateSource::EnWord);
+    if yyds_hit {
+        runner.pass("缩写组不回退 yyds → 永远的神（10.1-用例4）");
+    } else if !dictionary.lookup_prefix("yyds").is_empty() || yyds_has_en {
+        runner.fail(
+            "缩写组不回退 yyds → 永远的神（10.1-用例4）",
+            &format!("实际: {:?}", engine.candidates()),
+        );
+    } else {
+        println!("[SKIP] yyds 缩写断言：词典无网络语词条");
+    }
+
+    // ---- FR-031 邮箱补全与直通 ----
+    engine.handle_escape();
+    type_format(&mut engine, "me@163");
+    let mail: Vec<String> = engine.candidates().iter().map(|c| c.text.clone()).collect();
+    if mail == vec!["me@163.com", "me@163.cn", "me@163.net"]
+        && engine
+            .candidates()
+            .iter()
+            .all(|c| c.source == CandidateSource::EmailUrl)
+    {
+        runner.pass("邮箱补全 me@163 → .com/.cn/.net（10.1-用例5）");
+    } else {
+        runner.fail(
+            "邮箱补全 me@163 → .com/.cn/.net（10.1-用例5）",
+            &format!("实际: {mail:?}"),
+        );
+    }
+    // 已含点完整串直通。
+    engine.handle_escape();
+    type_format(&mut engine, "a@b.c");
+    if engine.candidates().len() == 1 && engine.candidates()[0].text == "a@b.c" {
+        runner.pass("邮箱完整串直通（10.1-用例5 直通）");
+    } else {
+        runner.fail(
+            "邮箱完整串直通（10.1-用例5 直通）",
+            &format!("实际: {:?}", engine.candidates()),
+        );
+    }
+
+    // ---- FR-031 网址补全与直通 ----
+    engine.handle_escape();
+    type_format(&mut engine, "www.exa");
+    let www: Vec<String> = engine.candidates().iter().map(|c| c.text.clone()).collect();
+    if www == vec!["www.exa.com", "www.exa.cn", "www.exa.org"] {
+        runner.pass("网址补全 www.exa → .com/.cn/.org（10.1-用例6）");
+    } else {
+        runner.fail(
+            "网址补全 www.exa → .com/.cn/.org（10.1-用例6）",
+            &format!("实际: {www:?}"),
+        );
+    }
+    engine.handle_escape();
+    type_format(&mut engine, "http://exa");
+    let http: Vec<String> = engine.candidates().iter().map(|c| c.text.clone()).collect();
+    if http == vec!["http://exa.com", "http://exa.cn", "http://exa.org"] {
+        runner.pass("网址补全 http://exa → 3 条（10.1-用例6 scheme）");
+    } else {
+        runner.fail(
+            "网址补全 http://exa → 3 条（10.1-用例6 scheme）",
+            &format!("实际: {http:?}"),
+        );
+    }
+    engine.handle_escape();
+    type_format(&mut engine, "www.exa.com");
+    if engine.candidates().len() == 1 && engine.candidates()[0].text == "www.exa.com" {
+        runner.pass("网址完整串直通（10.1-用例6 直通）");
+    } else {
+        runner.fail(
+            "网址完整串直通（10.1-用例6 直通）",
+            &format!("实际: {:?}", engine.candidates()),
+        );
+    }
+
+    // ---- FR-032 提交/退出交互 ----
+    engine.handle_escape();
+    type_format(&mut engine, "me@163");
+    let committed = engine
+        .select_index(0)
+        .ok_or_else(|| "选择邮箱补全首候选失败".to_owned())?;
+    if committed == "me@163.com" && !engine.is_active() {
+        runner.pass("选中补全尾候选上屏且组合清空（10.1-用例7）");
+    } else {
+        runner.fail(
+            "选中补全尾候选上屏且组合清空（10.1-用例7）",
+            &format!("text={committed:?}"),
+        );
+    }
+    engine.handle_escape();
+    type_format(&mut engine, "www.exa");
+    assert!(engine.handle_escape());
+    if !engine.is_active() && engine.candidates().is_empty() {
+        runner.pass("Esc 清空邮箱/网址组合回空闲（10.1-用例7 退出）");
+    } else {
+        runner.fail(
+            "Esc 清空邮箱/网址组合回空闲（10.1-用例7 退出）",
+            "仍活跃或有候选",
+        );
+    }
+    // 退格删掉 @ 退出邮箱态回到拼音（me 为可切分音节，按 D-10 走拼音路径）。
+    engine.handle_escape();
+    type_format(&mut engine, "me@163");
+    for _ in 0..4 {
+        assert!(engine.handle_backspace(), "邮箱组合退格未生效");
+    }
+    if engine.composing() == "me"
+        && engine
+            .candidates()
+            .iter()
+            .all(|c| c.source != CandidateSource::EmailUrl)
+    {
+        runner.pass("退格删除 @ 退出邮箱态（10.1-用例7 退格）");
+    } else {
+        runner.fail(
+            "退格删除 @ 退出邮箱态（10.1-用例7 退格）",
+            &format!("composing={}", engine.composing()),
+        );
+    }
+
+    // 噪声：不可切分且无英文命中的串不出 EnWord/EmailUrl（空或既有拼音路径）。
+    engine.handle_escape();
+    type_text(&mut engine, "xjxq");
+    let noise = engine
+        .candidates()
+        .iter()
+        .all(|c| c.source != CandidateSource::EnWord && c.source != CandidateSource::EmailUrl);
+    if noise {
+        runner.pass("噪声串不产生英文/格式候选（10.1-用例8）");
+    } else {
+        runner.fail(
+            "噪声串不产生英文/格式候选（10.1-用例8）",
+            "出现英文/格式候选",
+        );
+    }
+
+    Ok(())
+}
+
 fn seed_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     let file = DictionaryFile::open(path)
         .map_err(|error| format!("打开词典文件 {path:?} 失败: {error}"))?;
@@ -1324,6 +1556,19 @@ fn type_text(engine: &mut InputEngine, text: &str) {
             engine.handle_letter(c),
             "字母 {c} 未被输入引擎接受（输入串 {text}）"
         );
+    }
+}
+
+/// 混合输入串助手（T-066）：字母走 handle_letter、数字走 handle_digit、
+/// 其余（`@`/`.`/`/`/`:`）走 handle_format_char，模拟 TSF 键路分派。
+fn type_format(engine: &mut InputEngine, text: &str) {
+    for c in text.chars() {
+        let ok = match c {
+            'a'..='z' => engine.handle_letter(c),
+            '0'..='9' => engine.handle_digit(c),
+            _ => engine.handle_format_char(c),
+        };
+        assert!(ok, "格式串 {text} 的字符 {c} 未被输入引擎接受");
     }
 }
 

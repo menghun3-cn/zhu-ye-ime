@@ -597,6 +597,53 @@ impl InputEngine {
         self.push_composing(c)
     }
 
+    /// 格式键是否应对当前组合态生效（T-066，TSF 键路判定用，D-11）：
+    /// 决定 `@`/`.`/`/`/`:` 是进组合串（返回 `true`）还是放行宿主（`false`）。
+    ///
+    /// - `@`：组合态一律接收（真正追加由 [`InputEngine::handle_format_char`] 把关）；
+    /// - `.`：组合串已命中邮箱/网址判定（[`detect_format`] 非 None）或正处于网址意图
+    ///   演进（`www`/`http`/`https` 及其 `:`/`/` 中间态）；
+    /// - `/`/`:`：仅网址意图演进。
+    ///
+    /// 其余情况（空闲态、`nihao` 等普通拼音组合后按 `.`）返回 `false`，
+    /// 保证普通拼音组合的标点直出语义不回归（原有 `.` 放行宿主行为不变）。
+    #[must_use]
+    pub fn is_format_key(&self, c: char) -> bool {
+        if self.mode != InputMode::Chinese || self.composing.is_empty() {
+            return false;
+        }
+        match c {
+            '@' => true,
+            '.' => {
+                zhu_ye_core::detect_format(&self.composing) != zhu_ye_core::FormatKind::None
+                    || self.is_url_intent()
+            }
+            '/' | ':' => self.is_url_intent(),
+            _ => false,
+        }
+    }
+
+    /// 当前组合串是否处于网址意图演进（T-066）：`www`/`http`/`https` 字面、
+    /// `www.`/`http://`/`https://` 前缀，或 `http(s)` 后接 `:`/`/` 的中间态
+    /// （`http:`/`http:/` 等）。用于格式键吃键判定，避免结构相似但无网址意义的
+    /// 输入（如 `httpw`）被误判。
+    fn is_url_intent(&self) -> bool {
+        let c = &self.composing;
+        if c == "www" || c == "http" || c == "https" || c.starts_with("www.") {
+            return true;
+        }
+        if c.starts_with("http://") || c.starts_with("https://") {
+            return true;
+        }
+        if let Some(rest) = c.strip_prefix("http") {
+            // `http`/`https` 开头：其余部分必须是 `:`/`/` 演进字符
+            // （`https` 对 strip_prefix("http") 的余段为 `s`，一并允许）。
+            rest.chars().all(|ch| ch == 's' || ch == ':' || ch == '/')
+        } else {
+            false
+        }
+    }
+
     fn push_composing(&mut self, c: char) -> bool {
         if self.mode != InputMode::Chinese {
             return false;
@@ -2568,5 +2615,57 @@ mod tests {
         assert!(!eng.handle_format_char('@'), "空闲态 @ 不放行进组合");
         assert!(!eng.is_active());
         assert_eq!(eng.composing(), "");
+    }
+
+    /// 格式键吃键判定（T-066，`is_format_key`）：
+    /// 邮箱/网址上下文吃键进串，普通拼音组合与空闲态放行宿主。
+    #[test]
+    fn 格式键吃键判定邮箱网址吃键普通拼音放行() {
+        let mut eng = engine();
+        // 空闲态：全部格式键放行（不冷启动组合）。
+        for c in ['@', '.', '/', ':'] {
+            assert!(!eng.is_format_key(c), "空闲态 {c} 应放行宿主");
+        }
+        // 组合态 `@`：一律接收（@ 是邮箱态开关）。
+        type_text(&mut eng, "me");
+        assert!(eng.is_format_key('@'));
+        // 邮箱态：`.` 吃键；普通拼音组合：`.` `/` `:` 放行。
+        let mut mail = engine();
+        type_format(&mut mail, "me@16");
+        assert!(mail.is_format_key('.'));
+        let mut nihao = engine();
+        type_text(&mut nihao, "nihao");
+        for c in ['.', '/', ':'] {
+            assert!(!nihao.is_format_key(c), "普通拼音组合 {c} 应放行宿主");
+        }
+        // 网址意图演进：`www` 后 `.` 吃键；`http` 后 `:`/`/` 吃键。
+        let mut www = engine();
+        type_text(&mut www, "www");
+        assert!(www.is_format_key('.'));
+        let mut scheme = engine();
+        type_text(&mut scheme, "http");
+        assert!(scheme.is_format_key(':'));
+        assert!(scheme.is_format_key('/'));
+        // 结构相似但非网址意图（httpw）：`:` `/` 放行。
+        let mut bad = engine();
+        type_text(&mut bad, "httpw");
+        for c in [':', '/'] {
+            assert!(!bad.is_format_key(c), "httpw 的 {c} 应放行宿主");
+        }
+        // 演进中间态 `http:` 后 `/` 仍吃键。
+        let mut mid = engine();
+        type_format(&mut mid, "http:");
+        assert!(mid.is_format_key('/'));
+    }
+
+    #[test]
+    fn 格式键英文模式全部放行() {
+        let mut eng = engine();
+        eng.toggle_mode();
+        // 英文模式下组合不成立（handle_letter 拒收），is_format_key 直接放行
+        // 所有格式键，由宿主直出标点。
+        for c in ['@', '.', '/', ':'] {
+            assert!(!eng.is_format_key(c), "英文模式 {c} 应放行宿主");
+        }
     }
 }

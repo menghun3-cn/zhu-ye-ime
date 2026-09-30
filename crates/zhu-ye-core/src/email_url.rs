@@ -64,15 +64,13 @@ fn contains_dot(input: &str) -> bool {
 }
 
 /// 邮箱补全候选：`me@163` → `me@163.com/.cn/.net`（至多 3 条，顺序即展示顺序）；
+/// `@` 刚刚输入尚无后缀（`me@`）同样补全（组合态按 `@` 后的第一帧就应给候选，T-066）；
 /// `@` 后已含 `.`（如 `me@163.com`）→ 返回完整串本身（直通，不重复补全）；
 /// 畸形（多余 `@` / `@` 前空）→ 返回完整串本身交由上层直通。
 #[must_use]
 pub fn email_candidates(input: &str) -> Vec<String> {
     let at_count = input.matches('@').count();
-    let valid = at_count == 1
-        && input
-            .find('@')
-            .is_some_and(|at| at > 0 && at < input.len() - 1);
+    let valid = at_count == 1 && input.find('@').is_some_and(|at| at > 0);
     if !valid {
         // 防御返回原文直通，避免把畸形串当后缀拼接。
         return vec![input.to_owned()];
@@ -133,6 +131,11 @@ mod tests {
         assert_eq!(
             email_candidates("me@163"),
             vec!["me@163.com", "me@163.cn", "me@163.net"]
+        );
+        // `@` 尾空（组合态按 `@` 后第一帧）：同样补全（T-066）。
+        assert_eq!(
+            email_candidates("me@"),
+            vec!["me@.com", "me@.cn", "me@.net"]
         );
         // 已含点：完整直通，不重复补全
         assert_eq!(email_candidates("me@163.com"), vec!["me@163.com"]);
