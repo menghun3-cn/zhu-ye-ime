@@ -68,12 +68,26 @@ HashSet 去重、不含原音节、确定性。
 枚举所有可完整切分的子串（1 至 `SENTENCE_MAX_WORD_CHARS = 12` 字符，即最多 4
 个音节）并整词查询。
 
-评分复用 `RankingConfig::default()` 权重，使整句分数与 `StaticRankingModel`
-可比：score = Σ(词频 × 1 + bigram(前词, 词)min(cap) × 16)，全部饱和 i64 运算，
-bigram 权重 16、频率上限 100,000。beam 状态为（词序列，已消费字符数，累计分）；
-每步保留 `BEAM_WIDTH = 8` 条路径，每个子串至多贡献 `BEAM_WORD_CAP = 4` 词；
-同分按词文本升序（确定性）。每步至少消费 1 字符，保证 ≤ len 步终止。完整路径按
-整句文本去重（取最高分），返回前 `SENTENCE_TOP_N = 5`，`pinyin` = 原输入串。
+评分按**词间转移**建模而非裸频率相加；M7-A 在真实词库上把三个事实调定后才通过
+验收用例：
+
+1. **unigram 上限**（`SENTENCE_UNIGRAM_CAP = 100_000`）：不设上限时超高频虚词单字
+   （如介词「被」）以原始词频碾压整词（真实 base 包中「北京」unigram 仅 1088），
+   beam 退化为逐字拼接。
+2. **bigram 缺失惩罚 = cap**（`SENTENCE_BIGRAM_MISS_PENALTY = 100_000`）：只要罚额
+   < cap，被 cap 的高频单字罚后残值仍为正，两个残值相加即可压过低频整词；罚额 =
+   cap 使无证据转移贡献 ≤ 0，「去被敬」（去→被 无 bigram 证据）必然深于有证据的
+   「去北京」。
+3. **完成路径跨轮保留**：整词步长（「明天」= 8 字符）让胜出路径提前完成，而逐字
+   路径仍在推进；没有独立的 `completed` 集合，慢路径会在后续轮次不断替换已完成的
+   路径，top 候选就退化。
+
+评分 = min(词频, cap) × unigram权重 + [前词→本词有证据(>0)时 min(bigram, cap) ×
+bigram权重；无证据时减惩罚]，全部饱和 i64（确定性）。beam 状态为（词序列，已消费
+字符数，累计分）；每步保留 `BEAM_WIDTH = 8` 条路径，每个子串至多贡献
+`BEAM_WORD_CAP = 4` 词；同分按词文本升序（确定性）。每步至少消费 1 字符，保证
+≤ len 步终止。完整路径按整句文本去重（取最高分），返回前 `SENTENCE_TOP_N = 5`，
+`pinyin` = 原输入串。
 
 引擎用 `prepend_group` 把整句组置于**最前**（文本冲突时主候选让位）。若全部
 beam 路径耗尽，函数返回空，调用方保留普通逐音节候选，保证 ≥ 1 候选。
@@ -104,8 +118,8 @@ beam 路径耗尽，函数返回空，调用方保留普通逐音节候选，保
 **纠错候选参与常规排序。** 否决：静态词频高的模糊命中可能压过用户意图的拼音
 候选；独立标注组置于主候选之后是 O-03 约定的防污染位置。
 
-**纠错只用首个切分方案。** 否决：DP 顺序不保证最长词优先；beam 前按音节数升序
-（音节最少 = 整词最多）对切分方案排序，是无需改动 `segment_all` 的确定性修法。
+**纠错只用首个切分方案。** 否决：DP 顺序不保证最长词优先；最终实现根本**不选定**
+某个切分方案——beam 按位置枚举可完整切分的子串，音节数下限只作触发防御。
 
 ## 后果
 
@@ -121,10 +135,14 @@ beam 路径耗尽，函数返回空，调用方保留普通逐音节候选，保
   位置做有界子串枚举。首屏时延（<50ms）的 VM 验收在 M7-A。
 - 测试：core +13（pinyin 4：表覆盖/查询未收录/单处替换/无映射空；candidate 9：
   简拼 5、纠错 3、整句 3——含头条用例 `woxiangmingtianqubeijing` →
-  我想明天去北京、bigram 引导、不漂移守卫）；zhu-ye-ime 引擎级 +10（nh/wsm、
-  zongguo、niha、整词不触发、整句居首、短串不漂移）。全套门禁绿：fmt、clippy
-  `-D warnings`、`cargo test --workspace`（core 131、ime 99）、
-  `git diff --check`、host-e2e 种子 19/19 + 多包 7/7。
+  我想明天去北京、bigram 引导、M7-A 追加的超高频单字对抗用例、不漂移守卫）；
+  zhu-ye-ime 引擎级 +10（nh/wsm、zongguo、niha、整词不触发、整句居首、短串
+  不漂移）。全套门禁绿：fmt、clippy `-D warnings`、`cargo test --workspace`
+  （core 132、ime 99）、`git diff --check`、host-e2e 种子 19/19 + 多包 7/7 +
+  新增 `--m7` 断言组真实词典 22/22。
+- 性能（实测，release + 真实 base 包，基准 8.2）：`zhu-ye-cli bench` 新增三路径
+  场景；简拼 13.6 µs、纠错 5.7 µs、整句 1630 µs（≈1.6 ms）每次刷新——全部落在
+  ≤30ms 验收值（目标 ≤15ms）内。零网络由构造保证（O-05）。
 - 关联活跃 note（保持活跃并交叉引用）：切分基础设施
   （feature/2026-09-19-full-pinyin-segmentation-core）、前缀候选
   （feature/2026-09-24-prefix-candidates-incomplete-segmentation，简拼与之互补
@@ -132,4 +150,5 @@ beam 路径耗尽，函数返回空，调用方保留普通逐音节候选，保
   （feature/2026-09-19-candidate-ranking-static-model，beam 复用其权重）。
   M7 批次未取代任何既有 note；语言事实表（简拼表、模糊音组）自研维护，
   无需 licenses.md 登记。
-- 里程碑收尾前安排 M7-A：验收标准 8.1 VM 交互验收与 8.2 时延实测。
+- 里程碑收尾前的剩余 M7-A 步骤为候选窗可见行为的 VM 交互验收（验收标准 8.1）；
+  主机侧断言已通过 `InputEngine` 覆盖同一验收项。

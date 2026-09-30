@@ -87,13 +87,31 @@ because each step queries one syllable only. Instead the search enumerates all
 separable substrings (1 to `SENTENCE_MAX_WORD_CHARS = 12` chars, i.e. up to 4
 syllables) at each position and looks each substring up as a whole word.
 
-Scoring reuses `RankingConfig::default()` weights so sentence scores are
-comparable with `StaticRankingModel`: score = Σ(word_frequency × 1 +
-bigram(prev, word) min(cap) × 16), all in saturating i64 arithmetic, bigram
-weight 16, frequency cap 100,000. Beam state is (word sequence, consumed char
-count, score); `BEAM_WIDTH = 8` paths survive each step, each substring
-contributes at most `BEAM_WORD_CAP = 4` words, tie-break is by word text
-ascending (deterministic). Consuming at least one character per step
+Scoring models **word-to-word transitions** rather than summing bare
+frequencies; three facts were tuned against the real corpus during M7-A before
+the acceptance case passed:
+
+1. **unigram cap** (`SENTENCE_UNIGRAM_CAP = 100_000`): without a cap a
+   high-frequency function character (e.g. 被) dwarfs a whole word («北京» has
+   unigram 1088 in the real base pack) and the beam degrades to per-character
+   concatenation.
+2. **bigram-miss penalty equals the cap** (`SENTENCE_BIGRAM_MISS_PENALTY =
+   100_000`): with any penalty < cap a capped high-frequency character still
+   keeps a positive residue, and two residues together beat a low-frequency
+   whole word. Penalty = cap makes an unsupported transition contribute ≤ 0, so
+   a random concatenation «去被敬» (去→被 has no bigram evidence) is always
+   deeper than a supported «去北京».
+3. **completed paths survive across rounds**: a whole-word step («明天» = 8
+   chars) lets the winning path finish early while per-character paths still
+   advance; without a dedicated `completed` set the slow paths keep replacing
+   finished ones on later rounds and the top candidate regresses.
+
+Score = min(freq, unigram cap) × unigram_weight, plus min(bigram, cap) ×
+bigram_weight when the previous→word transition has evidence (> 0); otherwise
+the penalty is subtracted. All in saturating i64 (deterministic). Beam state is
+(word sequence, consumed char count, score); `BEAM_WIDTH = 8` paths survive
+each step, each substring contributes at most `BEAM_WORD_CAP = 4` words,
+tie-break is by word text ascending. Consuming at least one character per step
 guarantees termination in ≤ len steps. Completed paths are deduplicated by
 sentence text (max score) and the top `SENTENCE_TOP_N = 5` are returned with
 `pinyin` = the original string.
@@ -138,9 +156,9 @@ a separate labeled group after the main candidates is the anti-pollution
 position agreed in O-03.
 
 **Use only the first segmentation for correction.** Rejected: the DP order is
-not guaranteed to be longest-word-first; sorting candidate segmentations by
-syllable count ascending (fewest syllables = most whole words) before beam is a
-deterministic fix without changing `segment_all`.
+not guaranteed to be longest-word-first; the final implementation does not pick
+a segmentation at all for the beam — it enumerates separable substrings by
+position and keeps the fewest-syllables guard for the trigger only.
 
 ## Consequences
 
@@ -159,11 +177,16 @@ deterministic fix without changing `segment_all`.
 - Tests: core +13 (pinyin 4: table coverage / lookup-miss / one-substitution /
   no-mapping-empty; candidate 9: initials 5, correction 3, sentence 3 —
   including the headline `woxiangmingtianqubeijing` → 我想明天去北京, bigram
-  steering, no-drift guards); zhu-ye-ime +10 engine-level (nh/wsm, zongguo,
-  niha, whole-word no-trigger, sentence-first, short-string no-drift). The
-  full gate is green: fmt, clippy `-D warnings`, `cargo test --workspace`
-  (core 131, ime 99), `git diff --check`, host-e2e seed 19/19 and multi-pack
-  7/7.
+  steering, a high-frequency-character adversarial case added during M7-A, and
+  no-drift guards); zhu-ye-ime +10 engine-level (nh/wsm, zongguo, niha,
+  whole-word no-trigger, sentence-first, short-string no-drift). The full gate
+  is green: fmt, clippy `-D warnings`, `cargo test --workspace` (core 132,
+  ime 99), `git diff --check`, host-e2e seed 19/19, multi-pack 7/7, and the new
+  `--m7` assertion group 22/22 against the real base pack.
+- Performance (measured, release + real base pack, benchmark 8.2):
+  `zhu-ye-cli bench` gained the three-path scenario; initials 13.6 µs,
+  corrected 5.7 µs, sentence 1630 µs (~1.6 ms) per refresh — all inside the
+  ≤30 ms acceptance (≤15 ms target). Zero network by construction (O-05).
 - Related active notes (keep active, cross-link): the segmentation
   infrastructure (feature/2026-09-19-full-pinyin-segmentation-core), prefix
   candidates (feature/2026-09-24-prefix-candidates-incomplete-segmentation,
@@ -171,5 +194,6 @@ deterministic fix without changing `segment_all`.
   (feature/2026-09-19-candidate-ranking-static-model, beam reuses them).
   Nothing in the M7 batch supersedes those; the language-fact tables
   (initials, fuzzy pairs) are self-maintained and need no license entry.
-- VM interactive acceptance (验收标准 8.1) and latency measurement (8.2) are
-  scheduled as M7-A before the milestone closes.
+- VM interactive acceptance of the visible candidate window (验收标准 8.1) is
+  the remaining M7-A step; host-side assertions above already cover the same
+  acceptance items through `InputEngine`.
