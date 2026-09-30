@@ -82,8 +82,14 @@ machinery render it as a normal (empty-composition) view:
 - The hit-rate baseline contract is still untouched: suggestion never
   participates in ranking (pinyin is empty while it shows), so T-057 eval does
   not need a re-run.
-- VM interactive acceptance (acceptance standard 8.1 same flow: commit → window
-  shows successors → digit picks one → next letter exits) runs after the PR lands.
+- VM interactive acceptance passed (2026-09-30, vm-accept-sop flow on the
+  Windows Server 2019 VM): TSF log shows commit 今天 → `cand-show items=8
+  first=的 (Suggestion)`; digit 1 → `Select(0)` → `commit-no-comp 的` (insert
+  without a composition); the chain continues with 的 → `items=8 first=人`;
+  typing `n` exits the suggestion state back to composition (`cand-show
+  items=0`). Three screenshots differ by MD5 and the blue-panel pixel counts
+  (s1=2444 / s2=2532 vs s3=959 composition header) separate the full
+  suggestion window from the header-only state.
 
 ## Supersession check
 
