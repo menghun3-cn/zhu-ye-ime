@@ -35,15 +35,16 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_0, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU,
-    VK_OEM_MINUS, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
+    GetKeyState, VIRTUAL_KEY, VK_0, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN,
+    VK_ESCAPE, VK_MENU, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE,
+    VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
     ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfKeyEventSink,
     ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
-    ITfTextInputProcessor_Impl, ITfThreadMgr, TF_DEFAULT_SELECTION, TF_ES_READWRITE, TF_ES_SYNC,
-    TF_IAS_QUERYONLY, TF_SELECTION,
+    ITfTextInputProcessor_Impl, ITfThreadMgr, TfAnchor, TF_AE_END, TF_DEFAULT_SELECTION,
+    TF_ES_READWRITE, TF_ES_SYNC, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
 };
 use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
@@ -103,10 +104,29 @@ enum KeyAction {
     SelectUp,
     /// 下方向键移动页内选中行（T-039）。
     SelectDown,
+    /// 小数点键（VK_OEM_PERIOD/VK_DECIMAL）：仅在数字格式模式内追加（FR-027 金额）。
+    Dot,
+    /// 数字格式模式：追加一个数字/小数点（TSF 直插该字符上屏，引擎累积 buffer）。
+    BufferDigit(char),
+    /// 数字格式模式退格：文档侧删插入点前 1 字符 + 引擎 buffer 回退（FR-027）。
+    DigitBackspace,
+    /// 数字格式模式选择：替换 buffer 长度字符后插入格式文本（FR-027 替换链）。
+    SelectAndReplace(usize),
+    /// 空闲态 `v`：进入 v 模式（FR-028）。
+    VStart,
+    /// v 模式类型码（`1-9`/`x`/`h`）。
+    VCode(char),
+    /// v 模式非法字母（如 `vi` 的 `i`）：`v`+该字母转入拼音组合（FR-028 回退）。
+    VConsume(char),
+    /// v 模式退格（有类型码时回退，只有 `v` 时退出）。
+    VBackspace,
 }
 
 impl KeyAction {
     /// 是否需要 TSF 编辑会话；纯状态动作（Shift/Tab/翻页）在会话外执行。
+    /// 场景7 的数字/v 模式动作都在会话内执行：直插文本（BufferDigit）、
+    /// 替换文本（SelectAndReplace/DigitBackspace）、开组合（VConsume）以及
+    /// 需要候选窗锚点定位（selection_placement）的纯状态动作。
     fn needs_edit_session(self) -> bool {
         matches!(
             self,
@@ -117,6 +137,13 @@ impl KeyAction {
                 | KeyAction::Enter
                 | KeyAction::Escape
                 | KeyAction::Select(_)
+                | KeyAction::BufferDigit(_)
+                | KeyAction::DigitBackspace
+                | KeyAction::SelectAndReplace(_)
+                | KeyAction::VStart
+                | KeyAction::VCode(_)
+                | KeyAction::VConsume(_)
+                | KeyAction::VBackspace
         )
     }
 }
@@ -427,6 +454,9 @@ fn classify_key(wparam: WPARAM, lparam: LPARAM) -> Option<KeyAction> {
             // T-049：数字键先归类为"数字"，由 `plan_action` 决定它是选词还是进组合串。
             char::from_u32(u32::from(b'0') + u32::from(code - VK_0.0)).map(KeyAction::Digit)
         }
+        // FR-027：英文布局小数点（`.`/小键盘 `.`）归为 Dot，仅在数字格式模式内
+        // 追加（金额小数位）；数字模式外放行给宿主直出标点。
+        code if code == VK_OEM_PERIOD.0 || code == VK_DECIMAL.0 => Some(KeyAction::Dot),
         code if code == VK_SHIFT.0 && !is_repeat(lparam) => Some(KeyAction::ToggleMode),
         code if code == VK_TAB.0 => Some(KeyAction::ToggleLayer),
         // T-033：候选翻页键改用 `-`（上一页）与 `=`/`+`（下一页，VK_OEM_PLUS
@@ -462,6 +492,10 @@ unsafe fn get_keystroke_mgr(thread_mgr: &ITfThreadMgr) -> Result<ITfKeystrokeMgr
 /// 功能键只在已有组合时处理，避免键盘事件被无谓吞掉。
 /// Shift 只在无活动组合时切换模式：按 `+`（Shift+`=`）翻页时，先落下的 Shift
 /// 只作为修饰键放行给宿主，避免翻页顺带把中文模式切走（T-033）。
+///
+/// 场景7（FR-027/028）：空闲态数字启动数字格式模式、空闲态 `v` 启动 v 模式；
+/// 数字/v 模式激活时按优先级处理，遇到无关键（Enter/Tab/翻页/其它字母）先退出
+/// 该模式再按常规语义处理，保证模式窗口不会被卡住。
 fn plan_action(
     wparam: WPARAM,
     lparam: LPARAM,
@@ -472,39 +506,138 @@ fn plan_action(
         return None;
     }
     let action = classify_key(wparam, lparam)?;
-    let engine = &state.lock().unwrap().engine;
+    let engine = &mut state.lock().unwrap().engine;
+
+    // 数字/v 模式的自动退出：遇到与模式无关的键先退出模式，按键本身按常规处理
+    // （Enter 放行宿主、字母进拼音、翻页/选行作用于常规候选等）。
+    if engine.digit_active() && !keeps_digit_mode(action) {
+        engine.exit_digit();
+    }
+    if engine.v_active() && !keeps_v_mode(action) {
+        engine.v_exit();
+    }
+
     match action {
-        KeyAction::Letter(_) => (engine.mode() == InputMode::Chinese).then_some(action),
-        // T-049：数字键在中文模式下先判断是否为"含数字缩写键"的组成部分
-        // （如 `996`/`u1s1`），是则进组合串；否则回落原有语义——
-        // 有候选时选词（FR-006），无组合无候选时放行给宿主直出数字。
-        KeyAction::Digit(digit) => {
-            if engine.mode() != InputMode::Chinese {
-                return None;
-            }
-            let index = usize::from(digit as u8).checked_sub(usize::from(b'1'));
-            // T-059：上屏联想态数字键直接选择联想候选；越界放行给宿主
-            // （不吞键、不上屏空串）。
-            if engine.suggestion_active() {
-                return index
-                    .filter(|i| *i < engine.suggestion_list().len())
-                    .map(KeyAction::Select);
-            }
-            if should_compose_digit(engine, digit) {
-                return Some(KeyAction::Digit(digit));
-            }
-            match index {
-                Some(index) if engine.is_active() => Some(KeyAction::Select(index)),
-                _ => None,
+        KeyAction::Letter(c) if engine.v_active() => {
+            // FR-028：类型码（x/h）出对应符号组，其余字母（含 `v`/`i`）回退拼音。
+            if matches!(c, 'x' | 'h') {
+                Some(KeyAction::VCode(c))
+            } else {
+                Some(KeyAction::VConsume(c))
             }
         }
+        KeyAction::Letter('v')
+            if engine.mode() == InputMode::Chinese
+                && !engine.is_active()
+                && !engine.suggestion_active() =>
+        {
+            // FR-028：空闲态 `v` 进入 v 模式；`v` 同时是 nv/lv 的合法拼音字符，
+            // 组合态/联想态一律走常规拼音路径（联想优先，D-05）。
+            Some(KeyAction::VStart)
+        }
+        KeyAction::Letter(_) => (engine.mode() == InputMode::Chinese).then_some(action),
+        KeyAction::Dot => {
+            // 仅数字格式模式内吃键（追加小数点），否则放行宿主直出标点。
+            if engine.mode() == InputMode::Chinese && engine.digit_active() {
+                Some(KeyAction::BufferDigit('.'))
+            } else {
+                None
+            }
+        }
+        // T-049：数字键在中文模式下先判断是否为"含数字缩写键"的组成部分
+        // （如 `996`/`u1s1`），是则进组合串；否则回落原有语义——
+        // 有候选时选词（FR-006），空闲态数字进入数字格式模式（FR-027）。
+        KeyAction::Digit(digit) => plan_digit(engine, digit),
+        // FR-027：数字格式模式退格由引擎删除 buffer 尾部位，文档侧同步删 1 字符。
+        KeyAction::Backspace if engine.digit_active() => Some(KeyAction::DigitBackspace),
+        // FR-028：v 模式退格回退类型码（只有 `v` 时退出）。
+        KeyAction::Backspace if engine.v_active() => Some(KeyAction::VBackspace),
+        // FR-027：数字格式模式空格 = 选择当前选中行格式候选并替换。
+        KeyAction::Space if engine.digit_active() => {
+            Some(KeyAction::SelectAndReplace(engine.selected_on_page()))
+        }
+        // FR-028：v 模式空格 = 选择第 1 个符号候选。
+        KeyAction::Space if engine.v_active() && engine.v_symbol_count() > 0 => Some(action),
         // T-059：上屏联想态空格提交选中联想词、Esc 关闭联想窗；
         // 其余功能键（Enter/Backspace/翻页/选择）放行给宿主。
         KeyAction::Space | KeyAction::Escape if engine.suggestion_active() => Some(action),
+        // FR-027/028：Esc 退出数字/v 模式（已上屏的数字/符号正文保留）。
+        KeyAction::Escape if engine.digit_active() || engine.v_active() => Some(action),
         KeyAction::ToggleMode if !engine.is_active() => Some(action),
         KeyAction::ToggleMode => None,
         _ if engine.is_active() => Some(action),
         _ => None,
+    }
+}
+
+/// 数字键在中文模式下的分派（FR-027 与既有 T-049 语义）。
+fn plan_digit(engine: &mut InputEngine, digit: char) -> Option<KeyAction> {
+    if engine.mode() != InputMode::Chinese {
+        return None;
+    }
+    let index = usize::from(digit as u8).checked_sub(usize::from(b'1'));
+    // v 模式优先：等待类型码时 `1-9` 出符号组，已出组后 `1-9` 选择符号；
+    // `0` 无义，退出 v 模式并放行宿主。
+    if engine.v_active() {
+        if engine.v_buffer_len() == 1 {
+            return if digit != '0' {
+                Some(KeyAction::VCode(digit))
+            } else {
+                engine.v_exit();
+                None
+            };
+        }
+        if let Some(index) = index.filter(|i| *i < engine.v_symbol_count()) {
+            return Some(KeyAction::Select(index));
+        }
+        engine.v_exit();
+        return None;
+    }
+    // 数字格式模式：`1-9` 且未越界选择格式候选；越界/无候选（如不足 5 位）继续追加。
+    if engine.digit_active() {
+        return index
+            .filter(|i| *i < engine.digit_candidate_count())
+            .map(KeyAction::SelectAndReplace)
+            .or(Some(KeyAction::BufferDigit(digit)));
+    }
+    // T-059：上屏联想态数字键直接选择联想候选；越界放行给宿主（不吞键、不上屏空串）。
+    if engine.suggestion_active() {
+        return index
+            .filter(|i| *i < engine.suggestion_list().len())
+            .map(KeyAction::Select);
+    }
+    if should_compose_digit(engine, digit) {
+        return Some(KeyAction::Digit(digit));
+    }
+    // 空闲态数字：启动数字格式模式（边输边上屏），不再放行宿主直出。
+    if !engine.is_active() {
+        return Some(KeyAction::BufferDigit(digit));
+    }
+    match index {
+        Some(index) if engine.is_active() => Some(KeyAction::Select(index)),
+        _ => None,
+    }
+}
+
+/// 数字格式模式是否保留该键（FR-027）：数字/小数点追加、选格式、退格、Esc。
+fn keeps_digit_mode(action: KeyAction) -> bool {
+    matches!(
+        action,
+        KeyAction::Digit(_)
+            | KeyAction::Dot
+            | KeyAction::Space
+            | KeyAction::Escape
+            | KeyAction::Backspace
+    )
+}
+
+/// v 模式是否保留该键（FR-028）：类型码、选符号、回退拼音、退格、Esc。
+fn keeps_v_mode(action: KeyAction) -> bool {
+    match action {
+        KeyAction::Digit(_) | KeyAction::Backspace | KeyAction::Escape => true,
+        KeyAction::Space => true,
+        KeyAction::Letter(c) => c.is_ascii_lowercase(),
+        _ => false,
     }
 }
 
@@ -535,16 +668,43 @@ fn apply_action(
             let text = compose_text(state, action);
             update_composition(state, context, sink, ec, &text)?;
         }
+        // FR-028：`vi` 等回退拼音——`v`+字母直接开组合显示，进正常拼音路径。
+        KeyAction::VConsume(c) => {
+            let text = compose_text(state, action);
+            update_composition(state, context, sink, ec, &text)?;
+            debug_log(&format!("zhu-ye: v-consume {c} -> {text:?}"));
+        }
         KeyAction::Space | KeyAction::Enter | KeyAction::Escape | KeyAction::Select(_) => {
             let text = commit_text(state, action);
             finish_composition(state, context, ec, &text)?;
+        }
+        // FR-027：数字格式模式——每键直插该数字上屏（无组合，边输边上屏）。
+        KeyAction::BufferDigit(c) => {
+            let text = c.to_string();
+            finish_composition(state, context, ec, &text)?;
+        }
+        // FR-027：数字格式模式退格——文档侧删插入点前 1 字符。
+        KeyAction::DigitBackspace => {
+            replace_last_chars(context, ec, 1, "")?;
+        }
+        // FR-027：数字格式模式选择——替换最近 buffer 长度字符后插入格式文本。
+        KeyAction::SelectAndReplace(index) => {
+            let (text, replace_len) = {
+                let engine = &mut state.lock().unwrap().engine;
+                engine.preview_digit(index).unwrap_or_default()
+            };
+            replace_last_chars(context, ec, replace_len, &text)?;
         }
         KeyAction::ToggleMode
         | KeyAction::ToggleLayer
         | KeyAction::PageUp
         | KeyAction::PageDown
         | KeyAction::SelectUp
-        | KeyAction::SelectDown => {
+        | KeyAction::SelectDown
+        | KeyAction::VStart
+        | KeyAction::VCode(_)
+        | KeyAction::VBackspace
+        | KeyAction::Dot => {
             sync_engine(state, action);
             refresh_candidate_window(state, Some((context, ec)));
             return Ok(());
@@ -552,6 +712,50 @@ fn apply_action(
     }
     sync_engine(state, action);
     refresh_candidate_window(state, Some((context, ec)));
+    Ok(())
+}
+
+/// 编辑会话内把文档当前插入点前的 `replace_len` 个 UTF-16 单元替换为 `text`
+/// （FR-027 数字格式选择替换链，备选 A 之外的唯一实施路径）。
+///
+/// 步骤：取插入点 range → 起点前移 replace_len → SetText 替换 → 折叠到末尾并
+/// SetSelection 修正光标。`replace_len` 为 0 时退化为纯插入（防御）；文档当前
+/// 无选择点时静默跳过（与 `selection_placement` 同级的防御）。
+fn replace_last_chars(context: &ITfContext, ec: u32, replace_len: usize, text: &str) -> Result<()> {
+    let mut selection = [TF_SELECTION::default()];
+    let mut fetched: u32 = 0;
+    unsafe {
+        context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched)?;
+    }
+    let Some(range) = (*selection[0].range).clone() else {
+        return Ok(());
+    };
+    if let Ok(shift) = i32::try_from(replace_len) {
+        if shift > 0 {
+            unsafe {
+                range.ShiftStart(ec, -shift, std::ptr::null_mut(), std::ptr::null())?;
+            }
+        }
+    }
+    let wide = to_wide(text);
+    unsafe {
+        range.SetText(ec, 0, &wide)?;
+    }
+    // SetText 后把选区折叠到替换文本末尾（场景7 VM 验收断言"无残留"）。
+    unsafe {
+        range.Collapse(ec, TfAnchor(1))?;
+    }
+    let selection = TF_SELECTION {
+        range: std::mem::ManuallyDrop::new(Some(range)),
+        style: TF_SELECTIONSTYLE {
+            ase: TF_AE_END,
+            fInterimChar: BOOL(0),
+        },
+    };
+    unsafe {
+        context.SetSelection(ec, &[selection])?;
+    }
+    debug_log(&format!("zhu-ye: replace-last {replace_len} -> {text:?}"));
     Ok(())
 }
 
@@ -563,6 +767,8 @@ fn compose_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
             KeyAction::Letter(c) | KeyAction::Digit(c) => {
                 format!("{}{}", engine.composing(), c)
             }
+            // FR-028：v 模式回退拼音时组合串为 `v`+字母（引擎尚未同步）。
+            KeyAction::VConsume(c) => format!("v{c}"),
             KeyAction::Backspace => engine.preview_after_backspace().unwrap_or_default(),
             _ => String::new(),
         }
@@ -649,6 +855,32 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
         }
         KeyAction::SelectDown => {
             engine.select_down();
+        }
+        // FR-027：数字格式模式，引擎侧同步 buffer 与候选（文档已先写入）。
+        KeyAction::Dot => {
+            let _ = engine.digit_append('.');
+        }
+        KeyAction::BufferDigit(c) => {
+            let _ = engine.digit_append(c);
+        }
+        KeyAction::DigitBackspace => {
+            let _ = engine.digit_backspace();
+        }
+        KeyAction::SelectAndReplace(index) => {
+            let _ = engine.commit_digit(index);
+        }
+        // FR-028：v 模式状态推进（文档侧无写入，VConsume 的组合已在 apply_action 更新）。
+        KeyAction::VStart => {
+            let _ = engine.v_start();
+        }
+        KeyAction::VCode(c) => {
+            let _ = engine.v_code(c);
+        }
+        KeyAction::VConsume(c) => {
+            let _ = engine.v_consume(c);
+        }
+        KeyAction::VBackspace => {
+            let _ = engine.v_backspace();
         }
     }
 }
@@ -1140,7 +1372,9 @@ pub fn paired_core_version() -> &'static str {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_0, VK_1, VK_OEM_COMMA, VK_OEM_PERIOD};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_0, VK_1, VK_2, VK_5, VK_I, VK_OEM_COMMA, VK_OEM_PERIOD, VK_V, VK_X,
+    };
     use windows::Win32::UI::TextServices::{ITfTextInputProcessor, ITfThreadMgr};
 
     /// 生命周期计数是全局状态；测试并行运行时互斥，避免相互干扰。
@@ -1254,15 +1488,15 @@ mod tests {
         );
     }
 
-    /// T-049：数字键在"非缩写键前缀"场景保持原有语义——有候选时选词、
-    /// 无组合无候选时放行给宿主直出数字。
+    /// T-049 + FR-027：数字键在"非缩写键前缀"场景保持原语义——有候选时选词；
+    /// 空闲态数字进入数字格式模式（BufferDigit 边输边上屏，替代放行直出）。
     #[test]
     fn 数字键非缩写前缀时保持选词与直出语义() {
         let state = Rc::new(Mutex::new(EngineState::new()));
-        // 空组合、无候选：放行给宿主，数字直出（不被输入法吞掉）。
+        // 空组合、无候选：进入数字格式模式（FR-027，引擎替代宿主直出数字）。
         assert_eq!(
             plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
-            None
+            Some(KeyAction::BufferDigit('1'))
         );
         // 有候选：数字仍是选词（FR-006 不回归）。
         state.lock().unwrap().engine.handle_letter('n');
@@ -1400,9 +1634,15 @@ mod tests {
             classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0)),
             None
         );
+        // FR-027：`.`（VK_OEM_PERIOD/小键盘 VK_DECIMAL）归为 Dot，
+        // 数字格式模式内追加小数、模式外放行宿主。
         assert_eq!(
             classify_key(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0)),
-            None
+            Some(KeyAction::Dot)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_DECIMAL.0 as usize), LPARAM(0)),
+            Some(KeyAction::Dot)
         );
         // T-039：上下方向键移动页内选中行。
         assert_eq!(
@@ -1525,6 +1765,256 @@ mod tests {
         assert_eq!(
             plan_action(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0), false, &state),
             None
+        );
+    }
+
+    // ---- 场景7（T-061）：数字格式模式 / v 模式 / emoji 的 TSF 键路 ----
+
+    /// 构造进入数字格式模式（8 位日期串已累积）的 state。
+    fn digit_state() -> Rc<Mutex<EngineState>> {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        for digit in "20260930".chars() {
+            sync_engine(&state, KeyAction::BufferDigit(digit));
+        }
+        assert!(state.lock().unwrap().engine.digit_active());
+        state
+    }
+
+    /// 构造进入 v 模式且已输类型码（v1）的 state。
+    fn v_code_state() -> Rc<Mutex<EngineState>> {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        sync_engine(&state, KeyAction::VStart);
+        sync_engine(&state, KeyAction::VCode('1'));
+        assert!(state.lock().unwrap().engine.v_active());
+        state
+    }
+
+    #[test]
+    fn 空闲态数字启动数字格式模式() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        // 首数字键：启动数字模式并直插上屏（引擎累积），不再放行宿主。
+        assert_eq!(
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::BufferDigit('1'))
+        );
+        sync_engine(&state, KeyAction::BufferDigit('1'));
+        assert_eq!(state.lock().unwrap().engine.digit_text(), "1");
+        assert!(state.lock().unwrap().engine.digit_active());
+        // 后续数字继续累积。
+        assert_eq!(
+            plan_action(WPARAM(VK_0.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::BufferDigit('0'))
+        );
+        // 不足 5 位时无格式候选，数字越界仍继续追加。
+        assert_eq!(
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::BufferDigit('1'))
+        );
+    }
+
+    #[test]
+    fn 数字模式选择替换与越界追加() {
+        let state = digit_state();
+        // 8 位日期、4 个格式候选：`1` 选中第 0 项走替换。
+        assert_eq!(
+            plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::SelectAndReplace(0))
+        );
+        // 越界数字（5 及以上）继续追加，不吞键。
+        assert_eq!(
+            plan_action(WPARAM(VK_5.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::BufferDigit('5'))
+        );
+        // 替换预览：第 2 个候选 + 替换长度为 buffer UTF-16 长度（8 位日期）。
+        let (text, len) = state
+            .lock()
+            .unwrap()
+            .engine
+            .preview_digit(1)
+            .expect("第 2 个日期候选");
+        assert_eq!(text, "2026/09/30");
+        assert_eq!(len, 8, "20260930 为 8 位");
+    }
+
+    #[test]
+    fn 数字模式小数点追加与退格() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        for digit in "12345".chars() {
+            sync_engine(&state, KeyAction::BufferDigit(digit));
+        }
+        // `.` 在数字模式内追加（金额小数）。
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::BufferDigit('.'))
+        );
+        sync_engine(&state, KeyAction::BufferDigit('.'));
+        assert_eq!(state.lock().unwrap().engine.digit_text(), "12345.");
+        // 数字模式退格删尾部位。
+        assert_eq!(
+            plan_action(WPARAM(VK_BACK.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::DigitBackspace)
+        );
+        sync_engine(&state, KeyAction::DigitBackspace);
+        assert_eq!(state.lock().unwrap().engine.digit_text(), "12345");
+    }
+
+    #[test]
+    fn 数字模式空格选当前行esc退出() {
+        let state = digit_state();
+        // 空格 = 选中当前选中行（默认 0）。
+        assert_eq!(
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::SelectAndReplace(0))
+        );
+        // Esc 退出数字模式（数字正文保留，引擎清 buffer）。
+        assert_eq!(
+            plan_action(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::Escape)
+        );
+        sync_engine(&state, KeyAction::Escape);
+        assert!(!state.lock().unwrap().engine.digit_active());
+        assert!(state.lock().unwrap().engine.candidates().is_empty());
+    }
+
+    #[test]
+    fn 数字模式字母退出后进拼音组合() {
+        let state = digit_state();
+        // 字母键：退出数字模式并把字母交给拼音（plan 已同步退出）。
+        assert_eq!(
+            plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::Letter('a'))
+        );
+        assert!(!state.lock().unwrap().engine.digit_active());
+        sync_engine(&state, KeyAction::Letter('a'));
+        assert_eq!(state.lock().unwrap().engine.composing(), "a");
+    }
+
+    #[test]
+    fn 数字模式提交后清空状态() {
+        let state = digit_state();
+        sync_engine(&state, KeyAction::SelectAndReplace(1));
+        {
+            let engine = &state.lock().unwrap().engine;
+            assert!(!engine.digit_active());
+            assert_eq!(engine.previous_word(), Some("2026/09/30"));
+        }
+    }
+
+    #[test]
+    fn 空闲态v进入v模式组合态v走拼音() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        assert_eq!(
+            plan_action(WPARAM(VK_V.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::VStart)
+        );
+        sync_engine(&state, KeyAction::VStart);
+        assert!(state.lock().unwrap().engine.v_active());
+        assert_eq!(state.lock().unwrap().engine.v_buffer_len(), 1);
+        // 组合态（nv/lv）：v 是正常拼音字符，不进入 v 模式。
+        let nv = Rc::new(Mutex::new(EngineState::new()));
+        sync_engine(&nv, KeyAction::Letter('n'));
+        sync_engine(&nv, KeyAction::Letter('v'));
+        assert!(!nv.lock().unwrap().engine.v_active());
+    }
+
+    #[test]
+    fn v模式类型码与选择键() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        sync_engine(&state, KeyAction::VStart);
+        // 等待类型码：`x` 出数学符号组。
+        assert_eq!(
+            plan_action(WPARAM(VK_X.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::VCode('x'))
+        );
+        sync_engine(&state, KeyAction::VCode('x'));
+        assert_eq!(state.lock().unwrap().engine.v_symbol_count(), 9);
+        // 已出组：数字 = 选择符号。
+        assert_eq!(
+            plan_action(WPARAM(VK_2.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::Select(1))
+        );
+        // `0` 无义：退出 v 模式并放行宿主。
+        let zero = v_code_state();
+        assert_eq!(
+            plan_action(WPARAM(VK_0.0 as usize), LPARAM(0), false, &zero),
+            None
+        );
+        assert!(!zero.lock().unwrap().engine.v_active());
+    }
+
+    #[test]
+    fn v模式非法字母回退拼音组合() {
+        let state = v_code_state();
+        // `i`（vi）回退拼音：动作是 VConsume，组合文本 = "vi"。
+        assert_eq!(
+            plan_action(WPARAM(VK_I.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::VConsume('i'))
+        );
+        sync_engine(&state, KeyAction::VConsume('i'));
+        assert!(!state.lock().unwrap().engine.v_active());
+        assert_eq!(state.lock().unwrap().engine.composing(), "vi");
+        assert_eq!(compose_text(&state, KeyAction::VConsume('i')), "vi");
+    }
+
+    #[test]
+    fn v模式空格选首个符号esc与无效键退出() {
+        let state = v_code_state();
+        // 空格 = 选第 1 个符号（commit 直插后引擎提交符号）。
+        assert_eq!(
+            plan_action(WPARAM(VK_SPACE.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::Space)
+        );
+        // Esc 退出 v 模式。
+        let esc = v_code_state();
+        assert_eq!(
+            plan_action(WPARAM(VK_ESCAPE.0 as usize), LPARAM(0), false, &esc),
+            Some(KeyAction::Escape)
+        );
+        sync_engine(&esc, KeyAction::Escape);
+        assert!(!esc.lock().unwrap().engine.v_active());
+        // Enter 与 v 模式无关：先退出 v 模式再放行宿主。
+        let enter = v_code_state();
+        assert_eq!(
+            plan_action(WPARAM(VK_RETURN.0 as usize), LPARAM(0), false, &enter),
+            None
+        );
+        assert!(!enter.lock().unwrap().engine.v_active());
+    }
+
+    #[test]
+    fn v模式退格回退类型码() {
+        let state = v_code_state();
+        assert_eq!(
+            plan_action(WPARAM(VK_BACK.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::VBackspace)
+        );
+        sync_engine(&state, KeyAction::VBackspace);
+        assert!(state.lock().unwrap().engine.v_active());
+        assert_eq!(state.lock().unwrap().engine.v_buffer_len(), 1);
+        // 只剩 `v` 时再退格退出 v 模式。
+        sync_engine(&state, KeyAction::VBackspace);
+        assert!(!state.lock().unwrap().engine.v_active());
+    }
+
+    #[test]
+    fn v模式再按v回退拼音不重复启动() {
+        let state = v_code_state();
+        assert_eq!(
+            plan_action(WPARAM(VK_V.0 as usize), LPARAM(0), false, &state),
+            Some(KeyAction::VConsume('v'))
+        );
+        sync_engine(&state, KeyAction::VConsume('v'));
+        assert_eq!(state.lock().unwrap().engine.composing(), "vv");
+        assert!(!state.lock().unwrap().engine.v_active());
+    }
+
+    #[test]
+    fn 数字模式外小数点放行宿主() {
+        let state = Rc::new(Mutex::new(EngineState::new()));
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false, &state),
+            None,
+            "非数字模式 `.` 放行给宿主直出标点"
         );
     }
 }
