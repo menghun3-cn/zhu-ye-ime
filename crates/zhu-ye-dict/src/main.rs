@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use zhu_ye_core::bigram::BigramModel;
 use zhu_ye_core::dict::Dictionary;
@@ -14,8 +14,9 @@ use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
     audit_coverage, build_base, build_manifest, build_pack, build_real_bigrams,
-    build_real_dictionary, build_slang, build_v2, dict_schema_version, pipeline_status,
-    seed_bigrams, seed_entries, source_check, today, verify_manifest,
+    build_real_dictionary, build_slang, build_v2, dict_schema_version, load_frequency_map,
+    load_patch_table, load_standard_readings, parse_cedict_line, pipeline_status, polyphone_gaps,
+    seed_bigrams, seed_entries, source_check, split_pinyin_syllables, today, verify_manifest,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -43,6 +44,7 @@ fn run() -> Result<(), String> {
     match args.get(1).map(String::as_str) {
         Some("build") => build_command(args.get(2).map(PathBuf::from)),
         Some("import") => import_command(&args),
+        Some("audit-polyphone") => audit_polyphone_command(&args),
         Some("inspect") => inspect_command(required_path(&args, 2)?),
         Some("verify") => verify_command(required_path(&args, 2)?),
         Some("source-check") => source_check_command(),
@@ -65,7 +67,7 @@ fn print_usage() {
     println!("zhu-ye-dict 命令：");
     println!("  build [输出路径]      构建自建演示种子词典（默认 {DEFAULT_OUTPUT}）");
     println!(
-        "  import <CC-CEDICT> <词频> [输出路径] [上限] [--bigram 语料]  导入真实数据构建词典（默认 {DEFAULT_REAL_OUTPUT}）"
+        "  import <CC-CEDICT> <词频> [输出路径] [上限] [--bigram 语料] [--polyphone 补丁表]  导入真实数据构建词典（默认 {DEFAULT_REAL_OUTPUT}）"
     );
     println!("  inspect <文件>        打印词典头部元数据与内容哈希");
     println!("  verify <文件>         完整加载校验并核对种子词条/bigram/翻译");
@@ -78,6 +80,9 @@ fn print_usage() {
     );
     println!(
         "  audit-coverage [--sample N] [--base 文件]  常用词出候选率与首候选正确率抽检（S-1，N 默认 5000）（M6）"
+    );
+    println!(
+        "  audit-polyphone <CC-CEDICT> <kTGHZ2013> [--freq 文件] [--min-freq N]  多音缺读审计（T-056）"
     );
     println!(
         "  build-slang           构建网络语包（种子表 + 把关抽查，输出 slang.zyct 与 slang.gate.json）（M6）"
@@ -413,6 +418,7 @@ fn import_command(args: &[String]) -> Result<(), String> {
     let mut max_entries = None;
     let mut bigram_path = None;
     let mut output_arg_seen = false;
+    let mut polyphone_path: Option<PathBuf> = None;
     let mut index = 4;
     while index < args.len() {
         match args[index].as_str() {
@@ -422,6 +428,15 @@ fn import_command(args: &[String]) -> Result<(), String> {
                     args.get(index)
                         .map(PathBuf::from)
                         .ok_or_else(|| "--bigram 缺少语料路径".to_owned())?,
+                );
+                index += 1;
+            }
+            "--polyphone" => {
+                index += 1;
+                polyphone_path = Some(
+                    args.get(index)
+                        .map(PathBuf::from)
+                        .ok_or_else(|| "--polyphone 缺少补丁表路径".to_owned())?,
                 );
                 index += 1;
             }
@@ -445,7 +460,26 @@ fn import_command(args: &[String]) -> Result<(), String> {
     let cedict_text = read_text_file(&cedict_path, "CC-CEDICT")?;
     let frequency_text = read_text_file(&frequency_path, "词频文件")?;
 
-    let (entries, stats) = build_real_dictionary(&cedict_text, &frequency_text, max_entries);
+    // T-056 多音缺读补丁：显式指定必须存在且合法；未指定时默认读取仓库补丁表，
+    // 文件不存在则按无补丁处理（保持旧命令行为兼容）。
+    let polyphone_patches = match &polyphone_path {
+        Some(path) => load_patch_table(path)?,
+        None => {
+            let default = Path::new("data/patches/polyphone.tsv");
+            if default.exists() {
+                load_patch_table(default)?
+            } else {
+                Vec::new()
+            }
+        }
+    };
+
+    let (entries, stats) = build_real_dictionary(
+        &cedict_text,
+        &frequency_text,
+        max_entries,
+        &polyphone_patches,
+    );
     let vocabulary: HashSet<&str> = entries.iter().map(|entry| entry.word.as_str()).collect();
     let mut bigram_owned = Vec::new();
     let mut bigram_stats = None;
@@ -495,6 +529,12 @@ fn import_command(args: &[String]) -> Result<(), String> {
     if !stats.unknown_syllables.is_empty() {
         println!("未知音节样本: {}", stats.unknown_syllables.join("、"));
     }
+    println!(
+        "多音补丁: 读取 {} 条，应用 {}，跳过 {}",
+        polyphone_patches.len(),
+        stats.polyphone_applied,
+        stats.polyphone_skipped
+    );
     if let Some(bigram_stats) = &bigram_stats {
         println!(
             "bigram 统计: 语料行 {corpus_lines}，分词 {tokens_total}，命中词表 {tokens_matched}，候选词对 {pairs_formed}，唯一词对 {unique_pairs}",
@@ -503,6 +543,110 @@ fn import_command(args: &[String]) -> Result<(), String> {
             tokens_matched = bigram_stats.tokens_matched,
             pairs_formed = bigram_stats.pairs_formed,
             unique_pairs = bigram_stats.unique_pairs
+        );
+    }
+    Ok(())
+}
+
+/// `audit-polyphone <CC-CEDICT> <kTGHZ2013> [--freq 文件] [--min-freq N]`：
+/// 规范读音 vs 词库读音的多音缺读审计（T-056）。
+///
+/// 输出「规范读音存在而词库缺失」的（字, 读音）清单，附该字词频与已有读音；
+/// 供人工甄选后写入 `data/patches/polyphone.tsv`（构建期 `import --polyphone` 应用）。
+fn audit_polyphone_command(args: &[String]) -> Result<(), String> {
+    let cedict_path = required_path(args, 2)?;
+    let letters_path = required_path(args, 3)?;
+    let mut freq_path: Option<PathBuf> = None;
+    let mut min_freq: Option<u64> = None;
+    let mut index = 4;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--freq" => {
+                index += 1;
+                freq_path = Some(
+                    args.get(index)
+                        .map(PathBuf::from)
+                        .ok_or_else(|| "--freq 缺少词频文件路径".to_owned())?,
+                );
+                index += 1;
+            }
+            "--min-freq" => {
+                index += 1;
+                min_freq = Some(
+                    args.get(index)
+                        .ok_or_else(|| "--min-freq 缺少数值".to_owned())?
+                        .parse::<u64>()
+                        .map_err(|error| format!("--min-freq 解析失败: {error}"))?,
+                );
+                index += 1;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => return Err(format!("多余参数：{}", args[index])),
+        }
+    }
+
+    let cedict_text = read_text_file(&cedict_path, "CC-CEDICT")?;
+    let letters_text = read_text_file(&letters_path, "kTGHZ2013 读音表")?;
+
+    // 与构建同口径：单字词条 -> 读音集合（split_pinyin_syllables 拒绝非法拼音）。
+    let mut entry_readings: HashMap<String, HashSet<String>> = HashMap::new();
+    for line in cedict_text.lines() {
+        let Some((simplified, marked, _)) = parse_cedict_line(line) else {
+            continue;
+        };
+        if simplified.chars().count() != 1 {
+            continue;
+        }
+        let Some(syllables) = split_pinyin_syllables(&marked) else {
+            continue;
+        };
+        if syllables.len() != 1 {
+            continue;
+        }
+        entry_readings
+            .entry(simplified)
+            .or_default()
+            .insert(syllables[0].clone());
+    }
+
+    let standard = load_standard_readings(&letters_text);
+    let mut gaps = polyphone_gaps(&entry_readings, &standard);
+
+    // 词频过滤仅为人工排序参考，不参与读音判定。
+    let frequencies = match freq_path {
+        Some(path) => {
+            let freq_text = read_text_file(&path, "词频文件")?;
+            Some(load_frequency_map(&freq_text))
+        }
+        None => None,
+    };
+    if let Some(frequencies) = &frequencies {
+        gaps.retain(|gap| {
+            frequencies.get(&gap.character).copied().unwrap_or(0) >= min_freq.unwrap_or(0)
+        });
+    }
+
+    println!(
+        "多音缺读审计: CEDICT 单字 {} 个，规范读音表 {} 字，缺读 {} 条",
+        entry_readings.len(),
+        standard.len(),
+        gaps.len()
+    );
+    for gap in &gaps {
+        let frequency = frequencies
+            .as_ref()
+            .and_then(|map| map.get(&gap.character))
+            .copied()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        println!(
+            "{}\t{}\t已有={}\t词频={}",
+            gap.character,
+            gap.missing,
+            gap.existing.join("/"),
+            frequency
         );
     }
     Ok(())

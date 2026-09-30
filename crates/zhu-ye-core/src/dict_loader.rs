@@ -460,6 +460,10 @@ impl DictionaryFile {
                 high = mid;
             }
         }
+        if low >= self.header.reverse_translation_count as usize {
+            // 键大于全部反查键：二分停在末尾，直接判定未命中，避免越界。
+            return None;
+        }
         let record = ReverseTranslationRecord::new(
             &self.reverse_translation_records()[low * REVERSE_TRANSLATION_RECORD_SIZE
                 ..(low + 1) * REVERSE_TRANSLATION_RECORD_SIZE],
@@ -810,6 +814,23 @@ mod tests {
         assert_eq!(file.lookup("ceshi").len(), 1);
         assert_eq!(file.zh_to_en("测试"), None);
         assert_eq!(file.en_to_zh("test"), None);
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 反查键大于全部记录时不越界() {
+        // 回归（T-056）：en_to_zh 二分落在序列末尾时（如实参为中文键，UTF-8 字节
+        // 大于全部英文反查键）曾在取记录处发生下标越界 panic（dict_loader:464）。
+        let dir = temp_dir("reverse-boundary");
+        let path = dir.join("boundary.zyct");
+        let bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let file = DictionaryFile::open(&path).unwrap();
+        assert_eq!(file.en_to_zh("谁"), None);
+        assert_eq!(file.en_to_zh("zzzzzz"), None);
+        assert_eq!(file.en_to_zh(""), None);
+        assert_eq!(file.en_to_zh("hello"), Some("你好".to_owned()));
         drop(file);
         std::fs::remove_dir_all(dir).unwrap();
     }

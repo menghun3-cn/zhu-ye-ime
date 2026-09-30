@@ -16,9 +16,15 @@ pub use zhu_ye_core::dict_format::DICT_VERSION;
 pub mod import;
 pub use import::{
     build_real_bigrams, build_real_dictionary, load_frequency_map, normalize_pinyin,
-    parse_cedict_line,
+    parse_cedict_line, split_pinyin_syllables,
 };
 pub use import::{BigramStats, ImportStats};
+
+pub mod polyphone;
+pub use polyphone::{
+    load_patch_table, load_standard_readings, parse_patch_table, polyphone_gaps,
+    strip_tone_letters, PatchEntry, PolyphoneGap, StandardReading,
+};
 
 pub mod m6;
 pub use m6::{
