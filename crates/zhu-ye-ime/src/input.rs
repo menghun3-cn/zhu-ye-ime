@@ -26,6 +26,12 @@ const PREFIX_COMPLETION_CAP: usize = 32;
 /// 缩写前缀补全（M6-R）最多追加的条数。
 const ABBREVIATION_COMPLETION_CAP: usize = 32;
 
+/// 英文词候选最小触发长度（场景6，FR-030）：≥2 防单字母/`v` 键路径污染。
+const EN_WORD_MIN_LEN: usize = 2;
+
+/// 英文词候选组最多展示条数（场景6，FR-030；D-10 独立组置主候选后）。
+const EN_WORD_CAP: usize = 6;
+
 /// 输入模式。T-013 接入 Shift 切换；这里先提供状态与切换方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -580,6 +586,17 @@ impl InputEngine {
         self.push_composing(c)
     }
 
+    /// 邮箱/网址格式字符进入组合串（场景6，FR-031）：`@`/`.`/`/`/`:` 在组合态
+    /// 直接追加（供 TSF 层把 Shift+2 的 `@` 与格式键路进串，D-11）；
+    /// 组合未激活（空闲态）返回 `false` 放行宿主（格式分支只在组合表内延伸，不冷启动，
+    /// `@` 不开新组合）；英文模式拒绝。
+    pub fn handle_format_char(&mut self, c: char) -> bool {
+        if !matches!(c, '@' | '.' | '/' | ':') || self.composing.is_empty() {
+            return false;
+        }
+        self.push_composing(c)
+    }
+
     fn push_composing(&mut self, c: char) -> bool {
         if self.mode != InputMode::Chinese {
             return false;
@@ -1070,6 +1087,46 @@ impl InputEngine {
 
     fn refresh_candidates(&mut self) {
         let context = RankingContext::new(self.previous_word.as_deref(), &self.user_dictionary);
+        // FR-031（场景6）：组合串进入邮箱/网址格式路径（含 `@` 或 `www.`/`http(s)://` 前缀），
+        // 候选 = 至多 3 条补全（.com/.cn/.net 或 .com/.cn/.org），完整串（已含 `.`）直通上屏。
+        // pinyin = None 不进入用户词学习；普通中文输入（无 @/www./http 前缀）不介入（D-10）。
+        match zhu_ye_core::detect_format(&self.composing) {
+            zhu_ye_core::FormatKind::Email => {
+                self.candidates = zhu_ye_core::email_candidates(&self.composing)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, text)| Candidate {
+                        text,
+                        translation: None,
+                        pinyin: None,
+                        score: -(index as i64),
+                        source: zhu_ye_core::candidate::CandidateSource::EmailUrl,
+                    })
+                    .collect();
+                self.cached_translation_candidates.clear();
+                self.selected_on_page = 0;
+                self.clamp_page();
+                return;
+            }
+            zhu_ye_core::FormatKind::Url => {
+                self.candidates = zhu_ye_core::url_candidates(&self.composing)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, text)| Candidate {
+                        text,
+                        translation: None,
+                        pinyin: None,
+                        score: -(index as i64),
+                        source: zhu_ye_core::candidate::CandidateSource::EmailUrl,
+                    })
+                    .collect();
+                self.cached_translation_candidates.clear();
+                self.selected_on_page = 0;
+                self.clamp_page();
+                return;
+            }
+            zhu_ye_core::FormatKind::None => {}
+        }
         // T-029：输入串存在尾部残缺音节时走前缀候选（补全组优先 + 完成组回退），
         // 两组分别经排序模型排序后按组间顺序融合，确保补全组始终在前。
         let groups = zhu_ye_core::generate_prefix_candidates(
@@ -1125,6 +1182,19 @@ impl InputEngine {
                 }
             }
             self.candidates = main;
+        }
+        // FR-030（场景6）：整串**完全无法按拼音切分**（与缩写路径同判定）时查英文词表；
+        // 命中 → 英文候选组追加到主候选**尾部**（D-10：不参与中文静态排序、不挤占中文命中）；
+        // 未命中 → 保持既有路径，缩写/网络组行为不变（`yyds` 等缩写不回退）。
+        if !self.composing.is_empty()
+            && self.composing.chars().count() >= EN_WORD_MIN_LEN
+            && segment_all(&self.table, &self.composing).is_empty()
+        {
+            let en = zhu_ye_core::en_word_candidates(&self.composing, EN_WORD_CAP);
+            if !en.is_empty() {
+                let main = std::mem::take(&mut self.candidates);
+                self.candidates = append_group(main, en);
+            }
         }
         // M6-R 缩写路径（FR-016/FR-017）：整串完全不可切分且长度达标时，
         // 查询网络语包并把命中候选作为**独立组追加在尾部**，不参与默认排序竞争。
@@ -2351,5 +2421,152 @@ mod tests {
         assert_eq!(view.pinyin_hint, "v1");
         assert_eq!(view.visible_items().len(), 9);
         assert_eq!(view.visible_items()[0].text, "①");
+    }
+
+    // ---------- 场景6（中英混输，T-065）引擎层测试 ----------
+
+    fn type_format(engine: &mut InputEngine, text: &str) {
+        for c in text.chars() {
+            let ok = match c {
+                'a'..='z' => engine.handle_letter(c),
+                '0'..='9' => engine.handle_digit(c),
+                _ => engine.handle_format_char(c),
+            };
+            assert!(ok);
+        }
+    }
+
+    #[test]
+    fn 英文拼写命中出原形候选() {
+        let mut eng = engine();
+        type_text(&mut eng, "pytho");
+        let en = eng
+            .candidates()
+            .iter()
+            .find(|c| c.source == zhu_ye_core::candidate::CandidateSource::EnWord)
+            .expect("pytho 应命中英文候选组");
+        assert_eq!(en.text, "python");
+        assert!(en.pinyin.is_none(), "英文候选不进用户词学习");
+    }
+
+    #[test]
+    fn 英文大小写原形保留() {
+        let mut eng = engine();
+        type_text(&mut eng, "iphon");
+        let en = eng
+            .candidates()
+            .iter()
+            .find(|c| c.source == zhu_ye_core::candidate::CandidateSource::EnWord)
+            .expect("iphon 应命中英文候选组");
+        assert_eq!(en.text, "iPhone");
+    }
+
+    #[test]
+    fn 可切分拼音不进入英文路径() {
+        let mut eng = engine();
+        type_text(&mut eng, "nihao");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::EnWord),
+            "可切分整串 nihao 不得触发英文路径（D-10）"
+        );
+        type_text(&mut eng, "wo");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::EnWord),
+            "可切分串 wo 不得触发英文路径（D-10）"
+        );
+    }
+
+    #[test]
+    fn 英文未命中时缩写组不回退() {
+        let mut eng = slang_engine();
+        type_text(&mut eng, "yyds");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::EnWord),
+            "yyds 无英文命中，不得出现英文组"
+        );
+        let found = eng.candidates().iter().any(|c| {
+            c.text == "永远的神" && c.source == zhu_ye_core::candidate::CandidateSource::Slang
+        });
+        assert!(found, "yyds 缩写行为不得回退");
+    }
+
+    #[test]
+    fn 邮箱补全候选与直通() {
+        let mut eng = engine();
+        type_format(&mut eng, "me@163");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["me@163.com", "me@163.cn", "me@163.net"]);
+        assert!(
+            eng.candidates().iter().all(|c| c.source
+                == zhu_ye_core::candidate::CandidateSource::EmailUrl
+                && c.pinyin.is_none()),
+            "邮箱候选来源 EmailUrl 且不进学习"
+        );
+        // 已含点：完整串直通，不重复补全
+        let mut eng2 = engine();
+        type_format(&mut eng2, "a@b.c");
+        assert_eq!(eng2.candidates().len(), 1);
+        assert_eq!(eng2.candidates()[0].text, "a@b.c");
+    }
+
+    #[test]
+    fn 网址补全候选与直通() {
+        let mut eng = engine();
+        type_format(&mut eng, "www.exa");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["www.exa.com", "www.exa.cn", "www.exa.org"]);
+        let mut eng2 = engine();
+        type_format(&mut eng2, "http://exa");
+        let texts2: Vec<&str> = eng2.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            texts2,
+            vec!["http://exa.com", "http://exa.cn", "http://exa.org"]
+        );
+        // 已含点：直通
+        let mut eng3 = engine();
+        type_format(&mut eng3, "www.exa.com");
+        assert_eq!(eng3.candidates().len(), 1);
+        assert_eq!(eng3.candidates()[0].text, "www.exa.com");
+    }
+
+    #[test]
+    fn 邮箱提交与退出() {
+        let mut eng = engine();
+        type_format(&mut eng, "me@163");
+        let committed = eng.select_index(0).expect("应能选首候选上屏");
+        assert_eq!(committed, "me@163.com");
+        assert!(!eng.is_active(), "提交后组合清空");
+        // Esc 放弃整串回空闲
+        let mut eng2 = engine();
+        type_format(&mut eng2, "me@163");
+        assert!(eng2.handle_escape());
+        assert!(!eng2.is_active());
+        // 退格逐步回拼音：删掉 @ 后退出邮箱态（me 是可切分拼音音节，按 D-10 不介入英文）
+        let mut eng3 = engine();
+        type_format(&mut eng3, "me@163");
+        for _ in 0..4 {
+            assert!(eng3.handle_backspace());
+        }
+        assert_eq!(eng3.composing(), "me");
+        assert!(
+            eng3.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::EmailUrl),
+            "@ 删除后应退出邮箱态"
+        );
+    }
+
+    #[test]
+    fn 格式字符空闲态放行宿主() {
+        let mut eng = engine();
+        assert!(!eng.handle_format_char('@'), "空闲态 @ 不放行进组合");
+        assert!(!eng.is_active());
+        assert_eq!(eng.composing(), "");
     }
 }

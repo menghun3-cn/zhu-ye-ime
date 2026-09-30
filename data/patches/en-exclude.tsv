@@ -1,0 +1,57 @@
+# 英文词表排除清单（T-065，构建输入，随 git 版本管理）
+# 格式：一行一个小写查键（norm）。构建期从英文词表剔除（FrequencyWords 段删除，CEDICT 段不补回）。
+# 规则：仅收录"中文人名/专名音译"在英文语料高频、对中文输入者是噪声的词条
+#       （如 Zhang 作为姓氏音译出现在英文词频表；zh 前缀会污染拼音输入流）。
+#       正常英文词（he/li/ma 等兼作音译的）一律不排除；可切分拼音（wang/liu 等）
+#       不会进入英文路径，排除仅作兜底防 CEDICT 侧补回。
+zhang
+wang
+chen
+li
+wu
+zhao
+qian
+sun
+zhou
+zheng
+feng
+huang
+lin
+xu
+deng
+song
+tang
+han
+yang
+jiang
+guo
+luo
+cao
+gao
+cai
+fan
+fang
+fu
+hong
+jin
+lei
+pan
+peng
+shen
+shi
+su
+tian
+wan
+wei
+wen
+xia
+xiang
+xiao
+xie
+yan
+yao
+ye
+yu
+yuan
+zeng
+zou
