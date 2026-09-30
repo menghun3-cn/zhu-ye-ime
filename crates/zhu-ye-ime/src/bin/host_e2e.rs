@@ -81,6 +81,14 @@ fn main() -> ExitCode {
             };
             run_m8_checks(Path::new(path))
         }
+        // 场景7 格式候选验收（FR-027/028/029）：数字格式候选、v 模式符号、emoji 追尾。
+        Some("--m9") => {
+            let Some(path) = args.get(1).map(String::as_str) else {
+                eprintln!("用法: host-e2e --m9 <词典文件>");
+                return ExitCode::from(2);
+            };
+            run_m9_checks(Path::new(path))
+        }
         // M6-R 多包回归：--multi-pack <base.zyct> <pack1.zyct> [pack2.zyct ...]
         Some("--multi-pack") => {
             let paths: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
@@ -751,6 +759,207 @@ fn m8_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
             "输入字母退出联想态回到组合输入",
             "字母应清空联想并进入拼音组合",
         );
+    }
+    engine.handle_escape();
+    Ok(())
+}
+
+fn run_m9_checks(path: &Path) -> ExitCode {
+    let mut runner = Runner {
+        passed: 0,
+        failed: 0,
+    };
+    if let Err(error) = m9_checks(path, &mut runner) {
+        runner.fail("格式候选检查执行", &error);
+    }
+    runner.finish()
+}
+
+/// 场景7 格式候选断言组（FR-027 数字格式 / FR-028 v 模式符号 / FR-029 emoji）。
+///
+/// 独立词典加载（验收标准 9.1 同口径），主机侧即可断言引擎完整闭环：
+/// 数字边输边上屏、格式候选布局与替换长度、v 模式类型码与回退、emoji 队尾追加。
+fn m9_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
+    let mut engine = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+
+    // ---- FR-027 数字格式候选：8 位日期 ----
+    for digit in "20260930".chars() {
+        assert!(
+            engine.digit_append(digit),
+            "数字 {digit} 未进入数字格式模式（20260930）"
+        );
+    }
+    if engine.digit_active() && engine.composing().is_empty() {
+        runner.pass("数字格式模式：8 位串累积且无拼音组合");
+    } else {
+        return Err("数字格式模式未激活或出现组合串".to_owned());
+    }
+    let date_candidates: Vec<String> = engine.candidates().iter().map(|c| c.text.clone()).collect();
+    let expected = vec![
+        "2026-09-30".to_owned(),
+        "2026/09/30".to_owned(),
+        "2026年9月30日".to_owned(),
+        "2026.09.30".to_owned(),
+    ];
+    if date_candidates == expected {
+        runner.pass("8 位日期 → 4 个格式候选（9.1-用例1）");
+    } else {
+        runner.fail(
+            "8 位日期 → 4 个格式候选（9.1-用例1）",
+            &format!("实际: {date_candidates:?}"),
+        );
+    }
+    // 选择第 2 个日期：替换 8 位 buffer，格式文本作为新前词，无候选残留。
+    let (committed, replace_len) = engine
+        .commit_digit(1)
+        .ok_or_else(|| "提交第 2 个日期候选失败".to_owned())?;
+    if committed == "2026/09/30" && replace_len == 8 {
+        runner.pass("选中第 2 式返回替换长度 8（9.1-用例2 替换链输入）");
+    } else {
+        runner.fail(
+            "选中第 2 式返回替换长度 8（9.1-用例2 替换链输入）",
+            &format!("text={committed:?} len={replace_len}"),
+        );
+    }
+    if !engine.digit_active() && engine.candidates().is_empty() {
+        runner.pass("提交后退出数字模式且无候选残留（9.1-用例2 无残留）");
+    } else {
+        runner.fail(
+            "提交后退出数字模式且无候选残留（9.1-用例2 无残留）",
+            "数字模式仍活跃或有候选",
+        );
+    }
+
+    // ---- FR-027：数字模式后退格/不足不触发/越界 ----
+    for digit in "20260930".chars() {
+        engine.digit_append(digit);
+    }
+    if engine.digit_backspace() && engine.digit_text() == "2026093" {
+        runner.pass("数字模式退格删除尾部位");
+    } else {
+        runner.fail("数字模式退格删除尾部位", "退格未生效");
+    }
+    engine.exit_digit();
+    let mut short = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    for digit in "12".chars() {
+        short.digit_append(digit);
+    }
+    if short.digit_active() && short.candidates().is_empty() {
+        runner.pass("不足 5 位不触发格式候选（9.1-用例4）");
+    } else {
+        runner.fail("不足 5 位不触发格式候选（9.1-用例4）", "出现了格式候选");
+    }
+    short.exit_digit();
+
+    // ---- FR-027：金额与电话 ----
+    let mut amount = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    for digit in ['1', '2', '3', '4', '5', '.', '6'] {
+        assert!(amount.digit_append(digit), "金额数字/小数点追加失败");
+    }
+    let amount_list: Vec<String> = amount.candidates().iter().map(|c| c.text.clone()).collect();
+    if amount_list == vec!["12,345.6".to_owned(), "一万二千三百四十五点六".to_owned()] {
+        runner.pass("金额 12345.6 → 千分位 + 中文读数（9.1-用例5）");
+    } else {
+        runner.fail(
+            "金额 12345.6 → 千分位 + 中文读数（9.1-用例5）",
+            &format!("实际: {amount_list:?}"),
+        );
+    }
+    let mut phone = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    for digit in "13800138000".chars() {
+        phone.digit_append(digit);
+    }
+    let phone_list: Vec<String> = phone.candidates().iter().map(|c| c.text.clone()).collect();
+    if phone_list == vec!["138 0013 8000".to_owned(), "138-0013-8000".to_owned()] {
+        runner.pass("11 位手机号 → 2 种分段（9.1-用例6）");
+    } else {
+        runner.fail(
+            "11 位手机号 → 2 种分段（9.1-用例6）",
+            &format!("实际: {phone_list:?}"),
+        );
+    }
+
+    // ---- FR-028：v 模式符号 ----
+    let mut v1 = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    if !v1.v_start() {
+        return Err("空闲态 v_start 未启动 v 模式".to_owned());
+    }
+    if !v1.v_code('1') {
+        return Err("v1 类型码未生效".to_owned());
+    }
+    if v1.v_symbol_count() == 9 && v1.candidates()[0].text == "①" {
+        runner.pass("v1 → 序号符号组 9 项（9.1-用例7）");
+    } else {
+        runner.fail("v1 → 序号符号组 9 项（9.1-用例7）", "符号候选数或首项不符");
+    }
+    if v1.select_index(2).as_deref() == Some("③") && !v1.v_active() {
+        runner.pass("选第 3 个符号上屏③并退出 v 模式（9.1-用例8）");
+    } else {
+        runner.fail("选第 3 个符号上屏③并退出 v 模式（9.1-用例8）", "选择异常");
+    }
+    // vx 数学组、vh 标点组。
+    let mut vx = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    vx.v_start();
+    vx.v_code('x');
+    if vx.candidates()[0].text == "±" && vx.candidates().iter().any(|c| c.text == "∞") {
+        runner.pass("vx → 数学符号组（±×÷≈≠≤≥∞％）");
+    } else {
+        runner.fail("vx → 数学符号组（±×÷≈≠≤≥∞％）", "数学组缺失");
+    }
+    let mut vh = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    vh.v_start();
+    vh.v_code('h');
+    if vh.candidates()[0].text == "，" {
+        runner.pass("vh → 中文标点组（，。！？、；：\"\"）");
+    } else {
+        runner.fail("vh → 中文标点组（，。！？、；：\"\"）", "标点组缺失");
+    }
+    // vi 回退拼音。
+    let mut vi = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    vi.v_start();
+    if !vi.v_consume('i') || vi.composing() != "vi" || vi.v_active() {
+        runner.fail("vi 回退拼音组合（9.1-用例10）", "vi 未进入拼音组合");
+    } else {
+        runner.pass("vi 回退拼音组合（9.1-用例10）");
+    }
+
+    // ---- FR-029：emoji 队尾追加 ----
+    // 真实词典 xiao 有「小」；emoji 表别名 xiao → 😄 追候选尾部。
+    let mut emoji_engine = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    type_text(&mut emoji_engine, "xiao");
+    let tail = emoji_engine.candidates().last();
+    if tail.map(|c| c.text.as_str()) == Some("😄")
+        && tail.map(|c| c.source == zhu_ye_core::candidate::CandidateSource::Emoji) == Some(true)
+        && emoji_engine.candidates().iter().any(|c| c.text == "小")
+    {
+        runner.pass("xiao → emoji😄追候选尾部且「小」保留在列（9.1-用例9）");
+    } else {
+        runner.fail(
+            "xiao → emoji😄追候选尾部且「小」保留在列（9.1-用例9）",
+            "emoji 未追加或拼音候选被挤掉",
+        );
+    }
+    // 无别名命中不追加 emoji（来源过滤）。
+    let mut miss = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    type_text(&mut miss, "nihao");
+    if miss
+        .candidates()
+        .iter()
+        .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Emoji)
+    {
+        runner.pass("无别名命中不追加 emoji（9.1-用例11）");
+    } else {
+        runner.fail("无别名命中不追加 emoji（9.1-用例11）", "出现了 emoji 候选");
     }
     engine.handle_escape();
     Ok(())
