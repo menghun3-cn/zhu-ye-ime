@@ -24,7 +24,7 @@ amount: thousands separators + a Chinese reading via `cn_numeral`, 11-digit
 phone ×2, ≥5-digit plain thousands separators; empty when too long/illegal);
 `symbols.rs` — `symbol_group('1'..='9')` serial numbers ①-⑨, `x` math symbols
 ±×÷≈≠≤≥∞％, `h` punctuation ，。！？、；："" — one page of 9 each;
-`emoji.rs` — a static 109-entry alias table sorted by alias bytes with binary
+`emoji.rs` — a static 381-entry alias table sorted by alias bytes with binary
 `emoji_for` lookup; `CandidateSource` gains `NumberFormat`/`Symbol`/`Emoji`.
 
 **engine** (`input.rs`):
@@ -110,8 +110,9 @@ Rejected: conflicts with D-02's v-mode numbering; v-mode number semantics win.
   while digit mode is active (exit via Escape/letter first).
 - Digit keys in a composition keep their meaning unchanged (including
   digit-abbreviation keys such as 996/u1s1).
-- The emoji table ships with 109 entries in static binary-search order; the
-  pure-data push to 300+ is T-062.
+- The emoji table ships with 381 entries in static binary-search order; T-062
+  expanded it from the initial 109 in a pure-data batch (aliases stay lowercase,
+  ordering enforced by test).
 - The shui candidate-coverage item (option A) stays pending — no overlap with
   scenario 7.
 
