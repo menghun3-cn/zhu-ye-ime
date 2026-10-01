@@ -193,6 +193,35 @@ larger symbol set can fill it later. Symbol-table expansion is its own task. 图
 stays a placeholder: TSF inserts text only, so an image cannot be committed into an
 arbitrary host; a clipboard-copy action is the most a future version could offer.
 
+The emoji panel deduplicates by character: the alias table holds several aliases for the
+same emoji (`ai`/`aixin` are both ❤️), so 381 aliases yield 342 distinct characters in 23
+first-letter groups.
+
+### Panel delivery: a second, non-activating window
+
+A panel cell must land in the application the user is actually typing into, but the
+settings window owns the foreground while the user clicks. Two decisions make that work:
+
+- **The panel is its own window** with `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST`,
+  and it answers `WM_MOUSEACTIVATE` with `MA_NOACTIVATE`. Clicking it therefore never moves
+  the foreground away from the user's application, so `SendInput` with `KEYEVENTF_UNICODE`
+  delivers the character there. This is how the Windows emoji panel behaves, and the
+  project already ships a non-activating top-level window (the candidate window).
+- **Opening the panel hands the foreground back** to the window that was foreground before
+  the settings window appeared, captured via `GetForegroundWindow` before `ShowWindow`.
+  Focus moves once when the panel opens and once when it closes — not on every click, so
+  several characters can be inserted in a row.
+
+Consequences: a non-activating window receives no keyboard input, so the panel has no
+Escape-to-close and closes through its own button; and `SendInput` is refused by UIPI when
+the foreground window belongs to an elevated process, which falls back to the clipboard
+with an on-panel notice rather than failing silently.
+
+GDI cannot render colour emoji: `COLR`/`CBDT` layers need DirectWrite, which the design
+excludes along with the rest of the GUI frameworks. Panel glyphs are therefore monochrome
+outlines, and each cell carries the pinyin alias as a label so the entry stays identifiable.
+Colour would mean adding a DirectWrite rendering path.
+
 ## Alternatives considered
 
 **Build the window inside the TSF DLL.** Rejected: a TSF DLL is loaded into arbitrary host

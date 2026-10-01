@@ -10,9 +10,12 @@
 //! 设计与需求依据见 docs/设置窗口设计.md 与需求规格说明书 §17。
 
 pub mod config;
+pub mod deliver;
+pub mod gdi;
 pub mod layout;
 pub mod model;
 pub mod panel;
+pub mod panel_window;
 pub mod shell;
 pub mod single_instance;
 pub mod theme;
