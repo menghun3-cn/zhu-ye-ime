@@ -17,7 +17,10 @@ use zhu_ye_core::bigram::{BigramModel, InMemoryBigramModel};
 use zhu_ye_core::candidate::CandidateSource;
 use zhu_ye_core::dict::Dictionary;
 use zhu_ye_core::translate::{TranslationDirection, Translator};
-use zhu_ye_core::{DictionaryEntry, DictionaryFile, InMemoryDictionary, UserDictStore};
+use zhu_ye_core::{
+    build_contact_index, parse_vcard, DictionaryEntry, DictionaryFile, InMemoryDictionary,
+    UserDictStore, VCardContact,
+};
 
 #[path = "../candidate_ui.rs"]
 mod candidate_ui;
@@ -104,6 +107,12 @@ fn main() -> ExitCode {
         Some("--m11") => {
             let optional = args.get(1).map(String::as_str);
             run_m11_checks(optional.map(Path::new))
+        }
+        // 场景9 通讯录提权验收（FR-036/037/038，验收标准 12.1）：
+        // --m12 [<vcf 文件>]，内存构造联系人断言；提供 vcf 时追加真实导入链路复核。
+        Some("--m12") => {
+            let optional = args.get(1).map(String::as_str);
+            run_m12_checks(optional.map(Path::new))
         }
         // M6-R 多包回归：--multi-pack <base.zyct> <pack1.zyct> [pack2.zyct ...]
         Some("--multi-pack") => {
@@ -1437,6 +1446,208 @@ fn m11_checks(path: Option<&Path>, runner: &mut Runner) -> Result<(), String> {
 
     Ok(())
 }
+
+/// 场景9 通讯录提权验收入口（命令 `--m12 [<vcf 文件>]`）。
+fn run_m12_checks(path: Option<&Path>) -> ExitCode {
+    let mut runner = Runner {
+        passed: 0,
+        failed: 0,
+    };
+    if let Err(error) = m12_checks(path, &mut runner) {
+        runner.fail("场景9 通讯录提权执行", &error);
+    }
+    runner.finish()
+}
+
+/// 场景9 通讯录提权断言组（FR-036/FR-037/FR-038，验收标准 12.1）。
+///
+/// 基础词表内存构造、联系人内存构造（`build_contact_index`），全部可控确定：
+///
+/// - `zhang → 张三`：全拼前缀命中，联系人候选以 `Contact` 来源插基础候选之后
+///   （D-21 与 D-13 同层）；
+/// - `zs → 张三`：简拼键命中（FR-037 简拼可达）；
+/// - `zz/cz → 曾子`：多音字简拼多形态（D-22 全读音形态原则延伸）；
+/// - `al → Alice`：英文名原文小写键（D-20 仅姓名）；
+/// - `nihao → 你好`：无联系人命中 → 与无联系人引擎逐位一致（T-050 基线）；
+/// - `clear_contacts` 后 `zhang` 不再出联系人（FR-038 清除能力）。
+///
+/// 提供真实 vcf 文件时，追加「真实导入 → 姓名可达」复核（走 `parse_vcard` 链路）。
+fn m12_checks(path: Option<&Path>, runner: &mut Runner) -> Result<(), String> {
+    let base_dict: Arc<dyn Dictionary> = Arc::new(InMemoryDictionary::from_entries(vec![
+        DictionaryEntry::new("你好", "nihao", 100),
+        DictionaryEntry::new("张", "zhang", 95),
+        DictionaryEntry::new("章鱼", "zhangyu", 90),
+        DictionaryEntry::new("阿里", "ali", 88),
+        DictionaryEntry::new("爱", "ai", 85),
+    ]));
+
+    let contacts = vec![
+        VCardContact {
+            name: "张三".to_owned(),
+            keys: Vec::new(),
+        },
+        VCardContact {
+            name: "曾子".to_owned(),
+            keys: Vec::new(),
+        },
+        VCardContact {
+            name: "Alice".to_owned(),
+            keys: Vec::new(),
+        },
+    ];
+    let index = build_contact_index(&contacts);
+
+    let mut engine =
+        InputEngine::with_bigram(base_dict.clone(), Arc::new(InMemoryBigramModel::new()))
+            .with_contacts(index);
+    engine.handle_escape();
+
+    let snapshot = |engine: &mut InputEngine| {
+        engine
+            .candidates()
+            .iter()
+            .map(|c| (c.text.clone(), c.source.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    // ---- 12.1-用例1：全拼前缀命中 + 位次（基础之后、Contact 来源）----
+    type_text(&mut engine, "zhang");
+    let cands = snapshot(&mut engine);
+    let contact_pos = cands
+        .iter()
+        .position(|(t, s)| t == "张三" && *s == CandidateSource::Contact);
+    let base_pos = cands.iter().position(|(t, _)| t == "张" || t == "章鱼");
+    match (contact_pos, base_pos) {
+        (Some(contact), Some(base)) if base < contact => {
+            runner.pass("全拼前缀命中且排在基础候选之后（12.1-用例1）");
+        }
+        other => runner.fail(
+            "全拼前缀命中且排在基础候选之后（12.1-用例1）",
+            &format!("contact={:?} base={:?} 候选: {cands:?}", other.0, other.1),
+        ),
+    }
+
+    // ---- 12.1-用例2：简拼键命中（FR-037）----
+    engine.handle_escape();
+    type_text(&mut engine, "zs");
+    let zs_cands = snapshot(&mut engine);
+    if zs_cands
+        .iter()
+        .any(|(t, s)| t == "张三" && *s == CandidateSource::Contact)
+    {
+        runner.pass("简拼 zs 命中张三（12.1-用例2）");
+    } else {
+        runner.fail(
+            "简拼 zs 命中张三（12.1-用例2）",
+            &format!("候选: {zs_cands:?}"),
+        );
+    }
+
+    // ---- 12.1-用例3：多音字简拼多形态（D-22）----
+    engine.handle_escape();
+    type_text(&mut engine, "cz");
+    let cz_cands = snapshot(&mut engine);
+    if cz_cands
+        .iter()
+        .any(|(t, s)| t == "曾子" && *s == CandidateSource::Contact)
+    {
+        runner.pass("多音简拼 cz 命中曾子（12.1-用例3）");
+    } else {
+        runner.fail(
+            "多音简拼 cz 命中曾子（12.1-用例3）",
+            &format!("候选: {cz_cands:?}"),
+        );
+    }
+
+    // ---- 12.1-用例4：英文名原文键（D-20）----
+    engine.handle_escape();
+    type_text(&mut engine, "al");
+    let al_cands = snapshot(&mut engine);
+    let alice_ok = al_cands
+        .iter()
+        .any(|(t, s)| t == "Alice" && *s == CandidateSource::Contact);
+    // alice 与 base 阿里(ali) 同前缀；Alice 在联系人组内（排在基础候选之后）。
+    let alice_pos = al_cands.iter().position(|(t, _)| t == "Alice");
+    let ali_pos = al_cands.iter().position(|(t, _)| t == "阿里");
+    if alice_ok && alice_pos.zip(ali_pos).is_some_and(|(a, b)| b < a) {
+        runner.pass("英文名原文键命中并靠后位次（12.1-用例4）");
+    } else {
+        runner.fail(
+            "英文名原文键命中并靠后位次（12.1-用例4）",
+            &format!("alice={alice_pos:?} ali={ali_pos:?} 候选: {al_cands:?}"),
+        );
+    }
+
+    // ---- 12.1-用例5：无命中不漂移（T-050 基线）----
+    engine.handle_escape();
+    type_text(&mut engine, "nihao");
+    let boosted_texts: Vec<String> = engine.candidates().iter().map(|c| c.text.clone()).collect();
+    let mut baseline =
+        InputEngine::with_bigram(base_dict.clone(), Arc::new(InMemoryBigramModel::new()));
+    baseline.handle_escape();
+    type_text(&mut baseline, "nihao");
+    let baseline_texts: Vec<String> = baseline
+        .candidates()
+        .iter()
+        .map(|c| c.text.clone())
+        .collect();
+    let no_contact = engine
+        .candidates()
+        .iter()
+        .all(|c| c.source != CandidateSource::Contact);
+    if boosted_texts == baseline_texts && no_contact && boosted_texts.iter().any(|t| t == "你好")
+    {
+        runner.pass("无联系人命中时与无联系人引擎逐位一致（12.1-用例5）");
+    } else {
+        runner.fail(
+            "无联系人命中时与无联系人引擎逐位一致（12.1-用例5）",
+            &format!("boosted={boosted_texts:?} baseline={baseline_texts:?}"),
+        );
+    }
+
+    // ---- 12.1-用例6：清除后恢复基线（FR-038）----
+    engine.handle_escape();
+    engine.clear_contacts();
+    type_text(&mut engine, "zhang");
+    let cleared = snapshot(&mut engine);
+    if cleared.iter().all(|(_, s)| *s != CandidateSource::Contact) {
+        runner.pass("清除联系人后不产出联系人候选（12.1-用例6）");
+    } else {
+        runner.fail(
+            "清除联系人后不产出联系人候选（12.1-用例6）",
+            &format!("候选: {cleared:?}"),
+        );
+    }
+
+    // ---- 真实 vcf 导入复核（提供文件时）----
+    if let Some(vcf) = path {
+        let text =
+            fs::read_to_string(vcf).map_err(|error| format!("读取 vcf {vcf:?} 失败: {error}"))?;
+        let parsed =
+            parse_vcard(&text).map_err(|error| format!("解析 vcf {vcf:?} 失败: {error:?}"))?;
+        let real_index = build_contact_index(&parsed);
+        let mut real =
+            InputEngine::with_bigram(base_dict.clone(), Arc::new(InMemoryBigramModel::new()))
+                .with_contacts(real_index);
+        real.handle_escape();
+        type_text(&mut real, "zhang");
+        let real_cands: Vec<String> = real.candidates().iter().map(|c| c.text.clone()).collect();
+        let hits_zhang_san = real_cands.iter().any(|t| t == "张三");
+        if hits_zhang_san {
+            runner.pass("真实 vcf 导入链路姓名可达（12.1-真实复核）");
+        } else {
+            runner.fail(
+                "真实 vcf 导入链路姓名可达（12.1-真实复核）",
+                &format!("候选: {real_cands:?}（vcf 需含「张三」姓名）"),
+            );
+        }
+    } else {
+        println!("[SKIP] 未提供 vcf 文件，跳过真实导入链路复核");
+    }
+
+    Ok(())
+}
+
 fn seed_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     let file = DictionaryFile::open(path)
         .map_err(|error| format!("打开词典文件 {path:?} 失败: {error}"))?;

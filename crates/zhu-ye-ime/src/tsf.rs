@@ -50,7 +50,8 @@ use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
 };
 use zhu_ye_core::{
-    core_version, BigramModel, CompositeDictionary, Dictionary, DictionaryFile, UserDictStore,
+    build_contact_index, core_version, parse_vcard, BigramModel, CompositeDictionary, Dictionary,
+    DictionaryFile, UserDictStore,
 };
 
 use crate::candidate_window::{CandidateWindow, CandidateWindowPlacement};
@@ -1221,6 +1222,7 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
         None => InputEngine::with_bigram(dictionary, bigram),
     };
     let engine = domain_engine(engine, &plan, config.enable_domain_boost);
+    let engine = contact_engine(engine, &config);
     match slang {
         Some(slang) => {
             debug_log("zhu-ye: slang-path enabled");
@@ -1271,6 +1273,51 @@ fn domain_engine(
             .join(",")
     ));
     engine.with_domain_packs(packs)
+}
+
+/// 挂载联系人索引（FR-036/FR-037，场景9）：按配置 `contact_vcards` 路径逐个读取
+/// vCard 文件 → 解析（无效卡/不可读文件记录日志并跳过）→ 汇总姓名 → 建索引
+/// （kTGHZ2013 注音全读形 D-22 + 简拼键）。无配置或全部文件无效时保持无联系人
+/// 基线（T-050 不漂移）。
+fn contact_engine(engine: InputEngine, config: &zhu_ye_core::ConfigFile) -> InputEngine {
+    use std::io::Read as _;
+    if config.contact_vcards.is_empty() {
+        return engine;
+    }
+    let mut contacts = Vec::new();
+    for path in &config.contact_vcards {
+        let Ok(mut file) = std::fs::File::open(path) else {
+            debug_log(&format!("zhu-ye: contact-vcf-missing path={path:?}"));
+            continue;
+        };
+        let mut text = String::new();
+        if file.read_to_string(&mut text).is_err() {
+            debug_log(&format!("zhu-ye: contact-vcf-unreadable path={path:?}"));
+            continue;
+        }
+        match parse_vcard(&text) {
+            Ok(mut parsed) => {
+                debug_log(&format!(
+                    "zhu-ye: contact-vcf-ok path={path:?} entries={}",
+                    parsed.len()
+                ));
+                contacts.append(&mut parsed);
+            }
+            Err(error) => debug_log(&format!(
+                "zhu-ye: contact-vcf-parse-err path={path:?} {error:?}"
+            )),
+        }
+    }
+    if contacts.is_empty() {
+        return engine;
+    }
+    let index = build_contact_index(&contacts);
+    debug_log(&format!(
+        "zhu-ye: contact-index index={} contacts={}",
+        index.len(),
+        contacts.len()
+    ));
+    engine.with_contacts(index)
 }
 
 /// 计算多包装配计划：基础包目录取 DLL 同目录（或环境变量覆盖的父目录）。

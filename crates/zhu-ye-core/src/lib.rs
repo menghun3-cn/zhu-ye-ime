@@ -6,7 +6,9 @@
 pub mod ai;
 pub mod bigram;
 pub mod candidate;
+pub mod char_pinyin;
 pub mod composite;
+pub mod contacts;
 pub mod demo;
 pub mod dict;
 pub mod dict_builder;
@@ -27,6 +29,7 @@ pub mod translate;
 pub mod update;
 pub mod user_dict;
 pub mod user_store;
+pub mod vcard;
 
 pub use ai::{AiService, OfflineAiService};
 pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
@@ -38,7 +41,12 @@ pub use candidate::{
     BEAM_WIDTH, BEAM_WORD_CAP, CORRECTION_VARIANT_CAP, INITIAL_COMPLETION_CAP, INITIAL_MAX_LEN,
     INITIAL_MIN_LEN, SENTENCE_MAX_WORD_CHARS, SENTENCE_TOP_N,
 };
+pub use char_pinyin::{char_pinyin, CharPinyinEntry, CHAR_PINYIN};
 pub use composite::{any_exists, pack_path, CompositeDictionary};
+pub use contacts::{
+    abbreviation_key, annotate_name, build_contact_index, contact_candidates, ContactIndex,
+    CONTACT_INDEX_CAP, CONTACT_KEYS_CAP,
+};
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 pub use domain_boost::domain_boost_candidates;
 pub use email_url::{detect_format, email_candidates, url_candidates, FormatKind};
@@ -73,6 +81,7 @@ pub use update::{
 };
 pub use user_dict::UserDictionary;
 pub use user_store::{unix_now, UserDictStore};
+pub use vcard::{parse_vcard, VCardContact, VCardError};
 
 pub use demo::{seed_bigrams, seed_entries};
 pub use dict_builder::build_v2;
