@@ -6,6 +6,9 @@
 *.pdb
 local/
 
+# 评测 MISS 清单（`zhu-ye-cli eval --out-miss` 的本地输出；正式结论回填文档，清单不入库）
+/eval-miss*.tsv
+
 # 数据大文件与构建产物（不入库，来源与清单入库）
 data/raw/
 data/artifacts/
