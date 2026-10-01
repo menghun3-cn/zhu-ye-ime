@@ -27,6 +27,7 @@ pub mod translate;
 pub mod update;
 pub mod user_dict;
 pub mod user_store;
+pub mod vcard;
 
 pub use ai::{AiService, OfflineAiService};
 pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
@@ -73,6 +74,7 @@ pub use update::{
 };
 pub use user_dict::UserDictionary;
 pub use user_store::{unix_now, UserDictStore};
+pub use vcard::{parse_vcard, VCardContact, VCardError};
 
 pub use demo::{seed_bigrams, seed_entries};
 pub use dict_builder::build_v2;
