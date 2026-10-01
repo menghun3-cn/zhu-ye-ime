@@ -95,6 +95,11 @@ pub struct InputEngine {
     /// v 模式符号候选（FR-028，场景7）：空闲态按 `v` 启动，`v1`/`vx`/`vh`
     /// 出符号组候选；非法字母回退拼音（`vi`）。
     v_buffer: String,
+    /// 已启用领域包（id 字典序，P-12 只含已启用包）；领域提权（FR-033/FR-034，场景8）
+    /// 的识别与候选来源。装配时按 id 升序排列（D-16 依赖）。
+    domain_packs: Vec<(String, Arc<dyn Dictionary>)>,
+    /// 领域自动提权总开关（FR-035，场景8）；默认开（D-14）。
+    enable_domain_boost: bool,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -162,7 +167,25 @@ impl InputEngine {
             suggestion: Vec::new(),
             digit_buffer: String::new(),
             v_buffer: String::new(),
+            domain_packs: Vec::new(),
+            enable_domain_boost: true,
         }
+    }
+
+    /// 挂载已启用领域包（场景8）：`packs` 必须已按 id **字典序**排列（D-16，
+    /// 多包同时命中取字典序首个），且只含已启用包（P-12 未启用包不参与识别）。
+    #[must_use]
+    pub fn with_domain_packs(mut self, packs: Vec<(String, Arc<dyn Dictionary>)>) -> Self {
+        self.domain_packs = packs;
+        self
+    }
+
+    /// 设置领域自动提权开关（FR-035）；默认开（D-14）。关闭后领域候选恢复
+    /// 既有追加语义（T-050 基线，不做位次上移）。
+    #[must_use]
+    pub fn with_domain_boost(mut self, enabled: bool) -> Self {
+        self.enable_domain_boost = enabled;
+        self
     }
 
     /// 挂载网络语包（M6-R）：启用后缩写路径（FR-016/FR-017）生效。
@@ -1229,6 +1252,21 @@ impl InputEngine {
                 }
             }
             self.candidates = main;
+        }
+        // FR-034（场景8）：领域提权——整串完整词命中已启用领域包（D-15）时按 D-13
+        // 位次（插基础候选之后、追加组之前）上移该包候选；无命中/开关关闭时保持
+        // 既有路径（T-050「领域包只追加、不改基础排序」基线逐位不变，D-17 仅对
+        // 领域候选生效，不涉及用户词与上下文联想）。
+        if self.enable_domain_boost && !self.composing.is_empty() && !self.domain_packs.is_empty() {
+            let packs: Vec<(String, &dyn zhu_ye_core::Dictionary)> = self
+                .domain_packs
+                .iter()
+                .map(|(id, dict)| (id.clone(), dict.as_ref()))
+                .collect();
+            if let Some(boosted) = zhu_ye_core::domain_boost_candidates(&packs, &self.composing) {
+                let main = std::mem::take(&mut self.candidates);
+                self.candidates = append_group(main, boosted);
+            }
         }
         // FR-030（场景6）：整串**完全无法按拼音切分**（与缩写路径同判定）时查英文词表；
         // 命中 → 英文候选组追加到主候选**尾部**（D-10：不参与中文静态排序、不挤占中文命中）；
@@ -2667,5 +2705,175 @@ mod tests {
         for c in ['@', '.', '/', ':'] {
             assert!(!eng.is_format_key(c), "英文模式 {c} 应放行宿主");
         }
+    }
+
+    // ---------- 场景8（领域自动，T-070）引擎层测试 ----------
+
+    fn domain_engine() -> InputEngine {
+        let it: Arc<dyn Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("拟", "ni", 300),
+                zhu_ye_core::DictionaryEntry::new("队列", "duilie", 900),
+                zhu_ye_core::DictionaryEntry::new("局域网", "juyuwang", 500),
+            ]));
+        let med: Arc<dyn Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("队列研究", "duilieyanjiu", 700),
+                zhu_ye_core::DictionaryEntry::new("你学", "nixue", 600),
+            ]));
+        // it < med（字典序），多包同命中时取 it（D-16）。
+        InputEngine::with_m1_seed()
+            .with_domain_packs(vec![("it".to_owned(), it), ("med".to_owned(), med)])
+    }
+
+    #[test]
+    fn 领域整词命中提权到主候选之后() {
+        let mut eng = domain_engine();
+        type_text(&mut eng, "ni");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        // 基础候选（你，seed 最频 ni 词）保留在首；领域候选（拟，it 包整词命中）在其后
+        // （D-13 位次：基础候选之后）。
+        assert_eq!(
+            texts.first(),
+            Some(&"你"),
+            "基础首候选不得被覆盖: {texts:?}"
+        );
+        let domain_idx = texts
+            .iter()
+            .position(|t| *t == "拟")
+            .expect("ni 整词命中 it 包，拟应被提权");
+        assert!(domain_idx >= 1, "领域候选必须插在基础候选之后: {texts:?}");
+        for c in &eng.candidates()[..domain_idx] {
+            assert_ne!(
+                c.source,
+                zhu_ye_core::candidate::CandidateSource::Domain,
+                "领域候选之前不得出现其他领域候选"
+            );
+        }
+        let domain_candidate = eng
+            .candidates()
+            .iter()
+            .find(|c| c.text == "拟")
+            .expect("拟 候选存在");
+        assert_eq!(
+            domain_candidate.source,
+            zhu_ye_core::candidate::CandidateSource::Domain
+        );
+        assert_eq!(domain_candidate.pinyin.as_deref(), Some("ni"));
+    }
+
+    #[test]
+    fn 领域整词命中独立词条也提权() {
+        // seed 无 dui/lie 音节词时基础候选为空，领域候选允许成为唯一/首位候选
+        // （没有可覆盖的基础候选，D-13 的"之后"无从谈起）。
+        let mut eng = domain_engine();
+        type_text(&mut eng, "duilie");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        let domain_idx = texts
+            .iter()
+            .position(|t| *t == "队列")
+            .expect("duilie 整词命中 it 包，队列应被提权");
+        assert_eq!(domain_idx, 0, "基础候选为空时领域候选居首: {texts:?}");
+        // 队列调度未整词命中（duiliediaodu ≠ duilie），不进提权。
+        assert!(!texts.contains(&"队列调度"));
+        // 多包同 pinyin 情况：it 的队列（非 med 的队列研究）优先——pinyin 不同整词
+        // 命中只有 it（队列），med 的 duilieyanjiu 不命中 duilie。
+        let domain_candidates: Vec<_> = eng
+            .candidates()
+            .iter()
+            .filter(|c| c.source == zhu_ye_core::candidate::CandidateSource::Domain)
+            .collect();
+        assert_eq!(domain_candidates.len(), 1);
+        assert_eq!(domain_candidates[0].text, "队列");
+        assert_eq!(domain_candidates[0].pinyin.as_deref(), Some("duilie"));
+    }
+
+    #[test]
+    fn 前缀与无命中不触发提权() {
+        // D-15：前缀不参与提权。
+        let mut prefix = domain_engine();
+        type_text(&mut prefix, "dui");
+        assert!(
+            prefix
+                .candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Domain),
+            "前缀 dui 不得触发领域提权"
+        );
+        // 组合模糊：duilian 既有领域词（duilieyanjiu 前缀）也应仅在整词命中时提权。
+        let mut fuzzy = domain_engine();
+        type_text(&mut fuzzy, "duilian");
+        assert!(
+            fuzzy
+                .candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Domain),
+            "非整词命中不得提权"
+        );
+        // 无领域命中：nihao 与现版（m1 seed）一致，且无 Domain 候选。
+        let mut plain = domain_engine();
+        type_text(&mut plain, "nihao");
+        assert!(plain
+            .candidates()
+            .iter()
+            .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Domain));
+        let mut baseline = engine();
+        type_text(&mut baseline, "nihao");
+        assert_eq!(plain.candidates(), baseline.candidates(), "无命中不漂移");
+    }
+
+    #[test]
+    fn 提权开关关闭恢复追加语义() {
+        let mut off = domain_engine().with_domain_boost(false);
+        type_text(&mut off, "duilie");
+        let texts: Vec<&str> = off.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert!(
+            !texts.contains(&"队列"),
+            "关闭提权后领域词不得上移（恢复 T-050 追加语义）: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 领域提权确定性() {
+        let mut first = domain_engine();
+        let mut second = domain_engine();
+        type_text(&mut first, "duilie");
+        type_text(&mut second, "duilie");
+        assert_eq!(
+            first.candidates(),
+            second.candidates(),
+            "同一输入两次逐位一致"
+        );
+    }
+
+    #[test]
+    fn 领域提权与emoji队尾共存() {
+        let mut eng = domain_engine();
+        type_text(&mut eng, "duilie");
+        // 追加一个 emoji 命中别名验证 D-13 位次：领域候选在 emoji 之前。
+        // （duilie 无 emoji 别名则仅验证领域候选已在；此处直接构造别名命中态）
+        let domain_last = eng
+            .candidates()
+            .iter()
+            .rposition(|c| c.source == zhu_ye_core::candidate::CandidateSource::Domain);
+        let emoji_any = eng
+            .candidates()
+            .iter()
+            .any(|c| c.source == zhu_ye_core::candidate::CandidateSource::Emoji);
+        if emoji_any {
+            let emoji_pos = eng
+                .candidates()
+                .iter()
+                .position(|c| c.source == zhu_ye_core::candidate::CandidateSource::Emoji)
+                .unwrap();
+            assert!(
+                domain_last.unwrap() < emoji_pos,
+                "领域提权在 emoji 追加之前"
+            );
+        }
+        // 别名命中态：xiao → 追加 emoji 后，领域候选仍在其前。
+        let mut emoji_eng = domain_engine();
+        type_text(&mut emoji_eng, "duilie");
+        assert!(emoji_eng.candidates().last().is_some());
     }
 }

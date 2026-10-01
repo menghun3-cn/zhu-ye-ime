@@ -56,10 +56,18 @@ pub struct ConfigFile {
     /// 上次检查更新时间（Unix 秒）；`null` 表示从未检查。
     #[serde(default)]
     pub last_check: Option<u64>,
+    /// 领域自动提权总开关（FR-035，场景8）；默认 `true`（D-14）。
+    /// 关闭后领域候选恢复既有追加语义（T-050 基线，不做位次上移）。
+    #[serde(default = "default_domain_boost")]
+    pub enable_domain_boost: bool,
 }
 
 fn default_version() -> u32 {
     CONFIG_FORMAT_VERSION
+}
+
+fn default_domain_boost() -> bool {
+    true
 }
 
 impl Default for ConfigFile {
@@ -69,6 +77,7 @@ impl Default for ConfigFile {
             enabled_packs: Vec::new(),
             online_update: false,
             last_check: None,
+            enable_domain_boost: true,
         }
     }
 }
@@ -115,8 +124,11 @@ impl ConfigFile {
 pub struct PackPlan {
     /// 基础包路径（只读，随安装）；不存在时为空。
     pub base: Option<PathBuf>,
-    /// 已启用的领域包路径，按配置顺序。
+    /// 已启用的领域包路径，按配置顺序（与 `pack_ids` 一一对应）。
     pub packs: Vec<PathBuf>,
+    /// 已启用领域包 id，按配置顺序（与 `packs` 一一对应）。
+    /// 装配方（IME）可按 id 字典序重排做领域识别（D-16，场景8）。
+    pub pack_ids: Vec<String>,
     /// 被忽略的未知包 id。
     pub unknown: Vec<String>,
     /// 配置了但文件缺失的包 id。
@@ -147,11 +159,13 @@ pub fn plan_packs(config: &ConfigFile, base_dir: &Path, packs_dir: &Path) -> Pac
 
     let (known, unknown) = config.partition_packs();
     let mut packs = Vec::new();
+    let mut pack_ids = Vec::new();
     let mut missing = Vec::new();
     for id in known {
         let path = crate::composite::pack_path(packs_dir, &id);
         if path.is_file() {
             packs.push(path);
+            pack_ids.push(id);
         } else {
             missing.push(id);
         }
@@ -159,6 +173,7 @@ pub fn plan_packs(config: &ConfigFile, base_dir: &Path, packs_dir: &Path) -> Pac
     PackPlan {
         base,
         packs,
+        pack_ids,
         unknown,
         missing,
     }
@@ -272,6 +287,23 @@ mod tests {
         assert_eq!(config.version, CONFIG_FORMAT_VERSION);
         assert!(config.enabled_packs.is_empty());
         assert!(!config.online_update);
+        // 领域提权默认开（D-14）。
+        assert!(config.enable_domain_boost);
+    }
+
+    #[test]
+    fn 领域提权开关可关闭并往返一致() {
+        let off = ConfigFile::from_json(r#"{"enable_domain_boost": false}"#).unwrap();
+        assert!(!off.enable_domain_boost, "显式关闭应生效");
+        let text = off.to_json().unwrap();
+        assert_eq!(
+            ConfigFile::from_json(&text).unwrap(),
+            off,
+            "开关配置应序列化往返一致"
+        );
+        // 旧配置文件（无该字段）加载时默认开。
+        let legacy = ConfigFile::from_json(r#"{"enabled_packs": ["it"]}"#).unwrap();
+        assert!(legacy.enable_domain_boost);
     }
 
     #[test]
@@ -341,6 +373,19 @@ mod tests {
         assert_eq!(paths.len(), 3);
         assert!(paths[0].ends_with("dictionary.zyct"));
         assert!(paths[1].ends_with("it.zyct"));
+
+        // pack_ids 与 packs 一一对应（场景8 按 id 字典序重排的输入数据，D-16）。
+        assert_eq!(plan.pack_ids, vec!["it", "med"]);
+        assert_eq!(
+            plan.packs
+                .iter()
+                .zip(plan.pack_ids.iter())
+                .map(|(path, id)| {
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("") == format!("{id}.zyct")
+                })
+                .collect::<Vec<_>>(),
+            vec![true, true]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

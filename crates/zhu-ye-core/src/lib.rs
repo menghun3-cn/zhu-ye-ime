@@ -12,6 +12,7 @@ pub mod dict;
 pub mod dict_builder;
 pub mod dict_format;
 pub mod dict_loader;
+pub mod domain_boost;
 pub mod email_url;
 pub mod emoji;
 pub mod en_words;
@@ -39,6 +40,7 @@ pub use candidate::{
 };
 pub use composite::{any_exists, pack_path, CompositeDictionary};
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
+pub use domain_boost::domain_boost_candidates;
 pub use email_url::{detect_format, email_candidates, url_candidates, FormatKind};
 pub use emoji::{emoji_for, EmojiEntry, EMOJI_TABLE};
 pub use en_words::{en_words_with_prefix, EnWordEntry, EN_WORDS};
