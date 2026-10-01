@@ -32,6 +32,9 @@ const EN_WORD_MIN_LEN: usize = 2;
 /// 英文词候选组最多展示条数（场景6，FR-030；D-10 独立组置主候选后）。
 const EN_WORD_CAP: usize = 6;
 
+/// 联系人提权候选组最多展示条数（场景9，FR-037）：短前缀防刷屏，组容量契约。
+const CONTACT_CANDIDATES_CAP: usize = 8;
+
 /// 输入模式。T-013 接入 Shift 切换；这里先提供状态与切换方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -100,6 +103,11 @@ pub struct InputEngine {
     domain_packs: Vec<(String, Arc<dyn Dictionary>)>,
     /// 领域自动提权总开关（FR-035，场景8）；默认开（D-14）。
     enable_domain_boost: bool,
+    /// 联系人索引（场景9，FR-036/FR-037）：由配置 `contact_vcards` 导入后建立；
+    /// `None` = 未配置/已清除 → 不进提权协调层（T-050 基线不漂移）。
+    contacts: Option<zhu_ye_core::ContactIndex>,
+    /// 联系人提权候选条数上限（组容量，防长前缀刷屏）。
+    contact_cap: usize,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -169,6 +177,8 @@ impl InputEngine {
             v_buffer: String::new(),
             domain_packs: Vec::new(),
             enable_domain_boost: true,
+            contacts: None,
+            contact_cap: CONTACT_CANDIDATES_CAP,
         }
     }
 
@@ -186,6 +196,26 @@ impl InputEngine {
     pub fn with_domain_boost(mut self, enabled: bool) -> Self {
         self.enable_domain_boost = enabled;
         self
+    }
+
+    /// 挂载联系人索引（场景9，FR-036/FR-037）：由配置 `contact_vcards` 导入后
+    /// 建立；`Some` 时联系人提权进入协调层（D-21 与 D-13 同层），`None` 时
+    /// 不进（无配置基线逐位一致）。
+    #[must_use]
+    pub fn with_contacts(mut self, index: zhu_ye_core::ContactIndex) -> Self {
+        self.contacts = (!index.is_empty()).then_some(index);
+        self
+    }
+
+    /// 清除联系人索引（FR-038）：配置清空/删除导入副本后调用，恢复无配置基线。
+    pub fn clear_contacts(&mut self) {
+        self.contacts = None;
+    }
+
+    /// 当前是否挂载了联系人索引。
+    #[must_use]
+    pub fn has_contacts(&self) -> bool {
+        self.contacts.is_some()
     }
 
     /// 挂载网络语包（M6-R）：启用后缩写路径（FR-016/FR-017）生效。
@@ -1266,6 +1296,19 @@ impl InputEngine {
             if let Some(boosted) = zhu_ye_core::domain_boost_candidates(&packs, &self.composing) {
                 let main = std::mem::take(&mut self.candidates);
                 self.candidates = append_group(main, boosted);
+            }
+        }
+        // FR-037（场景9）：联系人提权——与领域提权同一插入点（D-21 同层、按来源
+        // 顺序排在其后），落在追加组之前；全拼前缀/简拼键命中皆可。无索引（未配
+        // 置/已清除）或空输入时不介入（T-050 无配置基线逐位一致）。
+        if let Some(contacts) = &self.contacts {
+            if !self.composing.is_empty() {
+                let boosted =
+                    zhu_ye_core::contact_candidates(contacts, &self.composing, self.contact_cap);
+                if !boosted.is_empty() {
+                    let main = std::mem::take(&mut self.candidates);
+                    self.candidates = append_group(main, boosted);
+                }
             }
         }
         // FR-030（场景6）：整串**完全无法按拼音切分**（与缩写路径同判定）时查英文词表；
@@ -2875,5 +2918,151 @@ mod tests {
         let mut emoji_eng = domain_engine();
         type_text(&mut emoji_eng, "duilie");
         assert!(emoji_eng.candidates().last().is_some());
+    }
+
+    // ---------- 场景9（通讯录，T-071）引擎层测试 ----------
+
+    /// 内存构造联系人引擎：基础 = seed，联系人 = 张三/曾子/Alice。
+    fn contact_engine() -> InputEngine {
+        let contacts = vec![
+            zhu_ye_core::VCardContact {
+                name: "张三".to_owned(),
+                keys: Vec::new(),
+            },
+            zhu_ye_core::VCardContact {
+                name: "曾子".to_owned(),
+                keys: Vec::new(),
+            },
+            zhu_ye_core::VCardContact {
+                name: "Alice".to_owned(),
+                keys: Vec::new(),
+            },
+        ];
+        let index = zhu_ye_core::build_contact_index(&contacts);
+        InputEngine::with_m1_seed().with_contacts(index)
+    }
+
+    #[test]
+    fn 联系人全拼前缀可达() {
+        let mut eng = contact_engine();
+        type_text(&mut eng, "zhang");
+        let hit = eng
+            .candidates()
+            .iter()
+            .find(|c| c.text == "张三")
+            .expect("zhang 前缀应命中联系人张三");
+        assert_eq!(
+            hit.source,
+            zhu_ye_core::candidate::CandidateSource::Contact,
+            "联系人候选来源标记"
+        );
+        // 位次契约：来源同为提权层的候选必须保持 基础→领域→联系人 顺序；
+        // 联系人候选之前（若存在）不得出现英文/缩写等追加组候选（D-21 同层语义）。
+        // （seed 无 zhang 基础词时联系人允许居首，与 m12 有基础词场景互补。）
+        let contact_idx = eng
+            .candidates()
+            .iter()
+            .position(|c| c.text == "张三")
+            .expect("张三在清单中");
+        for c in &eng.candidates()[..contact_idx] {
+            assert!(
+                matches!(
+                    c.source,
+                    zhu_ye_core::candidate::CandidateSource::Static
+                        | zhu_ye_core::candidate::CandidateSource::User
+                        | zhu_ye_core::candidate::CandidateSource::Domain
+                ),
+                "联系人候选之前不得出现追加组候选（D-21）: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 联系人简拼可达() {
+        let mut eng = contact_engine();
+        type_text(&mut eng, "zs");
+        let hit = eng
+            .candidates()
+            .iter()
+            .find(|c| c.text == "张三")
+            .expect("简拼 zs 应命中联系人张三");
+        assert_eq!(hit.source, zhu_ye_core::candidate::CandidateSource::Contact);
+    }
+
+    #[test]
+    fn 联系人多音简拼多形态() {
+        let mut eng = contact_engine();
+        // 曾 = zeng/ceng：zz、cz 两个简拼键均可达（D-22 全形态原则延伸）。
+        type_text(&mut eng, "zz");
+        assert!(eng
+            .candidates()
+            .iter()
+            .any(|c| c.text == "曾子"
+                && c.source == zhu_ye_core::candidate::CandidateSource::Contact));
+        let mut cz = contact_engine();
+        type_text(&mut cz, "cz");
+        assert!(cz
+            .candidates()
+            .iter()
+            .any(|c| c.text == "曾子"
+                && c.source == zhu_ye_core::candidate::CandidateSource::Contact));
+    }
+
+    #[test]
+    fn 联系人英文名原文键可达() {
+        let mut eng = contact_engine();
+        type_text(&mut eng, "alice");
+        let hit = eng
+            .candidates()
+            .iter()
+            .find(|c| c.text == "Alice")
+            .expect("alice 原文键应命中联系人 Alice");
+        assert_eq!(hit.source, zhu_ye_core::candidate::CandidateSource::Contact);
+    }
+
+    #[test]
+    fn 联系人无配置基线逐位一致() {
+        let mut baseline = InputEngine::with_m1_seed();
+        let mut with_contacts =
+            InputEngine::with_m1_seed().with_contacts(zhu_ye_core::build_contact_index(&[
+                zhu_ye_core::VCardContact {
+                    name: "欧阳锋".to_owned(),
+                    keys: Vec::new(),
+                },
+            ]));
+        // 无配置基线句柄模拟：引擎未挂联系人，输入与联系人无关的串。
+        type_text(&mut with_contacts, "nihao");
+        type_text(&mut baseline, "nihao");
+        let texts: Vec<&str> = with_contacts
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        let base_texts: Vec<&str> = baseline
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(texts, base_texts, "无联系人命中时清单逐位一致");
+    }
+
+    #[test]
+    fn 联系人清除后恢复基线() {
+        let mut eng = contact_engine();
+        type_text(&mut eng, "zhang");
+        assert!(eng
+            .candidates()
+            .iter()
+            .any(|c| c.text == "张三"
+                && c.source == zhu_ye_core::candidate::CandidateSource::Contact));
+        eng.clear_contacts();
+        eng.handle_escape();
+        type_text(&mut eng, "zhang");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Contact),
+            "清除后不得再产出联系人候选"
+        );
     }
 }

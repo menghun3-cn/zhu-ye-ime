@@ -13,6 +13,7 @@
 
 use crate::candidate::{Candidate, CandidateSource};
 use crate::char_pinyin::char_pinyin;
+use crate::pinyin::{segment_all, SyllableTable};
 use crate::vcard::VCardContact;
 
 /// 单个联系人的检索键上限（组合爆炸保护；超出取前 64，确定性）。
@@ -94,10 +95,32 @@ pub fn annotate_name(name: &str) -> Vec<String> {
     keys
 }
 
+/// 从全拼键派生简拼键（FR-037 简拼可达）：对键做音节切分，取每音节**首字母**。
+///
+/// - 切分用标准音节表最长匹配（`segment_all` 首个切分，确定性）；
+/// - 非拼音键（英文名原形、含数字）切分失败 → 不派生（原文键已可命中）；
+/// - 单音节键不派生（`zs` 类简拼至少两音节才有区分度）。
+#[must_use]
+pub fn abbreviation_key(name_key: &str, table: &SyllableTable) -> Option<String> {
+    if !name_key.is_ascii() {
+        return None;
+    }
+    let first = segment_all(table, name_key).into_iter().next()?;
+    if first.len() < 2 {
+        return None;
+    }
+    let mut abbr = String::with_capacity(first.len());
+    for syllable in &first {
+        abbr.push(syllable.chars().next()?);
+    }
+    (abbr.bytes().all(|b| b.is_ascii_lowercase())).then_some(abbr)
+}
+
 /// 由 vCard 姓名建立联系人索引（T-071-2；keys 在此填充，超过
 /// [`CONTACT_INDEX_CAP`] 条按出现顺序截断）。
 #[must_use]
 pub fn build_contact_index(contacts: &[VCardContact]) -> ContactIndex {
+    let table = SyllableTable::standard();
     let mut by_key: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for contact in contacts.iter().take(CONTACT_INDEX_CAP) {
@@ -105,9 +128,16 @@ pub fn build_contact_index(contacts: &[VCardContact]) -> ContactIndex {
             continue;
         }
         for key in annotate_name(&contact.name) {
-            let names = by_key.entry(key).or_default();
+            let names = by_key.entry(key.clone()).or_default();
             if !names.iter().any(|existing| existing == &contact.name) {
                 names.push(contact.name.clone());
+            }
+            // 简拼键（FR-037）：全拼键派生首字母键，指向同一姓名。
+            if let Some(abbr) = abbreviation_key(&key, &table) {
+                let names = by_key.entry(abbr).or_default();
+                if !names.iter().any(|existing| existing == &contact.name) {
+                    names.push(contact.name.clone());
+                }
             }
         }
     }
@@ -213,6 +243,34 @@ mod tests {
         assert_eq!(hits[0].source, CandidateSource::Contact);
         assert!(contact_candidates(&index, "xyz", 8).is_empty());
         assert!(contact_candidates(&index, "", 8).is_empty());
+    }
+
+    #[test]
+    fn 简拼键命中() {
+        // FR-037：`zs` 前缀命中 张三（zhangsan → zs）。
+        let contacts = vec![contact("张三")];
+        let index = build_contact_index(&contacts);
+        let hits = contact_candidates(&index, "zs", 8);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "张三");
+    }
+
+    #[test]
+    fn 多音简拼键_多形态() {
+        // 曾子 → zengzi(zz) / cengzi(cz)：两个简拼键都可达（D-22 全形态原则延伸）。
+        let contacts = vec![contact("曾子")];
+        let index = build_contact_index(&contacts);
+        assert!(!contact_candidates(&index, "zz", 8).is_empty());
+        assert!(!contact_candidates(&index, "cz", 8).is_empty());
+    }
+
+    #[test]
+    fn 英文名不派生简拼键() {
+        let contacts = vec![contact("Alice")];
+        let index = build_contact_index(&contacts);
+        // alice 无拼音音节切分 → 不派生简拼键，原文小写键仍可前缀命中（D-20）。
+        assert!(!contact_candidates(&index, "al", 8).is_empty());
+        assert!(contact_candidates(&index, "zs", 8).is_empty());
     }
 
     #[test]

@@ -60,6 +60,10 @@ pub struct ConfigFile {
     /// 关闭后领域候选恢复既有追加语义（T-050 基线，不做位次上移）。
     #[serde(default = "default_domain_boost")]
     pub enable_domain_boost: bool,
+    /// 通讯录 vCard 文件路径列表（FR-038，场景9；D-19 配置触发导入）。
+    /// 为空 = 不导入、无联系人候选（清单与现版逐位一致，T-050 基线不漂移）。
+    #[serde(default)]
+    pub contact_vcards: Vec<PathBuf>,
 }
 
 fn default_version() -> u32 {
@@ -78,6 +82,7 @@ impl Default for ConfigFile {
             online_update: false,
             last_check: None,
             enable_domain_boost: true,
+            contact_vcards: Vec::new(),
         }
     }
 }

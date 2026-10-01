@@ -44,8 +44,8 @@ pub use candidate::{
 pub use char_pinyin::{char_pinyin, CharPinyinEntry, CHAR_PINYIN};
 pub use composite::{any_exists, pack_path, CompositeDictionary};
 pub use contacts::{
-    annotate_name, build_contact_index, contact_candidates, ContactIndex, CONTACT_INDEX_CAP,
-    CONTACT_KEYS_CAP,
+    abbreviation_key, annotate_name, build_contact_index, contact_candidates, ContactIndex,
+    CONTACT_INDEX_CAP, CONTACT_KEYS_CAP,
 };
 pub use dict::{Dictionary, DictionaryEntry, InMemoryDictionary};
 pub use domain_boost::domain_boost_candidates;
