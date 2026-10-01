@@ -1220,6 +1220,7 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
         Some(store) => InputEngine::with_user_store_and_bigram(dictionary, store, bigram),
         None => InputEngine::with_bigram(dictionary, bigram),
     };
+    let engine = domain_engine(engine, &plan, config.enable_domain_boost);
     match slang {
         Some(slang) => {
             debug_log("zhu-ye: slang-path enabled");
@@ -1227,6 +1228,49 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
         }
         None => engine,
     }
+}
+
+/// 挂载领域提权（FR-033/FR-034，场景8）：把已启用领域包按 **id 字典序** 排序后
+/// 单独挂到引擎（D-16：多包同命中取字典序首个）；仅当总开关打开时参与提权
+/// （D-14 默认开；D-17 仅对领域候选生效，不改用户词/联想）。
+///
+/// 领域包文件独立再开一份只读映射（composite 已合并过一份）；mmap 共享页缓存，
+/// 只对已启用包（P-12），内存代价可忽略。打开失败静默跳过——composite 阶段
+/// 已对同一批文件记过 `pack-skipped` 日志，不重复报。
+fn domain_engine(
+    engine: InputEngine,
+    plan: &zhu_ye_core::PackPlan,
+    boost_enabled: bool,
+) -> InputEngine {
+    if !boost_enabled || plan.pack_ids.is_empty() {
+        return engine;
+    }
+    let mut paired: Vec<(&str, &std::path::Path)> = plan
+        .pack_ids
+        .iter()
+        .zip(plan.packs.iter())
+        .map(|(id, path)| (id.as_str(), path.as_path()))
+        .collect();
+    paired.sort_by(|a, b| a.0.cmp(b.0));
+    let mut packs: Vec<(String, Arc<dyn Dictionary>)> = Vec::with_capacity(paired.len());
+    for (id, path) in paired {
+        // 打开失败静默跳过——composite 阶段已对同一批文件记过 `pack-skipped`。
+        if let Ok(file) = DictionaryFile::open(path) {
+            packs.push((id.to_owned(), Arc::new(file)));
+        }
+    }
+    if packs.is_empty() {
+        return engine;
+    }
+    debug_log(&format!(
+        "zhu-ye: domain-boost enabled packs={}",
+        packs
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    engine.with_domain_packs(packs)
 }
 
 /// 计算多包装配计划：基础包目录取 DLL 同目录（或环境变量覆盖的父目录）。

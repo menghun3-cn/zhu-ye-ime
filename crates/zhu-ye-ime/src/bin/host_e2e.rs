@@ -98,6 +98,13 @@ fn main() -> ExitCode {
             };
             run_m10_checks(Path::new(path))
         }
+        // 场景8 领域自动验收（FR-033/034/035，验收标准 11.1）：
+        // --m11 [<词典文件>]，全内存可控领域包装配断言；提供真实词典时
+        // 追加「无命中不漂移」复核（T-050）。
+        Some("--m11") => {
+            let optional = args.get(1).map(String::as_str);
+            run_m11_checks(optional.map(Path::new))
+        }
         // M6-R 多包回归：--multi-pack <base.zyct> <pack1.zyct> [pack2.zyct ...]
         Some("--multi-pack") => {
             let paths: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
@@ -1197,6 +1204,239 @@ fn m10_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     Ok(())
 }
 
+/// 场景8 领域自动验收入口（命令 `--m11 <base.zyct> <it.zyct> [med.zyct ...]`）。
+/// 场景8 领域自动验收入口（命令 `--m11 [<词典文件>]`）。
+fn run_m11_checks(path: Option<&Path>) -> ExitCode {
+    let mut runner = Runner {
+        passed: 0,
+        failed: 0,
+    };
+    if let Err(error) = m11_checks(path, &mut runner) {
+        runner.fail("领域自动检查执行", &error);
+    }
+    runner.finish()
+}
+
+/// 场景8 领域自动断言组（FR-033/FR-034/FR-035，验收标准 11.1）。
+///
+/// 基础包与领域包都用**内存构造词表**：真实 base 是 28 万词条大通用词典，
+/// 对领域包拼音几乎总能整词/组合出同文本，提权样例会被「同文本去重」吸收
+/// （这正是 T-050 基线的表现），无法稳定构造可观测的新文本提权；内存词表
+/// 则全部可控、确定：
+///
+/// - `jubu → 局部`：基础无该拼音（基础候选仅由不可切分前缀路径回退），
+///   it 域词「局部」整词命中 → 新文本提权（11.1-用例1）；
+/// - `yuyan → 语言`：基楚有「语言」，it 域词「语研」不同文本 → D-15 前缀
+///   验证用（yuyan 禁止提权）；完整词 `yuyanbiancheng` 不提权（med 无）；
+/// - `ai → 欸`：基础有「爱」，it 域词「欸」不同文本；同时 `ai` 命中 emoji
+///   别名 ❤️ → 验证 D-13 位次协调（基础 → 领域 → 追加组 emoji 队尾）；
+/// - `nihao → 你好`：无领域命中 → T-050 逐位一致。
+///
+/// 提供真实词典文件时，额外用 `nihao` 复核真实上下文不漂移（见用例 3）。
+fn m11_checks(path: Option<&Path>, runner: &mut Runner) -> Result<(), String> {
+    let base_dict: Arc<dyn Dictionary> = Arc::new(InMemoryDictionary::from_entries(vec![
+        DictionaryEntry::new("你好", "nihao", 100),
+        DictionaryEntry::new("你", "ni", 90),
+        DictionaryEntry::new("语言", "yuyan", 80),
+        DictionaryEntry::new("爱", "ai", 85),
+    ]));
+    let it: Arc<dyn Dictionary> = Arc::new(InMemoryDictionary::from_entries(vec![
+        DictionaryEntry::new("局部", "jubu", 800),
+        DictionaryEntry::new("语研", "yuyan", 60),
+        DictionaryEntry::new("欸", "ai", 30),
+        DictionaryEntry::new("拟", "ni", 20),
+    ]));
+    let med: Arc<dyn Dictionary> = Arc::new(InMemoryDictionary::from_entries(vec![
+        DictionaryEntry::new("局部麻醉", "jubumazui", 700),
+        DictionaryEntry::new("医研", "yuyan", 50),
+    ]));
+
+    let mut engine =
+        InputEngine::with_bigram(base_dict.clone(), Arc::new(InMemoryBigramModel::new()))
+            .with_domain_packs(vec![("it".to_owned(), it.clone())]);
+    engine.handle_escape();
+
+    let snapshot = |engine: &mut InputEngine| {
+        engine
+            .candidates()
+            .iter()
+            .map(|c| (c.text.clone(), c.source.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    // ---- 11.1-用例1：完整词命中提权出新文本（D-15 完整词，D-13 位次）----
+    type_text(&mut engine, "jubu");
+    let cands = snapshot(&mut engine);
+    let jb_idx = cands.iter().position(|(text, _)| text == "局部");
+    match jb_idx {
+        Some(index) if cands[index].1 == CandidateSource::Domain => {
+            let before_clean = cands[..index]
+                .iter()
+                .all(|(_, source)| *source != CandidateSource::Domain);
+            // 基础候选非空（jubumazui 的 jubu 前缀 → 基础可能为空或回退），
+            // 只要领域候选之前无其他领域候选即满足组内前移语义。
+            if before_clean {
+                runner.pass("完整词命中提权出领域新候选（11.1-用例1）");
+            } else {
+                runner.fail(
+                    "完整词命中提权出领域新候选（11.1-用例1）",
+                    &format!("领域候选之前混入领域候选: {cands:?}"),
+                );
+            }
+        }
+        other => runner.fail(
+            "完整词命中提权出领域新候选（11.1-用例1）",
+            &format!("实际: {other:?} 候选: {cands:?}"),
+        ),
+    }
+
+    // ---- D-13 位次协调：领域候选在基础之后、emoji 追加组之前 ----
+    // ai：基础（爱）+ 领域（欸）+ emoji（❤️），顺序 = 爱 … 欸 … ❤️。
+    engine.handle_escape();
+    type_text(&mut engine, "ai");
+    let ai_cands = snapshot(&mut engine);
+    let ai_pos = ai_cands.iter().position(|(t, _)| t == "爱");
+    let domain_pos = ai_cands.iter().position(|(t, _)| t == "欸");
+    let emoji_pos = ai_cands
+        .iter()
+        .position(|(_, source)| *source == CandidateSource::Emoji);
+    if ai_pos.is_some()
+        && domain_pos.is_some_and(|index| ai_pos.unwrap() < index)
+        && emoji_pos.is_some_and(|index| domain_pos.unwrap() < index)
+    {
+        runner.pass("位次协调：基础 < 领域 < emoji 追加组（11.1-用例1 位次）");
+    } else {
+        runner.fail(
+            "位次协调：基础 < 领域 < emoji 追加组（11.1-用例1 位次）",
+            &format!("ai={ai_pos:?} domain={domain_pos:?} emoji={emoji_pos:?} 候选: {ai_cands:?}"),
+        );
+    }
+
+    // ---- 11.1-用例2：前缀命中不提权（D-15）----
+    // yuyan 整词命中域包「语研」；yuyan 是完整拼音，lookup 精确命中 → 提权。
+    // 前缀不说：yuy ？yuy 是 yuyan 前缀 → 域包 lookup("yuy") 空 → 不提权。
+    engine.handle_escape();
+    type_text(&mut engine, "yuy");
+    let yuy_clean = engine
+        .candidates()
+        .iter()
+        .all(|c| c.source != CandidateSource::Domain);
+    if yuy_clean {
+        runner.pass("前缀命中不提权（11.1-用例2）");
+    } else {
+        runner.fail("前缀命中不提权（11.1-用例2）", "yuy 出现领域候选");
+    }
+
+    // ---- 11.1-用例3：无命中不漂移（T-050 基线）----
+    engine.handle_escape();
+    type_text(&mut engine, "nihao");
+    let boosted_texts: Vec<String> = engine.candidates().iter().map(|c| c.text.clone()).collect();
+    let mut baseline =
+        InputEngine::with_bigram(base_dict.clone(), Arc::new(InMemoryBigramModel::new()));
+    baseline.handle_escape();
+    type_text(&mut baseline, "nihao");
+    let baseline_texts: Vec<String> = baseline
+        .candidates()
+        .iter()
+        .map(|c| c.text.clone())
+        .collect();
+    let no_domain = engine
+        .candidates()
+        .iter()
+        .all(|c| c.source != CandidateSource::Domain);
+    if boosted_texts == baseline_texts && no_domain && boosted_texts.iter().any(|t| t == "你好") {
+        runner.pass("无领域命中时与仅基础包逐位一致（11.1-用例3）");
+    } else {
+        runner.fail(
+            "无领域命中时与仅基础包逐位一致（11.1-用例3）",
+            &format!("boosted={boosted_texts:?} baseline={baseline_texts:?}"),
+        );
+    }
+
+    // ---- 真实词典复核：无命中不漂移（提供文件时）----
+    if let Some(real) = path {
+        let file = DictionaryFile::open(real)
+            .map_err(|error| format!("打开真实词典 {real:?} 失败: {error}"))?;
+        let real_dict: Arc<dyn Dictionary> = Arc::new(file.clone());
+        let mut real_boost = InputEngine::with_bigram(real_dict.clone(), Arc::new(file.clone()))
+            .with_domain_packs(vec![("it".to_owned(), it.clone())]);
+        real_boost.handle_escape();
+        type_text(&mut real_boost, "nihao");
+        let mut real_base = InputEngine::with_bigram(real_dict.clone(), Arc::new(file.clone()));
+        real_base.handle_escape();
+        type_text(&mut real_base, "nihao");
+        let rb: Vec<String> = real_boost
+            .candidates()
+            .iter()
+            .map(|c| c.text.clone())
+            .collect();
+        let rba: Vec<String> = real_base
+            .candidates()
+            .iter()
+            .map(|c| c.text.clone())
+            .collect();
+        let real_no_domain = real_boost
+            .candidates()
+            .iter()
+            .all(|c| c.source != CandidateSource::Domain);
+        if rb == rba && real_no_domain {
+            runner.pass("真实词典上下文无命中不漂移（11.1-用例3 真实复核）");
+        } else {
+            runner.fail(
+                "真实词典上下文无命中不漂移（11.1-用例3 真实复核）",
+                &format!("boosted={rb:?} baseline={rba:?}"),
+            );
+        }
+    } else {
+        println!("[SKIP] 未提供真实词典，跳过真实上下文复核");
+    }
+
+    // ---- 11.1-用例4：开关关闭恢复追加语义（D-14/D-17）----
+    let mut off = InputEngine::with_bigram(base_dict.clone(), Arc::new(InMemoryBigramModel::new()))
+        .with_domain_packs(vec![("it".to_owned(), it.clone())])
+        .with_domain_boost(false);
+    off.handle_escape();
+    type_text(&mut off, "jubu");
+    let off_clean = off
+        .candidates()
+        .iter()
+        .all(|c| c.source != CandidateSource::Domain);
+    if off_clean {
+        runner.pass("提权开关关闭不产出领域候选（11.1-用例4）");
+    } else {
+        runner.fail(
+            "提权开关关闭不产出领域候选（11.1-用例4）",
+            "关闭后仍出现 Domain 候选",
+        );
+    }
+
+    // ---- D-16：多包同整词命中取 id 字典序首个（it < med）----
+    // yuyan：it「语研」与 med「医研」同时整词命中 → 取 it（字典序首个）。
+    let mut multi =
+        InputEngine::with_bigram(base_dict.clone(), Arc::new(InMemoryBigramModel::new()))
+            .with_domain_packs(vec![
+                ("it".to_owned(), it.clone()),
+                ("med".to_owned(), med.clone()),
+            ]);
+    multi.handle_escape();
+    type_text(&mut multi, "yuyan");
+    let domain_texts: Vec<String> = multi
+        .candidates()
+        .iter()
+        .filter(|c| c.source == CandidateSource::Domain)
+        .map(|c| c.text.clone())
+        .collect();
+    if domain_texts.first().is_some_and(|t| t == "语研") {
+        runner.pass("多包同命中取字典序首个包（11.1-用例5）");
+    } else {
+        runner.fail(
+            "多包同命中取字典序首个包（11.1-用例5）",
+            &format!("领域候选: {domain_texts:?}"),
+        );
+    }
+
+    Ok(())
+}
 fn seed_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     let file = DictionaryFile::open(path)
         .map_err(|error| format!("打开词典文件 {path:?} 失败: {error}"))?;

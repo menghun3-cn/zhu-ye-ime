@@ -35,6 +35,9 @@ pub enum CandidateSource {
     EnWord,
     /// 邮箱/网址补全候选（FR-031，场景6）；组合态 @/www./http 前缀路径，UI 不新增标签。
     EmailUrl,
+    /// 领域提权候选（FR-033/FR-034，场景8）；完整词命中启用领域包时按 D-13 位次
+    /// 插基础候选之后、追加组之前，UI 不新增标签。
+    Domain,
 }
 
 /// 输入法候选。
