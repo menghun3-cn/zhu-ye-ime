@@ -5,8 +5,11 @@
 
 .DESCRIPTION
 以最小副作用方式加载 DLL（不解析依赖、不执行 DllMain），
-检查 DllGetClassObject、DllCanUnloadNow、dll_probe、paired_core_version 四个导出符号。
+检查 DllGetClassObject、DllCanUnloadNow、dll_probe 三个导出符号。
 不修改注册表或文件系统。
+
+注意：`paired_core_version` 是 crate 内的普通 pub fn（无 #[no_mangle]），
+不是 DLL 导出，不在此校验范围内。
 
 .EXAMPLE
 .\scripts\verify-tsf-dll.ps1 -DllPath .\target\release\zhu_ye_ime.dll
