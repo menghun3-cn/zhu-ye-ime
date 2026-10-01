@@ -16,6 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 zhu-ye-core = { path = "../zhu-ye-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # 复用 `candidate_ui` 的纯逻辑主题、度量与文本测量，避免同一项目出现第二套
 # DPI/颜色语义（设计文档 §1）。代价是本 crate 会连带链接 TSF 侧代码；
 # 抽取独立 UI 原语 crate 已记为后续任务（S-10）。

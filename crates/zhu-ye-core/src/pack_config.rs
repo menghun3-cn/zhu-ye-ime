@@ -41,6 +41,59 @@ pub fn is_distributable_pack(pack_id: &str) -> bool {
     DISTRIBUTABLE_PACK_IDS.contains(&pack_id)
 }
 
+/// 词典包的展示信息（第八期 FR-022：设置界面要求列出名称与简介）。
+///
+/// 名称与简介走这里的静态表，而不是从产物读：`manifest.json` 生成时把 `name` 写成包 id，
+/// 中文名此前只是构建期的打印常量，简介在产物与 manifest 中都不存在；`.zyct` 头部也只剩
+/// 两段共 20 字节的未写入预留区，装不下中文名与简介（D-37）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackDisplay {
+    /// 中文展示名。
+    pub name: &'static str,
+    /// 一行简介。
+    pub summary: &'static str,
+    /// 是否为开发期产物：不作为用户可勾选的领域包展示。
+    pub development: bool,
+}
+
+/// 取词典包的展示信息；未知包 id 返回 `None`。
+#[must_use]
+pub fn pack_display(pack_id: &str) -> Option<PackDisplay> {
+    Some(match pack_id {
+        "base" => PackDisplay {
+            name: "基础词典",
+            summary: "日常常用词与中英译文，始终加载，不可停用",
+            development: false,
+        },
+        "it" => PackDisplay {
+            name: "IT/编程",
+            summary: "编程与计算机术语（THUOCL_IT + MDN Web 术语表）",
+            development: false,
+        },
+        "med" => PackDisplay {
+            name: "医学",
+            summary: "医学与临床术语（THUOCL 医学）",
+            development: false,
+        },
+        "slang" => PackDisplay {
+            name: "网络语",
+            summary: "网络热词与字母缩写（yyds 一类）",
+            development: false,
+        },
+        "real" => PackDisplay {
+            name: "真实语料包",
+            summary: "开发期真实语料构建产物",
+            development: true,
+        },
+        "seed" => PackDisplay {
+            name: "演示种子包",
+            summary: "开发期演示用最小词典",
+            development: true,
+        },
+        _ => return None,
+    })
+}
+
 /// 候选窗主题选择（第八期设置窗口写入，FR-041）。
 ///
 /// 只提供浅色与深色：高对比度由系统接管，不作为可选值（D-31）。
@@ -555,5 +608,45 @@ mod tests {
         // 临时文件不应残留。
         assert!(!path.with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 每个已知包id都有展示信息() {
+        // 新增包 id 却忘了补名称/简介时，这条必须失败。
+        for id in super::KNOWN_PACK_IDS {
+            let display = super::pack_display(id).unwrap_or_else(|| panic!("{id} 缺少展示信息"));
+            assert!(!display.name.is_empty(), "{id} 名称为空");
+            assert!(!display.summary.is_empty(), "{id} 简介为空");
+            assert_ne!(display.name, *id, "{id} 的展示名不应退回包 id");
+        }
+    }
+
+    #[test]
+    fn 展示信息区分开发期产物() {
+        // 开发期产物不进用户可勾选的领域包列表，界面据此过滤。
+        for id in super::DISTRIBUTABLE_PACK_IDS {
+            let display = super::pack_display(id).expect("可分发包必须有展示信息");
+            assert!(!display.development, "{id} 是可分发包，不应标记为开发产物");
+        }
+        for id in ["real", "seed"] {
+            assert!(
+                super::pack_display(id)
+                    .expect("开发产物也应有展示信息")
+                    .development,
+                "{id} 是开发产物"
+            );
+        }
+        // 基础包始终加载，也不属于可分发的领域包。
+        let base = super::pack_display("base").expect("基础包应有展示信息");
+        assert!(!base.development);
+        assert!(!super::is_distributable_pack("base"));
+    }
+
+    #[test]
+    fn 未知包id没有展示信息() {
+        assert_eq!(super::pack_display("nope"), None);
+        assert_eq!(super::pack_display(""), None);
+        // 大小写不匹配也应视为未知，避免界面出现两个"同一个包"。
+        assert_eq!(super::pack_display("IT"), None);
     }
 }

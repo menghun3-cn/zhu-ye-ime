@@ -1030,6 +1030,8 @@ dependencies = [
 name = "zhu-ye-settings"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "windows",
  "zhu-ye-core",
  "zhu-ye-ime",
