@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/zhu-ye-core",
     "crates/zhu-ye-ime",
+    "crates/zhu-ye-settings",
     "crates/zhu-ye-dict",
     "crates/zhu-ye-cli",
     "crates/zhu-ye-updater",

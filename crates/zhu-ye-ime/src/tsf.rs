@@ -54,7 +54,7 @@ use zhu_ye_core::{
     DictionaryFile, UserDictStore,
 };
 
-use crate::candidate_window::{CandidateWindow, CandidateWindowPlacement};
+use crate::candidate_window::{CandidateWindow, CandidateWindowPlacement, ThemePreference};
 use crate::input::{m1_seed_dictionary, InputEngine, InputMode};
 use crate::lang_bar::LangBarHandle;
 
@@ -165,6 +165,22 @@ struct EngineState {
     lang_bar: Option<LangBarHandle>,
 }
 
+/// 从配置解析候选窗主题偏好（FR-041，第八期设置窗口写入）。
+///
+/// `Light` 映射为 `Auto`：保留 T-030 的"候选窗默认固定浅色、高对比度仍走系统配色"路径；
+/// `Dark` 映射为显式深色。高对比度是否应覆盖显式深色不由本函数决定——`resolve_theme`
+/// 的既有语义保持不变，改动它属于独立决策。
+///
+/// 这里独立读取一次配置（`create_engine` 也读一次）：`config.json` 仅数百字节，装配期
+/// 两次读取的代价可忽略；相比把配置贯穿进装配函数签名，这样更不易漏改。
+fn configured_theme_preference() -> ThemePreference {
+    let (config, _) = zhu_ye_core::load_config(&config_path());
+    match config.theme {
+        zhu_ye_core::ThemeChoice::Dark => ThemePreference::Dark,
+        zhu_ye_core::ThemeChoice::Light => ThemePreference::Auto,
+    }
+}
+
 impl EngineState {
     fn new() -> Self {
         Self {
@@ -172,7 +188,7 @@ impl EngineState {
             tid: 0,
             keystroke_mgr: None,
             composition: None,
-            candidate_window: CandidateWindow::new(),
+            candidate_window: CandidateWindow::with_theme(configured_theme_preference()),
             lang_bar: None,
         }
     }
@@ -183,7 +199,7 @@ impl EngineState {
             tid: 0,
             keystroke_mgr: None,
             composition: None,
-            candidate_window: CandidateWindow::new(),
+            candidate_window: CandidateWindow::with_theme(configured_theme_preference()),
             lang_bar: None,
         }
     }

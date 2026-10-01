@@ -1027,6 +1027,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zhu-ye-settings"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "zhu-ye-core",
+ "zhu-ye-ime",
+]
+
+[[package]]
 name = "zhu-ye-updater"
 version = "0.1.0"
 dependencies = [
