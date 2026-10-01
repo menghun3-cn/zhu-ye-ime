@@ -46,6 +46,14 @@ Win32 top-level window with GDI painting, reusing the pure view-model and theme 
 `candidate_ui` already exposes, and introducing **no** GUI dependency. The input-method
 DLL gains no window and no UI code, so nothing new runs inside a host process.
 
+The first batch (T-073) reaches that shared logic by adding `rlib` to `zhu-ye-ime`'s
+`[lib]` and depending on it, rather than by extracting a shared primitives crate in the
+same change: extraction would touch the shipped candidate window and its tests, putting a
+refactor and a new window in one task. The cost is that `zhu-ye-settings.exe` links the
+TSF-side code; extracting `zhu-ye-ui` (colors, theme kind, rects, DPI, text measurement,
+re-exported from `candidate_ui` so existing paths stay valid) removes the `rlib` and is
+tracked as T-081.
+
 ### Window shape and settings taxonomy
 
 One window with left-hand navigation over three pages: 工具箱 (Toolbox), 常用设置

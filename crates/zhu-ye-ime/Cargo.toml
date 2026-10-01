@@ -7,7 +7,9 @@ license.workspace = true
 description = "竹叶输入法 TSF 输入法 DLL 与候选窗"
 
 [lib]
-crate-type = ["cdylib"]
+# `cdylib` 供 TSF 宿主加载；`rlib` 供设置窗口复用 `candidate_ui` 的纯逻辑主题与度量
+# （第八期 T-073），避免同一项目出现第二套 DPI/颜色语义。
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "candidate-demo"

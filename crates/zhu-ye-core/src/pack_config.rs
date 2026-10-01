@@ -3,7 +3,7 @@
 //! 配置与用户词库同目录（`%APPDATA%\ai-zhu-ye-ime\config.json`）：
 //!
 //! ```json
-//! { "enabled_packs": ["it","med","slang"], "online_update": false, "last_check": null }
+//! { "enabled_packs": ["it","med","slang"], "online_update": false, "last_check": null, "theme": "light" }
 //! ```
 //!
 //! 设计约束（方案设计 11.3）：
@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// 配置文件版本；格式变更时递增并在加载时拒绝更高版本。
 pub const CONFIG_FORMAT_VERSION: u32 = 1;
@@ -41,6 +41,56 @@ pub fn is_distributable_pack(pack_id: &str) -> bool {
     DISTRIBUTABLE_PACK_IDS.contains(&pack_id)
 }
 
+/// 候选窗主题选择（第八期设置窗口写入，FR-041）。
+///
+/// 只提供浅色与深色：高对比度由系统接管，不作为可选值（D-31）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    /// 浅色（默认，沿用 T-030 的候选窗默认浅色口径）。
+    #[default]
+    Light,
+    /// 深色。
+    Dark,
+}
+
+impl ThemeChoice {
+    /// 配置字符串（小写），与序列化表示一致。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// 宽松解析：未知值回退浅色。
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "dark" => Self::Dark,
+            _ => Self::Light,
+        }
+    }
+}
+
+/// `theme` 的反序列化：宽松解析。
+///
+/// 主题值由用户手改 `config.json` 时最易写错，而加载器对不可解析的配置整体回退默认
+/// （丢掉 `enabled_packs`）。该字段单独接受任意 JSON 值：字符串按 `parse` 解释，其余
+/// 类型（数字/对象/数组/null）一律降级为浅色。配置只经 `from_json` 读取，因此这里直接
+/// 以 JSON 值接收，而不必为每种标量各写一个访问者。
+fn deserialize_theme<'de, D>(deserializer: D) -> Result<ThemeChoice, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(text)) => ThemeChoice::parse(&text),
+        _ => ThemeChoice::Light,
+    })
+}
+
 /// 磁盘上的配置格式。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigFile {
@@ -64,6 +114,9 @@ pub struct ConfigFile {
     /// 为空 = 不导入、无联系人候选（清单与现版逐位一致，T-050 基线不漂移）。
     #[serde(default)]
     pub contact_vcards: Vec<PathBuf>,
+    /// 候选窗主题（第八期 FR-041）；缺失或未知值时按浅色处理。
+    #[serde(default, deserialize_with = "deserialize_theme")]
+    pub theme: ThemeChoice,
 }
 
 fn default_version() -> u32 {
@@ -83,6 +136,7 @@ impl Default for ConfigFile {
             last_check: None,
             enable_domain_boost: true,
             contact_vcards: Vec::new(),
+            theme: ThemeChoice::Light,
         }
     }
 }
@@ -294,6 +348,49 @@ mod tests {
         assert!(!config.online_update);
         // 领域提权默认开（D-14）。
         assert!(config.enable_domain_boost);
+        // 主题缺失时按浅色（T-030 候选窗默认浅色口径）。
+        assert_eq!(config.theme, super::ThemeChoice::Light);
+    }
+
+    #[test]
+    fn 主题解析与序列化往返() {
+        for (text, expected) in [
+            ("light", super::ThemeChoice::Light),
+            ("dark", super::ThemeChoice::Dark),
+        ] {
+            let json = format!(r#"{{"theme": "{text}"}}"#);
+            let config = ConfigFile::from_json(&json).unwrap();
+            assert_eq!(config.theme, expected);
+            assert_eq!(config.theme.as_str(), text);
+        }
+        let config = ConfigFile {
+            theme: super::ThemeChoice::Dark,
+            ..ConfigFile::default()
+        };
+        let text = config.to_json().unwrap();
+        assert!(
+            text.contains(r#""theme": "dark""#),
+            "序列化应写出小写主题值"
+        );
+        assert_eq!(ConfigFile::from_json(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn 主题值拼错不回退整体配置() {
+        // 主题最易被手改者写错；拼错时只能降级为浅色，不得让用户已勾选的领域包失效。
+        let text = r#"{
+            "enabled_packs": ["it", "med"],
+            "online_update": true,
+            "theme": "draK"
+        }"#;
+        let config = ConfigFile::from_json(text).unwrap();
+        assert_eq!(config.theme, super::ThemeChoice::Light);
+        assert_eq!(config.enabled_packs, vec!["it", "med"]);
+        assert!(config.online_update);
+        // 非字符串（如数字或对象）同样降级，不整体失败。
+        let config = ConfigFile::from_json(r#"{"enabled_packs": ["it"], "theme": 5}"#).unwrap();
+        assert_eq!(config.theme, super::ThemeChoice::Light);
+        assert_eq!(config.enabled_packs, vec!["it"]);
     }
 
     #[test]

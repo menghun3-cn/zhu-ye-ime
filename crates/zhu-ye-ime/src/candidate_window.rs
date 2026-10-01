@@ -78,16 +78,34 @@ pub struct CandidateWindowPlacement {
 pub struct CandidateWindow {
     hwnd: HWND,
     state_ptr: *mut CandidateWindowState,
+    /// 主题偏好；TSF 侧由 `config.json` 的 `theme` 决定（FR-041），演示工具默认 `Auto`。
+    theme_pref: ThemePreference,
 }
 
 impl CandidateWindow {
     /// 创建候选窗控制器；视图在首次 `update` 时落盘，此处只预留空状态。
     #[must_use]
     pub fn new() -> Self {
+        Self::with_theme(ThemePreference::Auto)
+    }
+
+    /// 按指定主题偏好创建控制器。
+    ///
+    /// 偏好只在窗口首次创建时解析为配色；主题属装配项，改动需输入法重新装配才生效
+    /// （P-12，设置窗口的"主题"条目即通过重写 `config.json` 达成）。
+    #[must_use]
+    pub fn with_theme(theme_pref: ThemePreference) -> Self {
         Self {
             hwnd: HWND::default(),
             state_ptr: std::ptr::null_mut(),
+            theme_pref,
         }
+    }
+
+    /// 当前主题偏好。
+    #[must_use]
+    pub fn theme_preference(&self) -> ThemePreference {
+        self.theme_pref
     }
 
     /// 更新候选视图；组合串为空且无任何候选项（含上屏联想，T-059）时隐藏窗口，
@@ -151,7 +169,7 @@ impl CandidateWindow {
             }
             let initial_dpi = GetDpiForSystem().max(BASE_DPI);
             let options = CandidateWindowOptions {
-                theme: ThemePreference::Auto,
+                theme: self.theme_pref,
                 dpi: None,
                 seconds: None,
                 shot_path: None,
@@ -1028,7 +1046,23 @@ fn system_colors() -> SystemColors {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_bmp, to_utf16_null};
+    use super::{build_bmp, to_utf16_null, CandidateWindow, ThemePreference};
+
+    #[test]
+    fn 主题偏好由构造参数决定且默认自动() {
+        assert_eq!(
+            CandidateWindow::new().theme_preference(),
+            ThemePreference::Auto
+        );
+        assert_eq!(
+            CandidateWindow::default().theme_preference(),
+            ThemePreference::Auto
+        );
+        assert_eq!(
+            CandidateWindow::with_theme(ThemePreference::Dark).theme_preference(),
+            ThemePreference::Dark
+        );
+    }
 
     #[test]
     fn utf16转换以空字符结尾() {
