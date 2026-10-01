@@ -7,6 +7,7 @@ use zhu_ye_core::ThemeChoice;
 use zhu_ye_ime::candidate_ui::{UiRect, BASE_DPI};
 
 use crate::model::{Item, ItemControl, Page};
+use crate::panel::{PANEL_COLUMNS, PANEL_ROWS};
 
 /// 期望客户区逻辑尺寸。
 const LOGICAL_WIDTH: i32 = 880;
@@ -251,9 +252,202 @@ pub fn contains(rect: UiRect, x: i32, y: i32) -> bool {
     x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
 }
 
+// ---------------------------------------------------------------------------
+// 工具箱面板（浮层）布局
+// ---------------------------------------------------------------------------
+
+/// 面板逻辑尺寸。
+const LOGICAL_PANEL_WIDTH: i32 = 700;
+const LOGICAL_PANEL_PADDING: i32 = 18;
+const LOGICAL_PANEL_GAP: i32 = 6;
+const LOGICAL_PANEL_HEADER: i32 = 46;
+const LOGICAL_PANEL_FOOTER: i32 = 48;
+const LOGICAL_PANEL_CELL_HEIGHT: i32 = 52;
+const LOGICAL_PANEL_CELL_MIN_WIDTH: i32 = 34;
+const LOGICAL_PANEL_BUTTON_WIDTH: i32 = 96;
+const LOGICAL_PANEL_BUTTON_HEIGHT: i32 = 30;
+const LOGICAL_PANEL_PAGE_LABEL_WIDTH: i32 = 72;
+const LOGICAL_PANEL_HINT: i32 = 26;
+
+/// 面板布局尺寸；格子宽度由期望宽度与列数反推，保证一整页刚好铺满一行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelMetrics {
+    /// 当前 DPI。
+    pub dpi: u32,
+    /// 内边距。
+    pub padding: i32,
+    /// 格子间距。
+    pub gap: i32,
+    /// 列数。
+    pub columns: i32,
+    /// 行数。
+    pub rows: i32,
+    /// 格子宽。
+    pub cell_width: i32,
+    /// 格子高。
+    pub cell_height: i32,
+    /// 标题区高。
+    pub header_height: i32,
+    /// 底栏高。
+    pub footer_height: i32,
+    /// 按钮宽。
+    pub button_width: i32,
+    /// 按钮高。
+    pub button_height: i32,
+    /// 页码文字宽。
+    pub page_label_width: i32,
+    /// 提示条高。
+    pub hint_height: i32,
+    /// 期望客户区宽。
+    pub desired_width: i32,
+    /// 期望客户区高。
+    pub desired_height: i32,
+}
+
+impl PanelMetrics {
+    /// 按 DPI 建立面板尺寸集。
+    #[must_use]
+    pub fn new(dpi: u32) -> Self {
+        let dpi = dpi.max(BASE_DPI);
+        let padding = scale(dpi, LOGICAL_PANEL_PADDING);
+        let gap = scale(dpi, LOGICAL_PANEL_GAP);
+        let columns = PANEL_COLUMNS as i32;
+        let rows = PANEL_ROWS as i32;
+        let desired_width = scale(dpi, LOGICAL_PANEL_WIDTH);
+        let usable = desired_width - 2 * padding - (columns - 1) * gap;
+        let cell_width = (usable / columns).max(scale(dpi, LOGICAL_PANEL_CELL_MIN_WIDTH));
+        let cell_height = scale(dpi, LOGICAL_PANEL_CELL_HEIGHT);
+        let header_height = scale(dpi, LOGICAL_PANEL_HEADER);
+        let footer_height = scale(dpi, LOGICAL_PANEL_FOOTER);
+        // 高度由一整页格子加页脚推出，保证整页无需滚动即可放下。
+        let desired_height = header_height
+            + padding
+            + rows * cell_height
+            + (rows - 1) * gap
+            + padding
+            + scale(dpi, LOGICAL_PANEL_HINT)
+            + footer_height;
+        Self {
+            dpi,
+            padding,
+            gap,
+            columns,
+            rows,
+            cell_width,
+            cell_height,
+            header_height,
+            footer_height,
+            button_width: scale(dpi, LOGICAL_PANEL_BUTTON_WIDTH),
+            button_height: scale(dpi, LOGICAL_PANEL_BUTTON_HEIGHT),
+            page_label_width: scale(dpi, LOGICAL_PANEL_PAGE_LABEL_WIDTH),
+            hint_height: scale(dpi, LOGICAL_PANEL_HINT),
+            desired_width,
+            desired_height,
+        }
+    }
+
+    /// 期望的客户区尺寸。
+    #[must_use]
+    pub fn desired_client_size(&self) -> (i32, i32) {
+        (self.desired_width, self.desired_height)
+    }
+}
+
+/// 面板布局结果；绘制与命中测试共用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanelLayout {
+    /// 标题区。
+    pub header: UiRect,
+    /// 格子（行优先），数量等于本页条目数。
+    pub cells: Vec<UiRect>,
+    /// 返回设置。
+    pub back: UiRect,
+    /// 上一页。
+    pub prev: UiRect,
+    /// 下一页。
+    pub next: UiRect,
+    /// 页码文字。
+    pub page_label: UiRect,
+    /// 提示条。
+    pub hint: UiRect,
+}
+
+/// 计算面板布局；`cell_count` 为本页条目数（末页可能少于整页）。
+#[must_use]
+pub fn panel_layout(metrics: &PanelMetrics, client: UiRect, cell_count: usize) -> PanelLayout {
+    let header = UiRect {
+        left: client.left,
+        top: client.top,
+        right: client.right,
+        bottom: client.top + metrics.header_height,
+    };
+    let grid_top = header.bottom + metrics.padding;
+    let columns = usize::try_from(metrics.columns).unwrap_or(1).max(1);
+    let cells = (0..cell_count)
+        .map(|index| {
+            let row = i32::try_from(index / columns).unwrap_or(0);
+            let column = i32::try_from(index % columns).unwrap_or(0);
+            let left = client.left + metrics.padding + column * (metrics.cell_width + metrics.gap);
+            let top = grid_top + row * (metrics.cell_height + metrics.gap);
+            UiRect {
+                left,
+                top,
+                right: left + metrics.cell_width,
+                bottom: top + metrics.cell_height,
+            }
+        })
+        .collect();
+
+    let footer_top = client.bottom - metrics.footer_height;
+    let button_top = footer_top + (metrics.footer_height - metrics.button_height) / 2;
+    let button_bottom = button_top + metrics.button_height;
+    let back = UiRect {
+        left: client.left + metrics.padding,
+        top: button_top,
+        right: client.left + metrics.padding + metrics.button_width,
+        bottom: button_bottom,
+    };
+    let next = UiRect {
+        left: client.right - metrics.padding - metrics.button_width,
+        top: button_top,
+        right: client.right - metrics.padding,
+        bottom: button_bottom,
+    };
+    let prev = UiRect {
+        left: next.left - metrics.gap - metrics.button_width,
+        top: button_top,
+        right: next.left - metrics.gap,
+        bottom: button_bottom,
+    };
+    let page_label = UiRect {
+        left: prev.left - metrics.page_label_width,
+        top: button_top,
+        right: prev.left,
+        bottom: button_bottom,
+    };
+    let hint = UiRect {
+        left: client.left + metrics.padding,
+        top: footer_top - metrics.hint_height,
+        right: client.right - metrics.padding,
+        bottom: footer_top,
+    };
+    PanelLayout {
+        header,
+        cells,
+        back,
+        prev,
+        next,
+        page_label,
+        hint,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{contains, content_rect, item_rows, nav_rows, scale, title_rect, SettingsMetrics};
+    use super::{
+        contains, content_rect, item_rows, nav_rows, panel_layout, scale, title_rect, PanelMetrics,
+        SettingsMetrics,
+    };
     use crate::model::Page;
     use zhu_ye_ime::candidate_ui::UiRect;
 
@@ -384,5 +578,117 @@ mod tests {
         assert!(!contains(rect, 29, 40), "下边界为开区间");
         assert!(!contains(rect, 9, 20));
         assert!(!contains(rect, 10, 19));
+    }
+
+    fn panel_client(metrics: &PanelMetrics) -> UiRect {
+        let (width, height) = metrics.desired_client_size();
+        UiRect {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        }
+    }
+
+    #[test]
+    fn 面板尺寸随dpi缩放且容纳整页() {
+        let base = PanelMetrics::new(96);
+        let scaled = PanelMetrics::new(144);
+        assert_eq!(scaled.desired_width, base.desired_width * 3 / 2);
+        assert_eq!(scaled.cell_height, base.cell_height * 3 / 2);
+        // 一整页（列 × 行）加上页眉页脚必须放得进期望高度。
+        let page = base.columns * base.rows;
+        let layout = panel_layout(&base, panel_client(&base), page as usize);
+        assert_eq!(layout.cells.len(), page as usize);
+        let last = layout.cells.last().expect("整页应有格子");
+        assert!(
+            last.bottom <= layout.hint.top,
+            "最后一格不得压到提示条：{} > {}",
+            last.bottom,
+            layout.hint.top
+        );
+    }
+
+    #[test]
+    fn 格子按行优先排列且互不重叠() {
+        let metrics = PanelMetrics::new(96);
+        let client = panel_client(&metrics);
+        let columns = metrics.columns as usize;
+        let layout = panel_layout(&metrics, client, columns * 2);
+        assert_eq!(layout.cells.len(), columns * 2);
+        // 同一行内左边界递增，第二行整体低于第一行。
+        for index in 0..columns {
+            assert_eq!(layout.cells[index].top, layout.cells[0].top);
+            if index > 0 {
+                assert!(layout.cells[index].left > layout.cells[index - 1].left);
+            }
+        }
+        assert_eq!(
+            layout.cells[columns].top,
+            layout.cells[0].bottom + metrics.gap
+        );
+        assert_eq!(
+            layout.cells[columns].left, layout.cells[0].left,
+            "换行回到首列"
+        );
+        // 任意两格不重叠。
+        for (index, cell) in layout.cells.iter().enumerate() {
+            for other in layout.cells.iter().skip(index + 1) {
+                let disjoint = cell.right <= other.left
+                    || other.right <= cell.left
+                    || cell.bottom <= other.top
+                    || other.bottom <= cell.top;
+                assert!(disjoint, "格子重叠：{cell:?} / {other:?}");
+            }
+            assert!(cell.left >= client.left, "格子越出左边界");
+            assert!(cell.right <= client.right, "格子越出右边界");
+            assert!(cell.top >= layout.header.bottom, "格子压到标题区");
+        }
+    }
+
+    #[test]
+    fn 末页格子数少于整页时布局仍成立() {
+        let metrics = PanelMetrics::new(96);
+        let client = panel_client(&metrics);
+        let layout = panel_layout(&metrics, client, 3);
+        assert_eq!(layout.cells.len(), 3);
+        for cell in &layout.cells {
+            assert_eq!(cell.top, layout.cells[0].top, "不足一行时都在首行");
+        }
+    }
+
+    #[test]
+    fn 页脚按钮与页码互不重叠且都在底栏内() {
+        let metrics = PanelMetrics::new(96);
+        let client = panel_client(&metrics);
+        let layout = panel_layout(&metrics, client, 10);
+        let footer_top = client.bottom - metrics.footer_height;
+        for (name, rect) in [
+            ("返回", layout.back),
+            ("上一页", layout.prev),
+            ("下一页", layout.next),
+            ("页码", layout.page_label),
+        ] {
+            assert!(rect.top >= footer_top, "{name} 越出底栏上边界");
+            assert!(rect.bottom <= client.bottom, "{name} 越出底栏下边界");
+            assert_eq!(rect.height(), metrics.button_height, "{name} 高度不一致");
+        }
+        // 左到右：返回 | 页码 | 上一页 | 下一页，互不重叠。
+        assert!(layout.back.right <= layout.page_label.left);
+        assert!(layout.page_label.right <= layout.prev.left);
+        assert!(layout.prev.right <= layout.next.left);
+        assert_eq!(layout.next.right, client.right - metrics.padding);
+    }
+
+    #[test]
+    fn 提示条在底栏之上且不与格子重叠() {
+        let metrics = PanelMetrics::new(96);
+        let client = panel_client(&metrics);
+        let layout = panel_layout(&metrics, client, (metrics.columns * metrics.rows) as usize);
+        assert_eq!(layout.hint.bottom, client.bottom - metrics.footer_height);
+        assert_eq!(layout.hint.height(), metrics.hint_height);
+        for cell in &layout.cells {
+            assert!(cell.bottom <= layout.hint.top);
+        }
     }
 }

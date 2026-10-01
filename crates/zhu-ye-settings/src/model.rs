@@ -10,6 +10,8 @@
 
 use zhu_ye_core::ThemeChoice;
 
+use crate::panel::PanelKind;
+
 /// 设置窗口页面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -90,6 +92,8 @@ pub enum ItemControl {
     None,
     /// 主题二选一。
     ThemeChoice,
+    /// 打开工具箱面板。
+    OpenPanel(PanelKind),
 }
 
 /// 条目定义。
@@ -123,15 +127,15 @@ const fn item(
 static TOOLBOX_ITEMS: &[Item] = &[
     item(
         "emoji 面板",
-        "浏览内置 emoji，选中即上屏字符",
-        ItemState::Scheduled { batch: "M12-2" },
-        ItemControl::None,
+        "浏览内置 emoji，选中即上屏",
+        ItemState::Ready,
+        ItemControl::OpenPanel(PanelKind::Emoji),
     ),
     item(
         "符号大全",
-        "按分类浏览符号，选中即上屏",
-        ItemState::Scheduled { batch: "M12-2" },
-        ItemControl::None,
+        "按分组浏览符号，选中即上屏",
+        ItemState::Ready,
+        ItemControl::OpenPanel(PanelKind::Symbol),
     ),
     item(
         "图片表情",
@@ -325,20 +329,27 @@ mod tests {
     }
 
     #[test]
-    fn 本阶段只有主题已接入其余均为未接入态() {
-        let ready: Vec<(&str, &str)> = Page::ALL
+    fn 已接入条目恰为工具箱两项与主题() {
+        let ready: Vec<&str> = Page::ALL
             .iter()
             .flat_map(|page| page.items())
             .filter(|item| item.state == ItemState::Ready)
-            .map(|item| (item.title, "Ready"))
+            .map(|item| item.title)
             .collect();
-        assert_eq!(ready, vec![("主题", "Ready")]);
-        // 主题是唯一带控件的条目。
+        assert_eq!(ready, vec!["emoji 面板", "符号大全", "主题"]);
+        // 主题用二选一控件；工具箱两项用"打开面板"控件。
+        assert_eq!(Page::Common.items()[0].control, ItemControl::ThemeChoice);
         assert_eq!(
-            Page::Common.items()[0].control,
-            ItemControl::ThemeChoice,
-            "主题条目应带二选一控件"
+            Page::Toolbox.items()[0].control,
+            ItemControl::OpenPanel(crate::panel::PanelKind::Emoji)
         );
+        assert_eq!(
+            Page::Toolbox.items()[1].control,
+            ItemControl::OpenPanel(crate::panel::PanelKind::Symbol)
+        );
+        // 图片表情仍是"正在规划中"，且没有控件。
+        assert!(Page::Toolbox.items()[2].state.is_planned());
+        assert_eq!(Page::Toolbox.items()[2].control, ItemControl::None);
     }
 
     #[test]
@@ -361,8 +372,10 @@ mod tests {
     #[test]
     fn 切页清空展开态() {
         let mut state = SettingsState::new(ThemeChoice::Light);
-        state.click_item(0);
-        assert_eq!(state.expanded, Some(0));
+        // 工具箱首页前两项已接入（点开面板），只有"图片表情"仍是占位可展开。
+        let placeholder = 2;
+        state.click_item(placeholder);
+        assert_eq!(state.expanded, Some(placeholder));
         state.select_page(Page::About);
         assert_eq!(state.expanded, None, "展开态属于页内下标，切页必须清空");
         // 同页重复选择不清空。
