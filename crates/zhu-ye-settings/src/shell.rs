@@ -1,4 +1,6 @@
-//! Win32 侧的系统信息读取与进程级设置（不含 UI 逻辑）。
+//! Win32 侧的系统信息读取、进程级设置与"用系统默认方式打开路径"（不含 UI 逻辑）。
+
+use std::path::{Path, PathBuf};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{ERROR_SUCCESS, HWND};
@@ -12,12 +14,14 @@ use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SystemParametersInfoW, SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SystemParametersInfoW, SPI_GETHIGHCONTRAST, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 use zhu_ye_ime::candidate_ui::{SystemColors, UiThemeKind};
 
+use crate::model::OpenTarget;
 use crate::wide::to_utf16;
 
 /// 系统深浅色偏好的注册表位置。
@@ -115,4 +119,42 @@ pub fn resolve_theme_kind() -> UiThemeKind {
     } else {
         UiThemeKind::Light
     }
+}
+
+/// 解析「更多设置」的目标路径；未设置 `APPDATA` 时返回描述。
+pub fn resolve_target(target: OpenTarget) -> Result<PathBuf, String> {
+    match target {
+        OpenTarget::ConfigFile => crate::config::config_path()
+            .ok_or_else(|| "未设置 APPDATA，无法定位配置文件".to_owned()),
+        OpenTarget::DataDir => {
+            crate::config::data_dir().ok_or_else(|| "未设置 APPDATA，无法定位数据目录".to_owned())
+        }
+        OpenTarget::LogDir => Ok(crate::config::acceptance_log_dir()),
+    }
+}
+
+/// 用系统默认方式打开一个路径（文件用关联程序，目录用资源管理器）。
+///
+/// `ShellExecuteW` 以**返回值 `<= 32`** 表示失败，不设置 `GetLastError`，因此必须检查返回值。
+///
+/// # Errors
+/// 系统拒绝打开时返回带返回码的描述。
+pub fn open_path(path: &Path) -> Result<(), String> {
+    let operation = to_utf16("open");
+    let file = to_utf16(&path.to_string_lossy());
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as isize;
+    if code <= 32 {
+        return Err(format!("系统未能打开该路径（ShellExecute 返回 {code}）"));
+    }
+    Ok(())
 }

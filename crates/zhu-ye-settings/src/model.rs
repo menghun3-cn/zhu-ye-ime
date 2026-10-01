@@ -85,6 +85,42 @@ impl ItemState {
     }
 }
 
+/// 「更多设置」的打开动作（D-36）。
+///
+/// 以三个条目呈现，而不是一行三个按钮：条目行的控件机制只服务"二选一"，为三个动作再造
+/// 一套按钮渲染不划算，三个条目在列表里同样一目了然。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenTarget {
+    /// 配置文件 `config.json`。
+    ConfigFile,
+    /// 数据目录 `%APPDATA%\ai-zhu-ye-ime`。
+    DataDir,
+    /// 文件日志所在目录。
+    LogDir,
+}
+
+impl OpenTarget {
+    /// 条目标题。
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::ConfigFile => "更多设置：配置文件",
+            Self::DataDir => "更多设置：数据目录",
+            Self::LogDir => "更多设置：日志目录",
+        }
+    }
+
+    /// 条目说明。
+    #[must_use]
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::ConfigFile => "用系统默认方式打开 config.json（启用的领域包、主题等）",
+            Self::DataDir => "配置、用户词库与已安装的领域包都在这里",
+            Self::LogDir => "文件日志仅在验收期启用，生产环境通常不存在",
+        }
+    }
+}
+
 /// 条目右侧控件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemControl {
@@ -94,6 +130,8 @@ pub enum ItemControl {
     ThemeChoice,
     /// 打开工具箱面板。
     OpenPanel(PanelKind),
+    /// 打开一个路径。
+    OpenPath(OpenTarget),
 }
 
 /// 条目定义。
@@ -168,10 +206,22 @@ static COMMON_ITEMS: &[Item] = &[
         ItemControl::None,
     ),
     item(
-        "更多设置",
-        "打开配置文件、数据目录与日志目录",
-        ItemState::Scheduled { batch: "M12-3" },
-        ItemControl::None,
+        OpenTarget::ConfigFile.title(),
+        OpenTarget::ConfigFile.summary(),
+        ItemState::Ready,
+        ItemControl::OpenPath(OpenTarget::ConfigFile),
+    ),
+    item(
+        OpenTarget::DataDir.title(),
+        OpenTarget::DataDir.summary(),
+        ItemState::Ready,
+        ItemControl::OpenPath(OpenTarget::DataDir),
+    ),
+    item(
+        OpenTarget::LogDir.title(),
+        OpenTarget::LogDir.summary(),
+        ItemState::Ready,
+        ItemControl::OpenPath(OpenTarget::LogDir),
     ),
     item(
         "恢复状态栏",
@@ -297,7 +347,7 @@ impl SettingsState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ItemControl, ItemState, Page, SettingsState};
+    use super::{ItemControl, ItemState, OpenTarget, Page, SettingsState};
     use zhu_ye_core::ThemeChoice;
 
     #[test]
@@ -319,24 +369,66 @@ mod tests {
             "恢复状态栏",
             "管理输入法",
             "修复输入法",
-            "更多设置",
             "简繁切换",
             "全半角切换",
             "生僻字输入",
         ] {
             assert!(titles.contains(&expected), "常用设置缺少条目：{expected}");
         }
+        // 「更多设置」按 D-36 的三个动作拆成三个条目。
+        for target in [
+            OpenTarget::ConfigFile,
+            OpenTarget::DataDir,
+            OpenTarget::LogDir,
+        ] {
+            assert!(
+                titles.contains(&target.title()),
+                "缺少更多设置动作：{}",
+                target.title()
+            );
+            assert!(!target.summary().is_empty());
+        }
     }
 
     #[test]
-    fn 已接入条目恰为工具箱两项与主题() {
+    fn 更多设置三个动作都已接入且各自带打开控件() {
+        let items = Page::Common.items();
+        let mut found = 0;
+        for target in [
+            OpenTarget::ConfigFile,
+            OpenTarget::DataDir,
+            OpenTarget::LogDir,
+        ] {
+            let item = items
+                .iter()
+                .find(|item| item.title == target.title())
+                .unwrap_or_else(|| panic!("缺少条目 {}", target.title()));
+            assert_eq!(item.state, ItemState::Ready, "{} 应已接入", target.title());
+            assert_eq!(item.control, ItemControl::OpenPath(target));
+            found += 1;
+        }
+        assert_eq!(found, 3);
+    }
+
+    #[test]
+    fn 已接入条目恰为工具箱两项主题与更多设置三项() {
         let ready: Vec<&str> = Page::ALL
             .iter()
             .flat_map(|page| page.items())
             .filter(|item| item.state == ItemState::Ready)
             .map(|item| item.title)
             .collect();
-        assert_eq!(ready, vec!["emoji 面板", "符号大全", "主题"]);
+        assert_eq!(
+            ready,
+            vec![
+                "emoji 面板",
+                "符号大全",
+                "主题",
+                "更多设置：配置文件",
+                "更多设置：数据目录",
+                "更多设置：日志目录"
+            ]
+        );
         // 主题用二选一控件；工具箱两项用"打开面板"控件。
         assert_eq!(Page::Common.items()[0].control, ItemControl::ThemeChoice);
         assert_eq!(
@@ -354,8 +446,11 @@ mod tests {
 
     #[test]
     fn 规划中条目说明以正在规划中开头() {
-        let planned = Page::Common.items()[7];
-        assert!(planned.state.is_planned());
+        let planned = Page::Common
+            .items()
+            .iter()
+            .find(|item| item.state.is_planned())
+            .expect("常用设置应有规划中条目");
         let message = planned.state.message().unwrap();
         assert!(message.starts_with("正在规划中。"), "实际：{message}");
     }

@@ -25,6 +25,19 @@ pub fn config_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join(CONFIG_FILE))
 }
 
+/// 验收期文件日志所在目录。
+///
+/// TSF 侧仅在 `C:\zhu-ye-test\tsf-debug.enable` 存在时把日志追加写到
+/// `C:\zhu-ye-test\tsf-debug.log`（见 `crates/zhu-ye-ime/src/tsf.rs` 的 `FILE_LOG_PATH`），
+/// 因此**生产环境该目录通常不存在**。界面据此给出明确提示，而不是打开一个空目录。
+///
+/// 路径与 TSF 侧同源，但此处是字面复制：`FILE_LOG_PATH` 是 `tsf.rs` 内的私有常量，
+/// 跨 crate 复用它要把常量提为 `pub` 并改成运行时拼接，代价大于收益。
+#[must_use]
+pub fn acceptance_log_dir() -> PathBuf {
+    PathBuf::from(r"C:\zhu-ye-test")
+}
+
 /// 读取配置；缺失或损坏时回退默认并回报诊断。
 #[must_use]
 pub fn load(path: &Path) -> (ConfigFile, Option<String>) {

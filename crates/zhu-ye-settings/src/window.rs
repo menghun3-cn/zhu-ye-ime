@@ -30,7 +30,7 @@ use zhu_ye_ime::candidate_ui::{UiRect, UiThemeKind, BASE_DPI};
 use crate::config;
 use crate::gdi::{draw_text, fill, fill_round, BackBuffer, Fonts};
 use crate::layout::{self, SettingsMetrics};
-use crate::model::{ItemControl, Page, SettingsState};
+use crate::model::{ItemControl, OpenTarget, Page, SettingsState};
 use crate::panel::PanelView;
 use crate::panel_window::{PanelWindow, WM_PANEL_CLOSED};
 use crate::shell;
@@ -357,6 +357,7 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
                 // 主题行本身不切换展开，避免与控件块点击混淆。
                 ItemControl::ThemeChoice => {}
                 ItemControl::OpenPanel(kind) => open_panel(hwnd, state, kind),
+                ItemControl::OpenPath(target) => open_target(state, target),
                 ItemControl::None => {
                     state.settings.click_item(row.index);
                     invalidate(hwnd);
@@ -392,6 +393,25 @@ unsafe fn open_panel(hwnd: HWND, state: &mut WindowState, kind: crate::panel::Pa
         Err(error) => state.hint = Some(format!("打开面板失败：{error}")),
     }
     invalidate(hwnd);
+}
+
+/// 执行「更多设置」的打开动作。
+///
+/// 配置与日志可能尚未生成（首次改动设置前没有 `config.json`；文件日志仅在验收期启用），
+/// 因此先判断存在性再调用系统打开，避免弹出系统的"找不到文件"对话框。
+fn open_target(state: &mut WindowState, target: OpenTarget) {
+    state.hint = Some(match shell::resolve_target(target) {
+        Err(error) => error,
+        Ok(path) if path.exists() => match shell::open_path(&path) {
+            Ok(()) => format!("已打开 {}", path.display()),
+            Err(error) => error,
+        },
+        Ok(path) => match target {
+            OpenTarget::ConfigFile => "配置文件尚未生成：改动任一设置后即会写入".to_owned(),
+            OpenTarget::LogDir => "未找到日志目录：文件日志仅在验收期启用".to_owned(),
+            OpenTarget::DataDir => format!("目录不存在：{}", path.display()),
+        },
+    });
 }
 
 /// 应用主题选择并持久化。
