@@ -85,6 +85,23 @@ pub fn save_packs(path: &Path, enabled_packs: &[String]) -> Result<(), String> {
     save_config(path, &config)
 }
 
+/// 只更新在线更新开关并原子保存（S-8 同口径，P-03 默认关）。
+///
+/// 勾选即写：`online_update` 是运行时开关（设置状态三分），由更新器进程读取；
+/// 保存前重读避免覆盖其他写入方的字段。
+pub fn save_online_update(path: &Path, online_update: bool) -> Result<(), String> {
+    let (mut config, _) = load_config(path);
+    config.online_update = online_update;
+    save_config(path, &config)
+}
+
+/// 读取在线更新开关；缺失或损坏回退关闭（P-03）。
+#[must_use]
+pub fn load_online_update(path: &Path) -> (bool, Option<String>) {
+    let (config, diagnostic) = load_config(path);
+    (config.online_update, diagnostic)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{load_theme, save_theme};
@@ -267,6 +284,62 @@ mod tests {
             vec!["slang", "med"],
             "启停集合应被写入"
         );
+        assert_eq!(
+            config.theme,
+            zhu_ye_core::ThemeChoice::Dark,
+            "主题不得被重置"
+        );
+        assert_eq!(
+            config.default_mode,
+            zhu_ye_core::ModeChoice::English,
+            "默认中英模式不得被重置（D-32）"
+        );
+        assert_eq!(
+            config.last_check,
+            Some(1_759_420_800),
+            "提交前重读，更新器写入的 last_check 必须保留（S-8）"
+        );
+    }
+
+    #[test]
+    fn 在线更新开关默认关闭且显式开启可往返() {
+        let dir = temp_dir("online");
+        let path = dir.join("config.json");
+        // P-03：默认关闭。
+        assert!(!super::load_online_update(&path).0);
+
+        super::save_online_update(&path, true).unwrap();
+        let (config, diagnostic) = super::load(&path);
+        assert_eq!(diagnostic, None);
+        assert!(config.online_update, "开启后 config.json 应写入 true");
+        assert!(super::load_online_update(&path).0);
+
+        // 关闭同样可往返。
+        super::save_online_update(&path, false).unwrap();
+        assert!(!super::load_online_update(&path).0);
+    }
+
+    #[test]
+    fn 只改在线更新开关不动其他字段() {
+        let dir = temp_dir("online-preserve");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "enabled_packs": ["it"],
+                "theme": "dark",
+                "default_mode": "english",
+                "last_check": 1759420800
+            }"#,
+        )
+        .unwrap();
+
+        super::save_online_update(&path, true).unwrap();
+
+        let (config, diagnostic) = super::load(&path);
+        assert_eq!(diagnostic, None);
+        assert!(config.online_update);
+        assert_eq!(config.enabled_packs, vec!["it"], "领域包勾选不得丢失");
         assert_eq!(
             config.theme,
             zhu_ye_core::ThemeChoice::Dark,
