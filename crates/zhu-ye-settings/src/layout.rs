@@ -190,6 +190,8 @@ pub enum ChipValue {
     Theme(ThemeChoice),
     /// 新会话默认中英模式（中文 / 英文，D-32 装配项）。
     Mode(ModeChoice),
+    /// 在线更新开关（关闭 / 开启，P-03 默认关）。
+    OnlineUpdate(bool),
 }
 
 /// 二选一控件块：取值决定绘制时的选中状态与点击后的动作。
@@ -248,6 +250,7 @@ pub fn item_rows(
         let chips = match item.control {
             ItemControl::ThemeChoice => theme_chips(metrics, rect),
             ItemControl::ModeChoice => mode_chips(metrics, rect),
+            ItemControl::OnlineUpdate => online_update_chips(metrics, rect),
             _ => Vec::new(),
         };
         rows.push(ItemRow {
@@ -278,6 +281,16 @@ fn mode_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
         row,
         ("中文", ChipValue::Mode(ModeChoice::Chinese)),
         ("英文", ChipValue::Mode(ModeChoice::English)),
+    )
+}
+
+/// 在线更新二选一控件：关闭在前、开启在后（P-03 默认关，用户须显式开启）。
+fn online_update_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
+    two_chips(
+        metrics,
+        row,
+        ("关闭", ChipValue::OnlineUpdate(false)),
+        ("开启", ChipValue::OnlineUpdate(true)),
     )
 }
 
@@ -516,6 +529,103 @@ pub fn repair_layout(metrics: &SettingsMetrics, client: UiRect, row_count: usize
         bottom: button_top + metrics.pack_button_height,
     };
     RepairLayout { rows, l1, l2, back }
+}
+
+/// 「检查更新」子视图整体布局（T-077 / FR-044）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateLayout {
+    /// 顶部说明区（当前开关状态 + 禁用原因/更新器路径，最多两行）。
+    pub info: UiRect,
+    /// 中部结果区（更新器输出逐行展示，超出截断）。
+    pub result: UiRect,
+    /// "检查更新"按钮（强调色）。
+    pub check: UiRect,
+    /// "应用更新"按钮（普通色）。
+    pub apply: UiRect,
+    /// "返回关于与更新"按钮。
+    pub back: UiRect,
+}
+
+/// 计算「检查更新」子视图布局：说明在上、结果居中、三个按钮在底部。
+#[must_use]
+pub fn update_layout(metrics: &SettingsMetrics, client: UiRect) -> UpdateLayout {
+    let content = content_rect(metrics, client);
+    let row_height = metrics.pack_row_height.saturating_sub(metrics.gap);
+    let info = UiRect {
+        left: content.left,
+        top: content.top,
+        right: content.right,
+        bottom: content.top + row_height * 2,
+    };
+    let button_top = content.bottom - metrics.pack_button_height;
+    let gap = metrics.gap;
+    let width = (content.width() - gap * 2) / 3;
+    let check = UiRect {
+        left: content.left,
+        top: button_top,
+        right: content.left + width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let apply = UiRect {
+        left: check.right + gap,
+        top: button_top,
+        right: check.right + gap + width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let back = UiRect {
+        left: apply.right + gap,
+        top: button_top,
+        right: content.right,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let result = UiRect {
+        left: content.left,
+        top: info.bottom + gap,
+        right: content.right,
+        bottom: button_top - gap,
+    };
+    UpdateLayout {
+        info,
+        result,
+        check,
+        apply,
+        back,
+    }
+}
+
+/// 「版本与诊断信息」子视图整体布局（T-077 / FR-044）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsLayout {
+    /// 信息逐行区；行数由诊断内容决定，超出可用高度截断。
+    pub rows: Vec<UiRect>,
+    /// "返回关于与更新"按钮。
+    pub back: UiRect,
+}
+
+/// 计算「版本与诊断信息」子视图布局：信息行在上、返回按钮在底部。
+#[must_use]
+pub fn diagnostics_layout(
+    metrics: &SettingsMetrics,
+    client: UiRect,
+    row_count: usize,
+) -> DiagnosticsLayout {
+    let content = content_rect(metrics, client);
+    let row_height = metrics.pack_row_height.saturating_sub(metrics.gap);
+    let rows: Vec<UiRect> = (0..row_count)
+        .map(|index| UiRect {
+            left: content.left,
+            top: content.top + index as i32 * row_height,
+            right: content.right,
+            bottom: content.top + (index as i32 + 1) * row_height,
+        })
+        .collect();
+    let back = UiRect {
+        left: content.left,
+        top: content.bottom - metrics.pack_button_height,
+        right: content.left + metrics.pack_button_width,
+        bottom: content.bottom,
+    };
+    DiagnosticsLayout { rows, back }
 }
 
 // ---------------------------------------------------------------------------
@@ -908,6 +1018,71 @@ mod tests {
         assert_eq!(chips[1].label, "英文");
         assert!(chips[0].rect.right <= chips[1].rect.left);
         assert_eq!(chips[1].rect.right, rows[1].rect.right - metrics.gap);
+    }
+
+    #[test]
+    fn 在线更新条目有两个开关控件块且默认关闭在先() {
+        use crate::model::Page;
+        let metrics = SettingsMetrics::new(96);
+        let rows = item_rows(&metrics, CLIENT, Page::About.items(), None);
+        let chips = &rows[0].chips;
+        assert_eq!(chips.len(), 2, "在线更新是二选一开关（P-03）");
+        assert_eq!(
+            chips[0].value,
+            super::ChipValue::OnlineUpdate(false),
+            "关闭在前"
+        );
+        assert_eq!(
+            chips[1].value,
+            super::ChipValue::OnlineUpdate(true),
+            "开启在后"
+        );
+        assert_eq!(chips[0].label, "关闭");
+        assert_eq!(chips[1].label, "开启");
+        assert!(chips[0].rect.right <= chips[1].rect.left);
+        assert_eq!(chips[1].rect.right, rows[0].rect.right - metrics.gap);
+    }
+
+    #[test]
+    fn 检查更新子视图说明结果按钮依次排列() {
+        let metrics = SettingsMetrics::new(96);
+        let layout = super::update_layout(&metrics, CLIENT);
+        let content = content_rect(&metrics, CLIENT);
+        // 三列按钮依次相接（隔一个 gap）、不重叠，覆盖整个内容区宽度。
+        assert_eq!(layout.check.right + metrics.gap, layout.apply.left);
+        assert_eq!(layout.apply.right + metrics.gap, layout.back.left);
+        assert_eq!(layout.back.right, content.right);
+        assert_eq!(layout.check.bottom, content.bottom);
+        // 说明区在顶部，结果区在说明区与按钮之间，互不重叠。
+        assert_eq!(layout.info.top, content.top);
+        assert!(layout.info.bottom <= content.bottom);
+        assert_eq!(layout.result.top, layout.info.bottom + metrics.gap);
+        assert!(layout.result.bottom <= layout.check.top);
+        assert!(
+            layout.result.height() >= metrics.pack_row_height,
+            "结果区至少一行高"
+        );
+    }
+
+    #[test]
+    fn 诊断子视图信息行在上返回按钮在底部() {
+        let metrics = SettingsMetrics::new(96);
+        let content = content_rect(&metrics, CLIENT);
+        let layout = super::diagnostics_layout(&metrics, CLIENT, 5);
+        assert_eq!(layout.rows.len(), 5);
+        assert_eq!(layout.rows[0].top, content.top);
+        for pair in layout.rows.windows(2) {
+            assert!(pair[0].bottom <= pair[1].top);
+        }
+        assert_eq!(layout.back.bottom, content.bottom);
+        assert_eq!(layout.back.top, content.bottom - metrics.pack_button_height);
+        assert!(
+            layout
+                .rows
+                .last()
+                .is_none_or(|row| row.bottom <= layout.back.top),
+            "信息行不得压住返回按钮"
+        );
     }
 
     #[test]

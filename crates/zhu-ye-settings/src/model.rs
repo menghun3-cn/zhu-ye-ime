@@ -133,6 +133,10 @@ pub enum Subview {
     Manage,
     /// 「修复输入法」（T-076 / FR-043：一级/二级修复）。
     Repair,
+    /// 「检查更新」（T-077 / FR-044：spawn 更新器检查与应用，窗口自身不联网）。
+    Update,
+    /// 「版本与诊断信息」（T-077 / FR-044：版本、路径与已装包列表）。
+    Diagnostics,
 }
 
 /// 条目右侧控件。
@@ -156,6 +160,12 @@ pub enum ItemControl {
     OpenRepair,
     /// 恢复状态栏：重启输入法进程（ctfmon）重建语言栏；执行前弹确认（D-43）。
     RestoreLangBar,
+    /// 在线更新开/关二选一（T-077 / FR-044；写 `config.json` 的 `online_update`，P-03 默认关）。
+    OnlineUpdate,
+    /// 进入"检查更新"子视图（T-077 / FR-044）。
+    OpenUpdate,
+    /// 进入"版本与诊断信息"子视图（T-077 / FR-044）。
+    OpenDiagnostics,
 }
 
 /// 条目定义。
@@ -294,16 +304,22 @@ static COMMON_ITEMS: &[Item] = &[
 /// 关于与更新页条目（FR-044）。
 static ABOUT_ITEMS: &[Item] = &[
     item(
+        "启用在线更新",
+        "由独立更新器进程联网；默认关闭，需显式开启（P-03）",
+        ItemState::Ready,
+        ItemControl::OnlineUpdate,
+    ),
+    item(
         "检查更新",
         "经独立更新器进程检查；窗口自身不联网",
-        ItemState::Scheduled { batch: "M12-5" },
-        ItemControl::None,
+        ItemState::Ready,
+        ItemControl::OpenUpdate,
     ),
     item(
         "版本与诊断信息",
         "版本、配置路径、数据目录、日志目录、已装包",
-        ItemState::Scheduled { batch: "M12-5" },
-        ItemControl::None,
+        ItemState::Ready,
+        ItemControl::OpenDiagnostics,
     ),
 ];
 
@@ -318,6 +334,8 @@ pub struct SettingsState {
     pub theme: ThemeChoice,
     /// 新会话默认中英模式选择（来自 `config.json`，D-32 装配项）。
     pub default_mode: ModeChoice,
+    /// 在线更新开关（来自 `config.json`，P-03 默认关）。
+    pub online_update: bool,
     /// 当前子视图（互斥）；子视图数据在窗口层，这里只记状态。
     pub subview: Subview,
 }
@@ -329,6 +347,7 @@ impl Default for SettingsState {
             expanded: None,
             theme: ThemeChoice::Light,
             default_mode: ModeChoice::Chinese,
+            online_update: false,
             subview: Subview::None,
         }
     }
@@ -350,6 +369,17 @@ impl SettingsState {
         Self {
             theme,
             default_mode,
+            ..Self::default()
+        }
+    }
+
+    /// 按已保存的主题、默认中英模式与在线更新开关建立状态。
+    #[must_use]
+    pub fn with_config(theme: ThemeChoice, default_mode: ModeChoice, online_update: bool) -> Self {
+        Self {
+            theme,
+            default_mode,
+            online_update,
             ..Self::default()
         }
     }
@@ -378,6 +408,18 @@ impl SettingsState {
     /// 进入「修复输入法」子视图。
     pub fn open_repair(&mut self) {
         self.subview = Subview::Repair;
+        self.expanded = None;
+    }
+
+    /// 进入「检查更新」子视图（T-077 / FR-044）。
+    pub fn open_update(&mut self) {
+        self.subview = Subview::Update;
+        self.expanded = None;
+    }
+
+    /// 进入「版本与诊断信息」子视图（T-077 / FR-044）。
+    pub fn open_diagnostics(&mut self) {
+        self.subview = Subview::Diagnostics;
         self.expanded = None;
     }
 
@@ -495,7 +537,10 @@ mod tests {
                 "更多设置：日志目录",
                 "恢复状态栏",
                 "管理输入法",
-                "修复输入法"
+                "修复输入法",
+                "启用在线更新",
+                "检查更新",
+                "版本与诊断信息"
             ]
         );
         // 主题用二选一控件；工具箱两项用"打开面板"控件。
@@ -584,10 +629,11 @@ mod tests {
         assert_eq!(state.expanded, Some(placeholder));
         state.select_page(Page::About);
         assert_eq!(state.expanded, None, "展开态属于页内下标，切页必须清空");
-        // 同页重复选择不清空。
-        state.click_item(0);
-        state.select_page(Page::About);
-        assert_eq!(state.expanded, Some(0));
+        // 同页重复选择不清空（关于页现已全接入，用常用设置的规划中条目复验）。
+        state.select_page(Page::Common);
+        state.click_item(9);
+        state.select_page(Page::Common);
+        assert_eq!(state.expanded, Some(9));
     }
 
     #[test]
@@ -646,6 +692,59 @@ mod tests {
             SettingsState::new(ThemeChoice::Light).default_mode,
             ModeChoice::Chinese
         );
+    }
+
+    #[test]
+    fn m12_5关于页三条目全部接入且控件齐备() {
+        let items = Page::About.items();
+        // 在线更新开关：P-03 默认关，界面显式开启。
+        let online = items
+            .iter()
+            .find(|item| item.title == "启用在线更新")
+            .expect("缺少启用在线更新条目");
+        assert_eq!(online.state, ItemState::Ready);
+        assert_eq!(online.control, ItemControl::OnlineUpdate);
+        // 检查更新进入子视图。
+        let update = items
+            .iter()
+            .find(|item| item.title == "检查更新")
+            .expect("缺少检查更新条目");
+        assert_eq!(update.state, ItemState::Ready);
+        assert_eq!(update.control, ItemControl::OpenUpdate);
+        // 版本与诊断信息进入子视图。
+        let diagnostics = items
+            .iter()
+            .find(|item| item.title == "版本与诊断信息")
+            .expect("缺少版本与诊断信息条目");
+        assert_eq!(diagnostics.state, ItemState::Ready);
+        assert_eq!(diagnostics.control, ItemControl::OpenDiagnostics);
+    }
+
+    #[test]
+    fn 在线更新开关默认关闭且随配置装载() {
+        // P-03：默认关闭，未显式开启不得联网。
+        let state = SettingsState::default();
+        assert!(
+            !state.online_update,
+            "online_update 默认必须为 false（P-03）"
+        );
+        assert!(!SettingsState::new(ThemeChoice::Light).online_update);
+        let state = SettingsState::with_config(ThemeChoice::Dark, ModeChoice::English, true);
+        assert!(state.online_update, "显式开启后应为 true");
+    }
+
+    #[test]
+    fn 更新与诊断子视图进入退出() {
+        use crate::model::Subview;
+
+        let mut state = SettingsState::new(ThemeChoice::Light);
+        assert_eq!(state.subview, Subview::None);
+        state.open_update();
+        assert_eq!(state.subview, Subview::Update, "进入检查更新子视图");
+        state.open_diagnostics();
+        assert_eq!(state.subview, Subview::Diagnostics, "诊断子视图互斥覆盖");
+        state.close_subview();
+        assert_eq!(state.subview, Subview::None);
     }
 
     #[test]

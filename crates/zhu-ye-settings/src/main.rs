@@ -121,6 +121,12 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
             "--repair" => {
                 options.shot_repair = true;
             }
+            "--update" => {
+                options.shot_update = true;
+            }
+            "--diag" => {
+                options.shot_diag = true;
+            }
             "--repair-registry" => return Ok(Some(Mode::RepairRegistry)),
             "--shot-panel" => {
                 let kind = match next_value(&mut args, "--shot-panel")?.as_str() {
@@ -158,9 +164,18 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
             path,
         }));
     }
-    let shots = [options.shot_packs, options.shot_manage, options.shot_repair];
+    let shots = [
+        options.shot_packs,
+        options.shot_manage,
+        options.shot_repair,
+        options.shot_update,
+        options.shot_diag,
+    ];
     if shots.iter().filter(|on| **on).count() > 1 {
-        return Err("--packs / --manage / --repair 子视图入口互斥，一次最多一个".to_owned());
+        return Err(
+            "--packs / --manage / --repair / --update / --diag 子视图入口互斥，一次最多一个"
+                .to_owned(),
+        );
     }
     if options.shot_expanded.is_some() && shots.iter().any(|on| *on) {
         return Err("--expand 与子视图入口不能同时使用（子视图内没有条目展开）".to_owned());
@@ -193,6 +208,8 @@ fn print_usage() {
     println!("                   [--packs]               截图时进入「添加词库」子视图");
     println!("                   [--manage]              截图时进入「管理输入法」子视图");
     println!("                   [--repair]              截图时进入「修复输入法」子视图");
+    println!("                   [--update]              截图时进入「检查更新」子视图");
+    println!("                   [--diag]                截图时进入「版本与诊断信息」子视图");
     println!("  zhu-ye-settings --shot-panel emoji|symbol <文件.bmp>");
     println!("                   [--panel-page <页码>]  画出工具箱面板一帧并写出 BMP");
     println!("  zhu-ye-settings --repair-registry   重注册 TSF 两棵注册树（提权环境执行）");

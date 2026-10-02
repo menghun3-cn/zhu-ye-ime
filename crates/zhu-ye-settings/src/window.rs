@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -30,7 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_ARROW, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
     WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED,
-    WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 use zhu_ye_core::{ModeChoice, ThemeChoice};
 use zhu_ye_ime::candidate_ui::{UiRect, UiThemeKind, BASE_DPI};
@@ -48,12 +50,57 @@ use crate::registry;
 use crate::repair::{self, evaluate_registration, L1Outcome, RegistrationStatus, RepairScan};
 use crate::shell;
 use crate::theme::{settings_theme, settings_theme_from_system_colors, SettingsTheme};
+use crate::updater;
 use crate::wide::to_utf16;
 
 /// 窗口类名；第二条实例用它查找已有窗口。
 pub const WINDOW_CLASS_NAME: &str = "ZhuYeSettingsWindow";
 /// 窗口标题。
 pub const WINDOW_TITLE: &str = "竹叶输入法 设置";
+
+/// 后台更新器任务完成的回执消息（spawn 的线程完成后投递，结果经 mpsc 取回）。
+const WM_UPDATER_DONE: u32 = WM_USER + 0x120;
+
+/// 后台更新器任务的类型（决定线程的更新器参数与界面的结果去向）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateKind {
+    /// `zhu-ye-updater check`：只检查，不下载不应用。
+    Check,
+    /// `zhu-ye-updater apply`：下载并应用可用更新（联网发生在子进程内，D-44）。
+    Apply,
+}
+
+impl UpdateKind {
+    /// 任务进行中的提示文案。
+    const fn busy_label(self) -> &'static str {
+        match self {
+            Self::Check => "正在检查更新…",
+            Self::Apply => "正在下载并应用更新…",
+        }
+    }
+
+    /// 更新器子命令参数。
+    const fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Check => &["check"],
+            Self::Apply => &["apply"],
+        }
+    }
+
+    /// 完成后写入结果区的标题行。
+    const fn done_title(self) -> &'static str {
+        match self {
+            Self::Check => "检查更新结果",
+            Self::Apply => "应用更新结果",
+        }
+    }
+}
+
+/// 后台任务完成时送回的内容。
+struct UpdateOutcome {
+    kind: UpdateKind,
+    result: Result<String, String>,
+}
 
 /// 启动选项。
 #[derive(Debug, Clone, Default)]
@@ -70,6 +117,10 @@ pub struct RunOptions {
     pub shot_manage: bool,
     /// 截图时进入「修复输入法」子视图（同上互斥规则）。
     pub shot_repair: bool,
+    /// 截图时进入「检查更新」子视图（同上互斥规则）。
+    pub shot_update: bool,
+    /// 截图时进入「版本与诊断信息」子视图（同上互斥规则）。
+    pub shot_diag: bool,
 }
 
 /// 窗口运行状态。
@@ -95,6 +146,16 @@ struct WindowState {
     manage: Option<RegistrationStatus>,
     /// 「修复输入法」子视图的检测结果；进入时扫描、修复后重扫（T-076 / FR-043）。
     repair_scan: Option<RepairScan>,
+    /// 正在运行的后台更新器任务（None 表示空闲）；完成后回执到主线程再清空。
+    update_busy: Option<UpdateKind>,
+    /// 最近一次后台任务的结果（含错误）；进入子视图或任务完成时更新。
+    update_result: Option<(UpdateKind, Result<String, String>)>,
+    /// 后台任务完成回执的接收端；spawn 新任务时重建。
+    update_rx: Option<Receiver<UpdateOutcome>>,
+    /// 已派发的任务序号；回执消息用它识别"当前任务"（旧任务迟到回执忽略）。
+    update_seq: u32,
+    /// 「版本与诊断信息」子视图的逐行内容；进入时从本地收集（不联网）。
+    diagnostics: Option<Vec<String>>,
 }
 
 impl WindowState {
@@ -109,7 +170,12 @@ impl WindowState {
             Some(path) => config::load_mode(path).0,
             None => ModeChoice::Chinese,
         };
-        let mut settings = SettingsState::with_defaults(theme, default_mode);
+        // P-03：在线更新默认关闭；开启与否都从配置装载，窗口如实反映当前状态。
+        let online_update = match &config_path {
+            Some(path) => config::load_online_update(path).0,
+            None => false,
+        };
+        let mut settings = SettingsState::with_config(theme, default_mode, online_update);
         if let Some(page) = options.shot_page {
             settings.page = page;
             settings.expanded = options.shot_expanded;
@@ -125,6 +191,14 @@ impl WindowState {
         if options.shot_repair {
             settings.page = Page::Common;
             settings.open_repair();
+        }
+        if options.shot_update {
+            settings.page = Page::About;
+            settings.open_update();
+        }
+        if options.shot_diag {
+            settings.page = Page::About;
+            settings.open_diagnostics();
         }
         let packs = if settings.subview == Subview::Packs {
             list_packs_now(config_path.as_deref())
@@ -147,6 +221,12 @@ impl WindowState {
         } else {
             None
         };
+        // 取证模式直接进入诊断子视图时，首帧就需要真实信息。
+        let diagnostics = if settings.subview == Subview::Diagnostics {
+            Some(build_diagnostics(config_path.as_deref()))
+        } else {
+            None
+        };
         Self {
             settings,
             theme_kind: shell::resolve_theme_kind(),
@@ -162,6 +242,11 @@ impl WindowState {
             packs,
             manage,
             repair_scan,
+            update_busy: None,
+            update_result: None,
+            update_rx: None,
+            update_seq: 0,
+            diagnostics,
         }
     }
 
@@ -353,6 +438,30 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        // 后台更新器任务完成（T-077 / FR-044）：取回结果并重绘。
+        // 任务线程只负责运行更新器与投递回执；一切输出处理都在主线程完成。
+        // `wparam` 携带任务序号：旧任务（已被新任务顶替）的迟到回执直接忽略。
+        WM_UPDATER_DONE => {
+            unsafe {
+                if let Some(state) = state_mut(hwnd) {
+                    if (wparam.0 as u32) == state.update_seq {
+                        if let Some(rx) = state.update_rx.take() {
+                            // 线程在投递回执前完成 send，这里必能取到；竞态时清 busy 自愈。
+                            if let Ok(outcome) = rx.try_recv() {
+                                state.update_busy = None;
+                                state.update_result = Some((outcome.kind, outcome.result));
+                            } else {
+                                state.update_busy = None;
+                            }
+                        } else {
+                            state.update_busy = None;
+                        }
+                    }
+                }
+                invalidate(hwnd);
+            }
+            LRESULT(0)
+        }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             if u16::try_from(wparam.0).ok() == Some(VK_ESCAPE.0) {
                 unsafe {
@@ -415,6 +524,14 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
             on_repair_click(hwnd, state, &metrics, client, x, y);
             return;
         }
+        Subview::Update => {
+            on_update_click(hwnd, state, &metrics, client, x, y);
+            return;
+        }
+        Subview::Diagnostics => {
+            on_diagnostics_click(state, &metrics, client, x, y);
+            return;
+        }
         Subview::None => {}
     }
 
@@ -456,6 +573,16 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
                     state.settings.open_repair();
                     invalidate(hwnd);
                 }
+                ItemControl::OpenUpdate => {
+                    state.settings.open_update();
+                    invalidate(hwnd);
+                }
+                ItemControl::OpenDiagnostics => {
+                    state.diagnostics = Some(build_diagnostics(state.config_path.as_deref()));
+                    state.settings.open_diagnostics();
+                    invalidate(hwnd);
+                }
+                ItemControl::OnlineUpdate => {}
                 ItemControl::RestoreLangBar => {
                     restore_lang_bar(hwnd, state);
                     invalidate(hwnd);
@@ -575,6 +702,146 @@ fn on_repair_click(
             invalidate(hwnd);
         }
     }
+}
+
+/// 「检查更新」子视图内的命中（T-077 / FR-044）：返回 / 检查更新 / 应用更新。
+///
+/// 检查与应用按钮有共同的可点条件：在线更新已开启（P-03）、更新器存在、当前无任务在跑。
+/// 未开启或更新器缺失时按钮不可点，界面在说明区给出原因——保证"关闭时零出站连接"可测。
+fn on_update_click(
+    hwnd: HWND,
+    state: &mut WindowState,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+    x: i32,
+    y: i32,
+) {
+    let layout_rows = layout::update_layout(metrics, client);
+    if layout::contains(layout_rows.back, x, y) {
+        state.settings.close_subview();
+        return;
+    }
+    let can_run = can_run_updater(state);
+    if layout::contains(layout_rows.check, x, y) {
+        if can_run {
+            unsafe { start_update_task(hwnd, state, UpdateKind::Check) };
+        }
+        return;
+    }
+    if layout::contains(layout_rows.apply, x, y) {
+        // 应用更新是下载并覆盖本机安装的动作：二次确认（FR-044 / 验收 13.2）。
+        if can_run && confirm_apply_update(hwnd) {
+            unsafe { start_update_task(hwnd, state, UpdateKind::Apply) };
+        }
+    }
+}
+
+/// 检查/应用按钮是否可点：在线更新已开启（P-03）+ 更新器存在 + 无任务在跑。
+///
+/// `online_update` 未开启时**不 spawn 任何进程**，这是"关闭时零出站连接"的保证边界。
+fn can_run_updater(state: &WindowState) -> bool {
+    state.settings.online_update
+        && updater::updater_exe_path().is_some()
+        && state.update_busy.is_none()
+}
+
+/// 应用更新的二次确认（D-44 / FR-044）。
+fn confirm_apply_update(hwnd: HWND) -> bool {
+    registry::message_box(
+        Some(hwnd),
+        "将下载并应用可用更新。\n更新会替换本机程序文件，可能需要重启输入法，确定继续吗？",
+        "应用更新",
+        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+    )
+}
+
+/// 派发一个后台更新器任务：spawn 线程运行 `zhu-ye-updater`，完成后投递回执。
+///
+/// 联网只发生在更新器**子进程**内（D-44）；主线程不阻塞：结果经 mpsc 送还，
+/// 由 `WM_UPDATER_DONE` 在消息循环里取回并重绘。
+unsafe fn start_update_task(hwnd: HWND, state: &mut WindowState, kind: UpdateKind) {
+    let Some(program) = updater::updater_exe_path() else {
+        state.hint =
+            Some("未找到更新器程序：请安装完整发行包（含 bin\\zhu-ye-updater.exe）".to_owned());
+        invalidate(hwnd);
+        return;
+    };
+    let args: Vec<&'static str> = kind.args().to_vec();
+    state.update_seq = state.update_seq.wrapping_add(1);
+    let seq = state.update_seq;
+    let (tx, rx) = mpsc::channel();
+    state.update_busy = Some(kind);
+    state.update_result = None; // 新任务清掉旧结果，避免把上一次结果误读为新任务输出。
+    state.update_rx = Some(rx);
+    state.hint = Some(kind.busy_label().to_owned());
+    // HWND 不是 Send，把它降为句柄数值传入线程，线程内重建（仅用于投递回执消息）。
+    let hwnd_raw = hwnd.0 as isize;
+    let _ = thread::spawn(move || {
+        // 先送结果、后投递回执：回执到达时结果必然已在 channel 里（见 WM_UPDATER_DONE）。
+        let result = updater::run(&program, &args);
+        let _ = tx.send(UpdateOutcome { kind, result });
+        let target = HWND(hwnd_raw as *mut core::ffi::c_void);
+        unsafe {
+            let _ = PostMessageW(
+                Some(target),
+                WM_UPDATER_DONE,
+                WPARAM(seq as usize),
+                LPARAM(0),
+            );
+        }
+    });
+    invalidate(hwnd);
+}
+
+/// 「版本与诊断信息」子视图内的命中：返回。
+fn on_diagnostics_click(
+    state: &mut WindowState,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+    x: i32,
+    y: i32,
+) {
+    let row_count = state.diagnostics.as_ref().map_or(0, Vec::len);
+    let layout_rows = layout::diagnostics_layout(metrics, client, row_count);
+    if layout::contains(layout_rows.back, x, y) {
+        state.settings.close_subview();
+    }
+}
+
+/// 收集诊断信息（T-077 / FR-044）：版本、配置/数据/日志路径与已装包列表。
+///
+/// 全部本地读取，不 spawn 更新器、不发网络请求（D-44）。已装包清单复用
+/// `list_packs_now` 的本地盘面（清单 + 配置 + exe 目录），与「添加词库」同源。
+fn build_diagnostics(config_path: Option<&std::path::Path>) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "竹叶输入法 v{}（引擎与设置窗口同源发布）",
+        zhu_ye_core::core_version()
+    ));
+    lines.push("联机更新由独立更新器进程完成（D-44），本窗口自身不联网。".to_owned());
+    match config_path {
+        Some(path) => lines.push(format!("配置文件：{}", path.display())),
+        None => lines.push("配置文件：（未找到，APPDATA 未设置）".to_owned()),
+    }
+    match config::data_dir() {
+        Some(dir) => lines.push(format!("数据目录：{}", dir.display())),
+        None => lines.push("数据目录：（未找到，APPDATA 未设置）".to_owned()),
+    }
+    lines.push(format!(
+        "日志目录：{}（文件日志仅在验收期启用）",
+        config::acceptance_log_dir().display()
+    ));
+    let packs = list_packs_now(config_path);
+    if packs.is_empty() {
+        lines.push("已装包：（无）".to_owned());
+    } else {
+        lines.push(format!("已装包（{}）：", packs.len()));
+        for pack in packs {
+            let flag = if pack.enabled { "已启用" } else { "停用" };
+            lines.push(format!("  {}（{}，{flag}）", pack.name, pack.id));
+        }
+    }
+    lines
 }
 
 /// 汇总一级修复的逐项结果为底部提示（每项一行，行数有限时截断）。
@@ -773,12 +1040,34 @@ const fn mode_label(mode: ModeChoice) -> &'static str {
     }
 }
 
-/// 二选一控件命中后的分发：主题或默认中英模式（D-32 装配项）。
+/// 二选一控件命中后的分发：主题、默认中英模式（D-32）或在线更新开关（P-03）。
 fn apply_chip(state: &mut WindowState, chip: &Chip) {
     match chip.value {
         ChipValue::Theme(choice) => apply_theme(state, choice),
         ChipValue::Mode(mode) => apply_mode(state, mode),
+        ChipValue::OnlineUpdate(on) => apply_online_update(state, on),
     }
+}
+
+/// 应用在线更新开关并持久化（T-077 / FR-044，P-03）。
+///
+/// 勾选即写 `config.json`（运行时开关，设置状态三分）：更新器进程下次读取；
+/// 写入失败时如实提示，不假装已开启。
+fn apply_online_update(state: &mut WindowState, on: bool) {
+    state.settings.online_update = on;
+    state.hint = Some(match &state.config_path {
+        Some(path) => match config::save_online_update(path, on) {
+            Ok(()) => {
+                if on {
+                    "已开启在线更新：检查/应用将经独立更新器进程联网（D-44）".to_owned()
+                } else {
+                    "已关闭在线更新：更新器不再发起任何网络请求".to_owned()
+                }
+            }
+            Err(error) => format!("保存失败：{error}"),
+        },
+        None => "未找到配置目录（APPDATA 未设置），本次选择不会保留".to_owned(),
+    });
 }
 
 /// 应用默认中英模式选择并持久化（D-32 装配项）。
@@ -1043,6 +1332,8 @@ unsafe fn draw(hdc: HDC, state: &mut WindowState, client: UiRect) {
             Subview::Packs => draw_packs(hdc, state, theme, &metrics, client),
             Subview::Manage => draw_manage(hdc, state, theme, &metrics, client),
             Subview::Repair => draw_repair(hdc, state, theme, &metrics, client),
+            Subview::Update => draw_update(hdc, state, theme, &metrics, client),
+            Subview::Diagnostics => draw_diagnostics(hdc, state, theme, &metrics, client),
             Subview::None => draw_items(hdc, state, theme, &metrics, client),
         }
 
@@ -1111,6 +1402,7 @@ unsafe fn draw_items(
             let selected = match chip.value {
                 ChipValue::Theme(choice) => choice == state.settings.theme,
                 ChipValue::Mode(mode) => mode == state.settings.default_mode,
+                ChipValue::OnlineUpdate(on) => on == state.settings.online_update,
             };
             let background = if selected {
                 theme.control_selected
@@ -1497,6 +1789,253 @@ unsafe fn draw_repair(
         theme.item_text,
         state.fonts.small,
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+    );
+}
+
+/// 绘制「检查更新」子视图（T-077 / FR-044）。
+///
+/// 说明区给出开关状态与不可点的原因；结果区逐行展示更新器输出；
+/// 底部「检查更新」为主按钮，未开启/更新器缺失时置灰且不响应。
+unsafe fn draw_update(
+    hdc: HDC,
+    state: &mut WindowState,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+) {
+    let layout_rows = layout::update_layout(metrics, client);
+    let online = state.settings.online_update;
+
+    // 说明区第一行：在线更新开关状态（P-03 默认关）。
+    let status_rect = UiRect {
+        left: layout_rows.info.left,
+        top: layout_rows.info.top + metrics.gap,
+        right: layout_rows.info.right,
+        bottom: layout_rows.info.top + metrics.gap + state.fonts.body_height,
+    };
+    draw_text(
+        hdc,
+        if online {
+            "在线更新：已开启"
+        } else {
+            "在线更新：已关闭"
+        },
+        status_rect,
+        if online {
+            theme.item_text
+        } else {
+            theme.warn_text
+        },
+        state.fonts.body,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+    );
+    // 说明区第二行：不可点的原因或更新器位置（D-44 边界说明）。
+    let hint_rect = UiRect {
+        left: layout_rows.info.left,
+        top: status_rect.bottom,
+        right: layout_rows.info.right,
+        bottom: layout_rows.info.bottom - metrics.gap / 2,
+    };
+    let hint = if !online {
+        "未开启时不发起任何网络请求（D-44）：请在「启用在线更新」中开启".to_owned()
+    } else {
+        match updater::updater_exe_path() {
+            Some(path) => format!("更新器：{}", path.display()),
+            None => "更新器未找到：请安装完整发行包（含 bin\\zhu-ye-updater.exe）".to_owned(),
+        }
+    };
+    draw_text(
+        hdc,
+        &hint,
+        hint_rect,
+        theme.secondary_text,
+        state.fonts.small,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+    );
+    fill(
+        hdc,
+        UiRect {
+            left: layout_rows.info.left,
+            top: layout_rows.info.bottom - 1,
+            right: layout_rows.info.right,
+            bottom: layout_rows.info.bottom,
+        },
+        theme.border,
+    );
+
+    // 结果区：任务中显示进行中；否则显示最近一次结果（如实反映错误，D-44 无假共识）。
+    let lines = update_result_lines(state);
+    let row_height = state.fonts.small_height;
+    let visible = (layout_rows.result.height() / row_height.max(1)).max(0) as usize;
+    for (index, line) in lines.iter().take(visible).enumerate() {
+        let rect = UiRect {
+            left: layout_rows.result.left,
+            top: layout_rows.result.top + index as i32 * row_height,
+            right: layout_rows.result.right,
+            bottom: layout_rows.result.top + (index as i32 + 1) * row_height,
+        };
+        draw_text(
+            hdc,
+            line,
+            rect,
+            if index == 0 {
+                theme.item_text
+            } else {
+                theme.secondary_text
+            },
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
+
+    // 底部按钮：检查 / 应用 / 返回。
+    let can_run = online && updater::updater_exe_path().is_some() && state.update_busy.is_none();
+    let label = if state.update_busy.is_some() {
+        "正在运行…"
+    } else {
+        "检查更新"
+    };
+    if can_run {
+        draw_button(
+            hdc,
+            state.fonts.small,
+            theme,
+            metrics,
+            layout_rows.check,
+            label,
+        );
+    } else {
+        draw_disabled_button(
+            hdc,
+            state.fonts.small,
+            theme,
+            metrics,
+            layout_rows.check,
+            label,
+        );
+    }
+    fill_round(
+        hdc,
+        layout_rows.apply,
+        metrics.gap / 2,
+        theme.control_background,
+    );
+    draw_text(
+        hdc,
+        "应用更新",
+        layout_rows.apply,
+        if can_run {
+            theme.item_text
+        } else {
+            theme.placeholder_text
+        },
+        state.fonts.small,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+    );
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout_rows.back,
+        "← 返回关于与更新",
+    );
+}
+
+/// 结果区的逐行内容：任务进行中 / 最近一次结果（含错误，如实展示）。
+fn update_result_lines(state: &WindowState) -> Vec<String> {
+    if let Some(kind) = state.update_busy {
+        return vec![kind.busy_label().to_owned()];
+    }
+    let Some((kind, result)) = &state.update_result else {
+        return vec!["尚未执行检查。".to_owned()];
+    };
+    let mut lines = vec![format!("{}：", kind.done_title())];
+    match result {
+        Ok(text) => {
+            let output = updater::output_lines(text);
+            if output.is_empty() {
+                lines.push("（无输出）".to_owned());
+            } else {
+                lines.extend(output);
+            }
+        }
+        Err(text) => {
+            lines.push("更新器执行失败：".to_owned());
+            let output = updater::output_lines(text);
+            if output.is_empty() {
+                lines.push("（无输出）".to_owned());
+            } else {
+                lines.extend(output);
+            }
+        }
+    }
+    lines
+}
+
+/// 不可点按钮：底色与前景都用"禁用"色，命中端不响应。
+unsafe fn draw_disabled_button(
+    hdc: HDC,
+    font: HFONT,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    rect: UiRect,
+    label: &str,
+) {
+    fill_round(hdc, rect, metrics.gap / 2, theme.control_background);
+    draw_text(
+        hdc,
+        label,
+        rect,
+        theme.placeholder_text,
+        font,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+    );
+}
+
+/// 绘制「版本与诊断信息」子视图（T-077 / FR-044）：逐行展示诊断内容。
+unsafe fn draw_diagnostics(
+    hdc: HDC,
+    state: &mut WindowState,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+) {
+    let lines = state
+        .diagnostics
+        .as_ref()
+        .map_or_else(Vec::new, |lines| lines.clone());
+    let layout_rows = layout::diagnostics_layout(metrics, client, lines.len());
+    for (index, row_rect) in layout_rows.rows.iter().enumerate() {
+        let Some(line) = lines.get(index) else {
+            break;
+        };
+        let rect = UiRect {
+            left: row_rect.left + metrics.gap,
+            top: row_rect.top,
+            right: row_rect.right,
+            bottom: row_rect.bottom,
+        };
+        draw_text(
+            hdc,
+            line,
+            rect,
+            if index == 0 {
+                theme.item_text
+            } else {
+                theme.secondary_text
+            },
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout_rows.back,
+        "← 返回关于与更新",
     );
 }
 

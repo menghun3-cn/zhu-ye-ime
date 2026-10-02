@@ -24,6 +24,7 @@ pub mod repair;
 pub mod shell;
 pub mod single_instance;
 pub mod theme;
+pub mod updater;
 pub mod wide;
 pub mod window;
 
