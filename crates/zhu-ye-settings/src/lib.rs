@@ -19,6 +19,8 @@ pub mod layout;
 pub mod model;
 pub mod panel;
 pub mod panel_window;
+pub mod registry;
+pub mod repair;
 pub mod shell;
 pub mod single_instance;
 pub mod theme;
@@ -26,5 +28,7 @@ pub mod wide;
 pub mod window;
 
 pub use inventory::PackInfo;
-pub use model::{Item, ItemControl, ItemState, Page, SettingsState};
+pub use model::{Item, ItemControl, ItemState, Page, SettingsState, Subview};
 pub use panel::{PanelEntry, PanelKind, PanelView};
+pub use registry::{re_register, restart_ctfmon, run_repair_default};
+pub use repair::{evaluate_registration, scan_l1, L1Outcome, RegistrationStatus, RepairScan};

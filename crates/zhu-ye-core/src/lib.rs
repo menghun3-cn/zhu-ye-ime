@@ -80,7 +80,7 @@ pub use update::{
     BACKUP_SUFFIX, STAGING_DIR_NAME,
 };
 pub use user_dict::UserDictionary;
-pub use user_store::{unix_now, UserDictStore};
+pub use user_store::{probe_user_words_file, unix_now, UserDictStore, UserWordsProbe};
 pub use vcard::{parse_vcard, VCardContact, VCardError};
 
 pub use demo::{seed_bigrams, seed_entries};

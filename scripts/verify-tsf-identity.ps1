@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 静态比对 TSF 标识常量的双份维护（Rust 侧 ↔ scripts/ime-identity.ps1）是否逐字一致。

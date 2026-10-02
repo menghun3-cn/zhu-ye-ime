@@ -7,39 +7,45 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, EndPaint, InvalidateRect, UpdateWindow, DT_CENTER, DT_END_ELLIPSIS,
     DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, HBRUSH, HDC, HFONT,
     SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST,
     OPENFILENAMEW,
 };
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW, GetClientRect,
     GetForegroundWindow, GetMessageW, GetWindowLongPtrW, LoadCursorW, PostMessageW,
     PostQuitMessage, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
     TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA,
-    IDC_ARROW, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE,
-    WM_SYSKEYDOWN, WM_THEMECHANGED, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    IDC_ARROW, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED,
+    WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 use zhu_ye_core::{ModeChoice, ThemeChoice};
 use zhu_ye_ime::candidate_ui::{UiRect, UiThemeKind, BASE_DPI};
+use zhu_ye_ime::tsf::DICTIONARY_FILE_NAME;
 
 use crate::config;
 use crate::gdi::{draw_text, fill, fill_round, BackBuffer, Fonts};
 use crate::installed::{self, InstalledPack, PackSource};
 use crate::inventory::{self, list_packs, PackInfo};
 use crate::layout::{self, Chip, ChipValue, SettingsMetrics};
-use crate::model::{ItemControl, OpenTarget, Page, SettingsState};
+use crate::model::{ItemControl, OpenTarget, Page, SettingsState, Subview};
 use crate::panel::PanelView;
 use crate::panel_window::{PanelWindow, WM_PANEL_CLOSED};
+use crate::registry;
+use crate::repair::{self, evaluate_registration, L1Outcome, RegistrationStatus, RepairScan};
 use crate::shell;
 use crate::theme::{settings_theme, settings_theme_from_system_colors, SettingsTheme};
 use crate::wide::to_utf16;
@@ -60,6 +66,10 @@ pub struct RunOptions {
     pub shot_expanded: Option<usize>,
     /// 截图时进入「添加词库」子视图（与 `shot_page` 互斥，优先于条目展开）。
     pub shot_packs: bool,
+    /// 截图时进入「管理输入法」子视图（同上互斥规则）。
+    pub shot_manage: bool,
+    /// 截图时进入「修复输入法」子视图（同上互斥规则）。
+    pub shot_repair: bool,
 }
 
 /// 窗口运行状态。
@@ -81,6 +91,10 @@ struct WindowState {
     panel: Option<PanelWindow>,
     /// 「添加词库」子视图的包清单；进入子视图时从磁盘重扫（FR-042）。
     packs: Vec<PackInfo>,
+    /// 「管理输入法」子视图的注册状态；进入时探测（T-076 / FR-043）。
+    manage: Option<RegistrationStatus>,
+    /// 「修复输入法」子视图的检测结果；进入时扫描、修复后重扫（T-076 / FR-043）。
+    repair_scan: Option<RepairScan>,
 }
 
 impl WindowState {
@@ -104,10 +118,34 @@ impl WindowState {
             settings.page = Page::Common;
             settings.open_packs();
         }
-        let packs = if settings.packs_view {
+        if options.shot_manage {
+            settings.page = Page::Common;
+            settings.open_manage();
+        }
+        if options.shot_repair {
+            settings.page = Page::Common;
+            settings.open_repair();
+        }
+        let packs = if settings.subview == Subview::Packs {
             list_packs_now(config_path.as_deref())
         } else {
             Vec::new()
+        };
+        // 取证模式直接进入子视图时，首帧就需要真实数据。
+        let manage = if settings.subview == Subview::Manage {
+            Some(evaluate_registration(&registry::probe_registration()))
+        } else {
+            None
+        };
+        let repair_scan = if settings.subview == Subview::Repair {
+            Some(repair::scan_l1(
+                &repair_packs_dir(config_path.as_deref()),
+                config_path.as_deref(),
+                &repair_user_words_path(),
+                &shell::exe_dir().join(DICTIONARY_FILE_NAME),
+            ))
+        } else {
+            None
         };
         Self {
             settings,
@@ -122,6 +160,8 @@ impl WindowState {
             previous_foreground,
             panel: None,
             packs,
+            manage,
+            repair_scan,
         }
     }
 
@@ -354,7 +394,7 @@ unsafe fn invalidate(hwnd: HWND) {
 }
 
 /// 处理左键点击：先命中二选一控件，再命中条目行，最后命中导航。
-/// 「添加词库」子视图打开时只响应子视图内的命中（返回 / 导入 / 启用开关）。
+/// 打开子视图时只响应子视图内的命中（返回 / 动作按钮 / 行内开关）。
 unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
     let client = match client_rect(hwnd) {
         Some(rect) => rect,
@@ -362,9 +402,20 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
     };
     let metrics = SettingsMetrics::new(state.dpi);
 
-    if state.settings.packs_view {
-        on_packs_click(hwnd, state, &metrics, client, x, y);
-        return;
+    match state.settings.subview {
+        Subview::Packs => {
+            on_packs_click(hwnd, state, &metrics, client, x, y);
+            return;
+        }
+        Subview::Manage => {
+            on_manage_click(state, &metrics, client, x, y);
+            return;
+        }
+        Subview::Repair => {
+            on_repair_click(hwnd, state, &metrics, client, x, y);
+            return;
+        }
+        Subview::None => {}
     }
 
     for (page, rect) in layout::nav_rows(&metrics, client) {
@@ -395,6 +446,20 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
                     state.settings.open_packs();
                     invalidate(hwnd);
                 }
+                ItemControl::OpenManage => {
+                    state.manage = Some(evaluate_registration(&registry::probe_registration()));
+                    state.settings.open_manage();
+                    invalidate(hwnd);
+                }
+                ItemControl::OpenRepair => {
+                    state.repair_scan = Some(scan_repair_now(state));
+                    state.settings.open_repair();
+                    invalidate(hwnd);
+                }
+                ItemControl::RestoreLangBar => {
+                    restore_lang_bar(hwnd, state);
+                    invalidate(hwnd);
+                }
                 ItemControl::None => {
                     state.settings.click_item(row.index);
                     invalidate(hwnd);
@@ -416,7 +481,7 @@ unsafe fn on_packs_click(
 ) {
     let layout = layout::packs_layout(metrics, client, state.packs.len());
     if layout::contains(layout.back, x, y) {
-        state.settings.close_packs();
+        state.settings.close_subview();
         invalidate(hwnd);
         return;
     }
@@ -441,6 +506,195 @@ unsafe fn on_packs_click(
         toggle_pack(state, &id, &name, enabled);
         invalidate(hwnd);
     }
+}
+
+/// 「管理输入法」子视图内的命中：返回 / 打开系统输入法设置。
+///
+/// "打开系统输入法设置"（FR-043 / D-39）用 `ms-settings:keyboard` 协议 URI 交给系统
+/// 设置应用，展示 TSF 视角的输入法列表。
+fn on_manage_click(
+    state: &mut WindowState,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+    x: i32,
+    y: i32,
+) {
+    let layout_rows = layout::manage_layout(metrics, client);
+    if layout::contains(layout_rows.back, x, y) {
+        state.settings.close_subview();
+        return;
+    }
+    if layout::contains(layout_rows.sys_settings, x, y) {
+        state.hint = Some(match shell::open_uri("ms-settings:keyboard") {
+            Ok(()) => "已打开系统输入法设置".to_owned(),
+            Err(error) => error,
+        });
+    }
+}
+
+/// 「修复输入法」子视图内的命中：返回 / 一级修复 / 二级修复。
+///
+/// 先报告后动手（D-41）：检测结果在上方先行展示；一级修复是用户显式触发后才执行，
+/// 执行完重扫并把逐项结果滚动进底部提示条。二级修复走提权子进程（UAC，D-40），
+/// 完成后询问是否重启输入法进程（D-43）。
+fn on_repair_click(
+    hwnd: HWND,
+    state: &mut WindowState,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+    x: i32,
+    y: i32,
+) {
+    unsafe {
+        let row_count = state
+            .repair_scan
+            .as_ref()
+            .map_or(0, |scan| scan.summary_lines().len());
+        let layout_rows = layout::repair_layout(metrics, client, row_count);
+        if layout::contains(layout_rows.back, x, y) {
+            state.settings.close_subview();
+            return;
+        }
+        if layout::contains(layout_rows.l1, x, y) {
+            let Some(scan) = &state.repair_scan else {
+                return;
+            };
+            let outcomes = repair::apply_l1(
+                scan,
+                &repair_packs_dir(state.config_path.as_deref()),
+                state.config_path.as_deref(),
+                &repair_user_words_path(),
+            );
+            state.hint = Some(outcomes_summary(&outcomes));
+            state.repair_scan = Some(scan_repair_now(state));
+            invalidate(hwnd);
+            return;
+        }
+        if layout::contains(layout_rows.l2, x, y) {
+            run_repair_l2(hwnd, state);
+            invalidate(hwnd);
+        }
+    }
+}
+
+/// 汇总一级修复的逐项结果为底部提示（每项一行，行数有限时截断）。
+fn outcomes_summary(outcomes: &[L1Outcome]) -> String {
+    if outcomes.is_empty() {
+        return "检测无异常，无需修复".to_owned();
+    }
+    outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            L1Outcome::Done(text) => format!("✓ {text}"),
+            L1Outcome::Failed(text) => format!("✗ {text}"),
+        })
+        .collect::<Vec<_>>()
+        .join("；")
+}
+
+/// 执行一级检测（进入「修复输入法」子视图与修复后重扫共用）。
+fn scan_repair_now(state: &mut WindowState) -> RepairScan {
+    repair::scan_l1(
+        &repair_packs_dir(state.config_path.as_deref()),
+        state.config_path.as_deref(),
+        &repair_user_words_path(),
+        &shell::exe_dir().join(DICTIONARY_FILE_NAME),
+    )
+}
+
+/// 领域包目录：`%APPDATA%\ai-zhu-ye-ime\packs`（与清单/导入同口径）。
+fn repair_packs_dir(config_path: Option<&std::path::Path>) -> std::path::PathBuf {
+    let _ = config_path; // 清单另有用途；检测直接以数据目录为准。
+    config::data_dir()
+        .map(|dir| dir.join("packs"))
+        .unwrap_or_else(|| std::path::PathBuf::from("packs"))
+}
+
+/// 用户词库路径：`%APPDATA%\ai-zhu-ye-ime\user_words.json`（与 TSF 侧同口径）。
+fn repair_user_words_path() -> std::path::PathBuf {
+    config::data_dir()
+        .map(|dir| dir.join("user_words.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from("user_words.json"))
+}
+
+/// 恢复状态栏：重启输入法进程（ctfmon）重建语言栏；执行前弹确认（D-43）。
+///
+/// 语言栏由 ctfmon 托管，终止后系统按需自动重新加载（开放实现项，见 §6.4）。
+fn restore_lang_bar(hwnd: HWND, state: &mut WindowState) {
+    let confirmed = registry::message_box(
+        Some(hwnd),
+        "将重启输入法进程（ctfmon）以重建语言栏。\n当前输入法会短暂中断，确定继续吗？",
+        "恢复状态栏",
+        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+    );
+    if !confirmed {
+        state.hint = Some("已取消".to_owned());
+        return;
+    }
+    state.hint = Some(match registry::restart_ctfmon() {
+        Ok(()) => "输入法进程已重启，系统将自动重新加载语言栏".to_owned(),
+        Err(error) => error,
+    });
+}
+
+/// 二级修复：经 `runas` 拉起 `--repair-registry` 子命令（UAC，D-40），等待退出码。
+///
+/// 用 `ShellExecuteExW`+`SEE_MASK_NOCLOSEPROCESS` 拿到进程句柄，等待结束后读退出码
+/// （`ShellExecuteW` 拿不到退出码，这是必须升级为 Ex 的原因）。成功则重探注册状态并
+/// 询问是否重启输入法进程（D-43）；失败说明原因。
+fn run_repair_l2(hwnd: HWND, state: &mut WindowState) {
+    let executable = shell::exe_dir().join("zhu-ye-settings.exe");
+    let verb = to_utf16("runas");
+    let file = to_utf16(&executable.to_string_lossy());
+    let parameters = to_utf16("--repair-registry");
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        hwnd,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(parameters.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    if unsafe { ShellExecuteExW(&mut info) }.is_err() {
+        state.hint = Some(format!(
+            "无法启动修复程序（拒绝提权或系统限制）：{}",
+            std::io::Error::last_os_error()
+        ));
+        return;
+    }
+    let process = info.hProcess;
+    unsafe {
+        let _ = WaitForSingleObject(process, INFINITE);
+    }
+    let mut exit_code = 0u32;
+    if unsafe { GetExitCodeProcess(process, &mut exit_code) }.is_err() {
+        let _ = unsafe { CloseHandle(process) };
+        state.hint = Some("读取修复结果失败，请重试".to_owned());
+        return;
+    }
+    let _ = unsafe { CloseHandle(process) };
+    if exit_code != 0 {
+        state.hint = Some(format!("二级修复未完成（退出码 {exit_code}），可重试"));
+        return;
+    }
+    // 先报告后动手的闭环：重探注册状态后再问是否重启输入法进程。
+    state.manage = Some(evaluate_registration(&registry::probe_registration()));
+    let confirmed = registry::message_box(
+        Some(hwnd),
+        "注册表已重建。\n是否立即重启输入法进程（ctfmon）使新注册生效？",
+        "修复输入法",
+        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+    );
+    if !confirmed {
+        state.hint = Some("注册表已重建；重启输入法后生效".to_owned());
+        return;
+    }
+    state.hint = Some(match registry::restart_ctfmon() {
+        Ok(()) => "注册表已重建，输入法进程已重启".to_owned(),
+        Err(error) => error,
+    });
 }
 
 /// 打开工具箱面板。
@@ -785,10 +1039,11 @@ unsafe fn draw(hdc: HDC, state: &mut WindowState, client: UiRect) {
             theme.border,
         );
 
-        if state.settings.packs_view {
-            draw_packs(hdc, state, theme, &metrics, client);
-        } else {
-            draw_items(hdc, state, theme, &metrics, client);
+        match state.settings.subview {
+            Subview::Packs => draw_packs(hdc, state, theme, &metrics, client),
+            Subview::Manage => draw_manage(hdc, state, theme, &metrics, client),
+            Subview::Repair => draw_repair(hdc, state, theme, &metrics, client),
+            Subview::None => draw_items(hdc, state, theme, &metrics, client),
         }
 
         // 底部提示
@@ -1072,6 +1327,176 @@ unsafe fn draw_packs(
         metrics,
         layout.import,
         "导入本地 .zyct…",
+    );
+}
+
+/// 绘制「管理输入法」子视图：注册状态详情 + 系统设置入口 + 返回。
+///
+/// 状态区按 `RegistrationStatus::detail_lines()` 逐行绘制（自上而下，超出截断）；
+/// 头部一行用状态色（已注册=常规文字，异常=警示文案 `headline()`）。
+unsafe fn draw_manage(
+    hdc: HDC,
+    state: &mut WindowState,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+) {
+    let layout_rows = layout::manage_layout(metrics, client);
+
+    // 「已注册」状态行 + 展开行。
+    let status = state.manage.as_ref().map_or_else(
+        || "正在读取注册状态…".to_owned(),
+        |status| status.headline(),
+    );
+    let status_rect = UiRect {
+        left: layout_rows.status.left,
+        top: layout_rows.status.top + metrics.gap,
+        right: layout_rows.status.right,
+        bottom: layout_rows.status.top + metrics.gap + state.fonts.body_height,
+    };
+    let status_color = match &state.manage {
+        Some(reg) if reg.registered() => theme.item_text,
+        Some(_) => theme.warn_text,
+        None => theme.placeholder_text,
+    };
+    draw_text(
+        hdc,
+        &status,
+        status_rect,
+        status_color,
+        state.fonts.body,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+    );
+    if let Some(status) = &state.manage {
+        let details = status.detail_lines();
+        if !details.is_empty() {
+            let row_height = state.fonts.small_height;
+            let lines = details
+                .iter()
+                .take((layout_rows.status.height() / row_height.max(1)).max(1) as usize);
+            for (index, line) in lines.enumerate() {
+                let rect = UiRect {
+                    left: layout_rows.status.left,
+                    top: status_rect.bottom + index as i32 * row_height,
+                    right: layout_rows.status.right,
+                    bottom: status_rect.bottom + (index as i32 + 1) * row_height,
+                };
+                draw_text(
+                    hdc,
+                    line,
+                    rect,
+                    theme.secondary_text,
+                    state.fonts.small,
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
+            }
+        }
+        fill(
+            hdc,
+            UiRect {
+                left: layout_rows.status.left,
+                top: status_rect.bottom,
+                right: layout_rows.status.right,
+                bottom: status_rect.bottom + 1,
+            },
+            theme.border,
+        );
+    }
+
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout_rows.back,
+        "← 返回常用设置",
+    );
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout_rows.sys_settings,
+        "打开系统输入法设置",
+    );
+}
+
+/// 绘制「修复输入法」子视图：检测结果逐行 + 三个底部按钮。
+///
+/// 先报告后动手（D-41）：进入即扫描并逐行展示；按钮只有显式点击才执行。
+/// 一级（无需提权）与二级（UAC 提权）分开，符合 D-40。
+unsafe fn draw_repair(
+    hdc: HDC,
+    state: &mut WindowState,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+) {
+    let lines = state
+        .repair_scan
+        .as_ref()
+        .map_or_else(Vec::new, |scan| scan.summary_lines());
+    let layout_rows = layout::repair_layout(metrics, client, lines.len());
+    for (index, row_rect) in layout_rows.rows.iter().enumerate() {
+        let Some(line) = lines.get(index) else {
+            break;
+        };
+        let rect = UiRect {
+            left: row_rect.left + metrics.gap,
+            top: row_rect.top,
+            right: row_rect.right,
+            bottom: row_rect.bottom,
+        };
+        draw_text(
+            hdc,
+            line,
+            rect,
+            theme.secondary_text,
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        fill(
+            hdc,
+            UiRect {
+                left: row_rect.left,
+                top: row_rect.bottom - 1,
+                right: row_rect.right,
+                bottom: row_rect.bottom,
+            },
+            theme.border,
+        );
+    }
+
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout_rows.back,
+        "← 返回常用设置",
+    );
+    // 提权动作与普通动作在视觉上区分：二级修复不套强调色。
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout_rows.l1,
+        "一级修复（无需管理员）",
+    );
+    fill_round(
+        hdc,
+        layout_rows.l2,
+        metrics.gap / 2,
+        theme.control_background,
+    );
+    draw_text(
+        hdc,
+        "二级修复（需管理员，UAC）",
+        layout_rows.l2,
+        theme.item_text,
+        state.fonts.small,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
     );
 }
 

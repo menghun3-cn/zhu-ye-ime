@@ -37,6 +37,8 @@ pub struct SettingsTheme {
     pub control_selected_text: UiColor,
     /// 占位说明文字颜色。
     pub placeholder_text: UiColor,
+    /// 异常/警示文字（注册状态异常、修复建议）。
+    pub warn_text: UiColor,
 }
 
 /// 返回预设配色。
@@ -58,6 +60,7 @@ pub fn settings_theme(kind: UiThemeKind) -> SettingsTheme {
             control_selected: UiColor::rgb(0x1E, 0x88, 0xE5),
             control_selected_text: UiColor::rgb(0xFF, 0xFF, 0xFF),
             placeholder_text: UiColor::rgb(0xB0, 0x6A, 0x00),
+            warn_text: UiColor::rgb(0xC5, 0x0F, 0x1F),
         },
         UiThemeKind::Dark => SettingsTheme {
             window: UiColor::rgb(0x1F, 0x1F, 0x1F),
@@ -74,6 +77,7 @@ pub fn settings_theme(kind: UiThemeKind) -> SettingsTheme {
             control_selected: UiColor::rgb(0x42, 0xA5, 0xF5),
             control_selected_text: UiColor::rgb(0x10, 0x10, 0x10),
             placeholder_text: UiColor::rgb(0xE0, 0xA8, 0x4A),
+            warn_text: UiColor::rgb(0xFF, 0x9A, 0x8C),
         },
         UiThemeKind::HighContrast => settings_theme_from_system_colors(SystemColors {
             window: 0xFF00_0000,
@@ -107,6 +111,7 @@ pub fn settings_theme_from_system_colors(colors: SystemColors) -> SettingsTheme 
         control_selected: base.highlight_background,
         control_selected_text: base.highlight_foreground,
         placeholder_text: base.foreground,
+        warn_text: base.highlight_foreground,
     }
 }
 
