@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 竹叶输入法 TSF 身份常量与安装/卸载共享工具。
