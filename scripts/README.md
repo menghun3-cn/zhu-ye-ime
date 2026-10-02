@@ -9,7 +9,7 @@
 | `verify-agent-notes.ps1` | 校验 Agent Notes 目录结构、文件格式、归档三件套与 `manifest.json` 封存；`-ArchiveWrite` 追加封存新归档笔记 |
 | `verify-translation-pairs.ps1` | 校验 `.md` / `.zh.md` 双语配对的 `.i18n.yaml` 一致性记录；确认一致后可用 `-Write` 重写记录 |
 | `bench.ps1` | 构建/运行 `zhu-ye-cli bench` 并校验 `指标:` 行阈值；`-Release` 做正式验收，`-MaxUsPerOp` 覆盖阈值 |
-| `package-portable.ps1` | 生成离线测试包：release DLL + v2 词典 + 安装/卸载脚本；`-DictionaryPath` 可指定词典，默认优先真实词典 |
+| `package-portable.ps1` | 生成发行包（T-078）：`bin\`（TSF DLL + 设置窗口 + 更新器 + 基础词典）、`packs\`（三个领域包）、`scripts\`、`docs\`；干净机解压后直接 `install.ps1`，无源码树依赖 |
 | `e2e.ps1` | 构建/运行 `host-e2e`，对种子词典执行核心输入闭环回归；存在真实词典时追加 smoke；`-Release` 正式验收，`-SkipBuild` 跳过构建，`-RealDictionaryPath` 指定真实词典 |
 
 ## 常用命令
@@ -25,11 +25,11 @@ cargo run -p zhu-ye-dict -- verify data/artifacts/seed.zyct
 ```
 
 ```powershell
-# 生成便携测试包（优先打包 data/artifacts/real.zyct，未生成时用 seed）
+# 生成发行包（T-078：bin/ + packs/ + scripts/ + docs/）
 .\scripts\package-portable.ps1
 
-# 指定打包词典
-.\scripts\package-portable.ps1 -DictionaryPath .\data\artifacts\real.zyct
+# 发行包模式安装（不构建、无源码树依赖）
+.\scripts\install.ps1
 ```
 
 ```powershell

@@ -1,46 +1,53 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-构建并安装竹叶输入法 TSF 服务（版本化 DLL 无锁升级机制）。
+从发行包安装竹叶输入法：TSF 服务（版本化 DLL）+ 设置窗口 + 领域包 + 快捷方式。
 
 .DESCRIPTION
-1. 以 release 模式构建 zhu-ye-ime（可跳过）
-2. 校验 DLL 导出
-3. 复制 DLL 与 v2 词典（优先 data/artifacts/real.zyct）到 Program Files 安装目录；
-   目标 DLL 使用版本化文件名，旧版本 DLL 由系统在重启后延迟清理
-4. 注册 HKLM TSF TIP/Category/LanguageProfile/CLSID 键并切换到新版本
-5. 校验注册结果；失败时自动回滚 InProcServer32 到上一版本
+发行包布局（由 package-portable.ps1 生成，见 docs/安装与使用.md）：
 
-版本化命名规则：
-- 未指定 -Version 时使用源 DLL 的 SHA-256 前 8 位作为内容指纹
-  （同一构建幂等、不同构建天然不同名，升级零锁冲突）
-- 显式传入 -Version abc 时目标文件名为 zhu-ye-ime-abc.dll（用于发布或演练）
+    ai-zhu-ye-ime-<version>/
+      bin/zhu_ye_ime.dll             TSF 服务 DLL（版本化复制到安装目录）
+      bin/zhu-ye-settings.exe        设置窗口
+      bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
+      bin/dictionary.zyct            基础词典
+      packs/it.zyct med.zyct slang.zyct   预置领域包（D-46，可离线验收）
+      scripts/                       安装/卸载/校验脚本
+      docs/                          数据来源与许可证
 
-重复执行安全；每次安装会先清理旧注册再写入，保证无重复路径残留。
-需要管理员权限。
+安装行为：
+1. 从发行包 bin\ 读取文件，不再依赖源码树与 cargo（T-078）
+2. 版本化复制 zhu-ye-ime.dll 到安装目录并校验导出（沿用原事务与失败回滚）
+3. 复制基础词典
+4. 安装 zhu-ye-settings.exe / zhu-ye-updater.exe 到 Program Files\ai-zhu-ye-ime\bin
+5. 预置三个领域包到 %APPDATA%\ai-zhu-ye-ime\packs\（不覆盖用户已有包以外的动作：
+   同名覆盖，保证幂等）
+6. 注册 HKLM TSF TIP/Category/LanguageProfile/CLSID 树并校验（失败回滚，沿用原逻辑）
+7. 创建开始菜单快捷方式（D-26 唤起入口之一）
+8. 延迟清理旧版本 DLL
+
+重复执行安全；需要管理员权限（-SkipRegistration 演练可豁免）。
 
 .EXAMPLE
 .\scripts\install.ps1
 
 .EXAMPLE
-.\scripts\install.ps1 -SkipBuild
+.\scripts\install.ps1 -PackageRoot C:\ai-zhu-ye-ime-0.1.0 -InstallDir "C:\Program Files\ai-zhu-ye-ime\tsf"
 
 .EXAMPLE
-.\scripts\install.ps1 -Version 0.1.0
-
-.EXAMPLE
-.\scripts\install.ps1 -DictionaryPath .\data\artifacts\real.zyct
+.\scripts\install.ps1 -SkipRegistration -InstallDir C:\tmp\install-test -AppDataRoot C:\tmp\appdata-test
 #>
 [CmdletBinding()]
 param(
     [string]$InstallDir,
+    [string]$AppDataRoot,
+    [string]$PackageRoot,
     [string]$DictionaryPath,
-    [string]$Version,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$SkipRegistration
 )
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'ime-identity.ps1')
 
 function Test-Admin {
@@ -68,105 +75,96 @@ function Set-TsfRegistrationRollback {
     }
 }
 
-function Resolve-DictionarySource {
-    param([string]$Path)
-
-    if ($Path) {
-        $absolute = [System.IO.Path]::GetFullPath($Path)
-        if (-not (Test-Path -LiteralPath $absolute -PathType Leaf)) {
-            throw "词典文件不存在: $absolute"
-        }
-        return $absolute
-    }
-    foreach ($candidate in @(
-        (Join-Path $repoRoot 'dictionary.zyct'),
-        (Join-Path $repoRoot 'data\artifacts\real.zyct'),
-        (Join-Path $repoRoot 'data\artifacts\seed.zyct')
-    )) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return $candidate
-        }
-    }
-    Write-Host '未找到现成词典产物，先生成自建演示种子...'
-    Push-Location $repoRoot
-    try {
-        & cargo run -q -p zhu-ye-dict -- build
-        if ($LASTEXITCODE -ne 0) {
-            throw 'zhu-ye-dict build 失败，无法安装词典。'
-        }
-    } finally {
-        Pop-Location
-    }
-    $built = Join-Path $repoRoot 'data\artifacts\seed.zyct'
-    if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
-        throw '词典构建完成后仍缺失，无法安装。'
-    }
-    return $built
+# ---- 0. 路径与权限 ----
+if (-not $SkipRegistration -and -not (Test-Admin)) {
+    throw '安装 TSF 服务需要管理员权限，请以管理员身份重新运行（-SkipRegistration 演练模式除外）。'
 }
 
-if (-not (Test-Admin)) {
-    throw '安装 TSF 服务需要管理员权限，请以管理员身份重新运行。'
+if (-not $PackageRoot) {
+    $PackageRoot = Split-Path -Parent $PSScriptRoot
 }
+$PackageRoot = [System.IO.Path]::GetFullPath($PackageRoot)
 
 if (-not $InstallDir) {
     $InstallDir = Get-TsfInstallDir
 }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
+$appRoot = Split-Path -Parent $InstallDir    # ...\ai-zhu-ye-ime（DLL 的 tsf 子目录的上级）
+$exeDir = Join-Path $appRoot 'bin'
 
-if (-not $SkipBuild) {
-    Write-Host '开始构建 release DLL...'
-    Push-Location $repoRoot
-    try {
-        & cargo build -p zhu-ye-ime --release
-        if ($LASTEXITCODE -ne 0) {
-            throw 'cargo build 失败，安装中止。'
-        }
-    } finally {
-        Pop-Location
+if (-not $AppDataRoot) {
+    $AppDataRoot = $env:APPDATA
+    if (-not $AppDataRoot) {
+        throw '未设置 APPDATA，无法定位数据目录。'
+    }
+}
+$dataRoot = (Join-Path ([System.IO.Path]::GetFullPath($AppDataRoot)) 'ai-zhu-ye-ime')
+$packsDataDir = Join-Path $dataRoot 'packs'
+
+if ($SkipBuild) {
+    Write-Host '（发行包模式不使用源码树构建；-SkipBuild 已无作用，忽略）'
+}
+Write-Host "发行包根目录: $PackageRoot"
+
+# ---- 1. 校验发行包内容 ----
+$binDir = Join-Path $PackageRoot 'bin'
+$packsDir = Join-Path $PackageRoot 'packs'
+$sourceDll = Join-Path $binDir 'zhu_ye_ime.dll'
+$settingsExe = Join-Path $binDir 'zhu-ye-settings.exe'
+$updaterExe = Join-Path $binDir 'zhu-ye-updater.exe'
+$requireExe = @($settingsExe, $updaterExe)
+foreach ($exe in $requireExe) {
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw "发行包缺少可执行文件：$exe（请先用 package-portable.ps1 生成发行包，或检查 -PackageRoot）"
+    }
+}
+if (-not (Test-Path -LiteralPath $sourceDll -PathType Leaf)) {
+    throw "发行包缺少 TSF DLL：$sourceDll"
+}
+if (-not (Test-Path -LiteralPath $packsDir -PathType Container)) {
+    throw "发行包缺少领域包目录：$packsDir"
+}
+foreach ($pack in @('it.zyct', 'med.zyct', 'slang.zyct')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $packsDir $pack) -PathType Leaf)) {
+        throw "发行包缺少预置领域包：$pack"
     }
 }
 
-$sourceDll = Join-Path $repoRoot 'target\release\zhu_ye_ime.dll'
-if (-not (Test-Path -LiteralPath $sourceDll -PathType Leaf)) {
-    throw "未找到构建产物，请先构建或移除 -SkipBuild: $sourceDll"
-}
-$sourceDll = (Resolve-Path -LiteralPath $sourceDll).Path
-
-$null = New-Item -ItemType Directory -Path $InstallDir -Force
-
-# ---- 版本化 DLL 命名与上一版本记录（升级事务开始前快照，供失败回滚） ----
+# ---- 2. 复制 TSF DLL（版本化）与基础词典（沿用原事务与回滚） ----
 $dllHash8 = (Get-FileHash -LiteralPath $sourceDll -Algorithm SHA256).Hash.Substring(0, 8).ToLowerInvariant()
-$newDllName = if ($Version) { "zhu-ye-ime-$Version.dll" } else { "zhu-ye-ime-$dllHash8.dll" }
+$newDllName = "zhu-ye-ime-$dllHash8.dll"
 $targetDll = Join-Path $InstallDir $newDllName
 $previousDll = Get-TsfInprocServerDefault
 if ($previousDll) {
     Write-Host "当前注册版本: $previousDll"
 }
 
-# 复制新版本：版本化文件名天然无锁（旧 DLL 原地保留，不再抛"被占用"）。
+$null = New-Item -ItemType Directory -Path $InstallDir -Force
 Copy-Item -LiteralPath $sourceDll -Destination $targetDll -Force
 
 try {
     & (Join-Path $PSScriptRoot 'verify-tsf-dll.ps1') -DllPath $targetDll
     if (-not $?) { throw 'DLL 导出校验未通过。' }
 } catch {
-    # 校验失败视为升级事务未开始：删除未通过校验的副本，注册表保持原状。
     if ($targetDll -ne $previousDll) {
         Remove-Item -LiteralPath $targetDll -Force -ErrorAction SilentlyContinue
     }
     throw "DLL 导出校验失败，安装中止（未通过校验的副本已删除，注册表未改动）: $($_.Exception.Message)"
 }
 
-$dictionarySource = Resolve-DictionarySource -Path $DictionaryPath
+if (-not $DictionaryPath) {
+    $DictionaryPath = Join-Path $binDir 'dictionary.zyct'
+}
+if (-not (Test-Path -LiteralPath $DictionaryPath -PathType Leaf)) {
+    throw "基础词典不存在：$DictionaryPath（发行包应含 bin\dictionary.zyct，或显式传 -DictionaryPath）"
+}
 $targetDictionary = Join-Path $InstallDir $TsfIdentity['DictionaryFileName']
-if ([System.IO.Path]::GetFullPath($dictionarySource) -eq [System.IO.Path]::GetFullPath($targetDictionary)) {
-    # 源与目标相同（例如 -DictionaryPath 直接指向安装目录中的词典）：无需复制。
+if ([System.IO.Path]::GetFullPath($DictionaryPath) -eq [System.IO.Path]::GetFullPath($targetDictionary)) {
     Write-Host "词典已就位（源与目标相同），跳过复制: $targetDictionary"
 } else {
     try {
-        Copy-Item -LiteralPath $dictionarySource -Destination $targetDictionary -Force
+        Copy-Item -LiteralPath $DictionaryPath -Destination $targetDictionary -Force
     } catch {
-        # 词典复制属于升级事务：失败时撤下新 DLL 副本，保持目录与注册表一致。
         if ($targetDll -ne $previousDll) {
             Remove-Item -LiteralPath $targetDll -Force -ErrorAction SilentlyContinue
         }
@@ -178,7 +176,30 @@ if (Test-Path -LiteralPath $legacyDictionary -PathType Leaf) {
     Remove-Item -LiteralPath $legacyDictionary -Force
 }
 
-# ---- 注册表切换到新版本（New-TsfRegistration 内部先清旧再重建） ----
+# ---- 3. 安装设置窗口与更新器 ----
+$null = New-Item -ItemType Directory -Path $exeDir -Force
+foreach ($exe in $requireExe) {
+    Copy-Item -LiteralPath $exe -Destination $exeDir -Force
+    Write-Host "已安装: $(Join-Path $exeDir (Split-Path -Leaf $exe))"
+}
+
+# ---- 4. 预置领域包（同名覆盖，幂等） ----
+$null = New-Item -ItemType Directory -Path $packsDataDir -Force
+foreach ($pack in @('it.zyct', 'med.zyct', 'slang.zyct')) {
+    $source = Join-Path $packsDir $pack
+    $target = Join-Path $packsDataDir $pack
+    Copy-Item -LiteralPath $source -Destination $target -Force
+}
+Write-Host "已预置三个领域包到: $packsDataDir"
+
+if ($SkipRegistration) {
+    Write-Host '演练模式（-SkipRegistration）：跳过 HKLM 注册与快捷方式，其余安装步骤已完成。'
+    Write-Host "演练安装目录: $InstallDir"
+    Write-Host "演练数据目录: $dataRoot"
+    return
+}
+
+# ---- 5. 注册表切换到新版本（New-TsfRegistration 内部先清旧再重建） ----
 try {
     New-TsfRegistration -DllPath $targetDll
 } catch {
@@ -190,7 +211,17 @@ if (-not (Test-TsfRegistration -DllPath $targetDll)) {
     throw 'TSF 注册结果校验失败，已回滚；请检查注册表权限或使用 uninstall.ps1 清理。'
 }
 
-# ---- 延迟清理旧版本 DLL（含历史版本、固定名与 .zy-del 迁移残留） ----
+# ---- 6. 开始菜单快捷方式（D-26 唤起入口） ----
+$startMenu = Join-Path ([Environment]::GetFolderPath('Programs')) '竹叶输入法设置.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($startMenu)
+$shortcut.TargetPath = (Join-Path $exeDir 'zhu-ye-settings.exe')
+$shortcut.WorkingDirectory = $exeDir
+$shortcut.Description = '竹叶输入法设置：工具箱、常用设置、关于与更新'
+$shortcut.Save()
+Write-Host "已创建快捷方式: $startMenu"
+
+# ---- 7. 延迟清理旧版本 DLL（含历史版本、固定名与 .zy-del 迁移残留） ----
 $staleDlls = @(Get-ChildItem -LiteralPath $InstallDir -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like 'zhu-ye-ime*.dll*' -and $_.FullName -ne $targetDll } |
     ForEach-Object { $_.FullName })
@@ -204,3 +235,4 @@ if ($previousDll -and $previousDll -ne $targetDll) {
     Write-Host "已从 $previousDll 升级；旧版本 DLL 将在系统重启后自动清理。"
 }
 Write-Host '输入法已在系统中注册；可在 设置 -> 时间和语言 -> 语言和区域 中切换到竹叶输入法。'
+Write-Host "设置窗口: $(Join-Path $exeDir 'zhu-ye-settings.exe')"
