@@ -63,12 +63,27 @@ pub const CLSID_ZHU_YE_TIP: windows::core::GUID =
     windows::core::GUID::from_u128(0xE54D6682_8650_40E7_A9EE_6FD1137849AE);
 
 /// 安装/便携包随带的 v2 词典文件名，与 `scripts/ime-identity.ps1` 保持一致。
-const DICTIONARY_FILE_NAME: &str = "dictionary.zyct";
+pub const DICTIONARY_FILE_NAME: &str = "dictionary.zyct";
 
 /// 简体中文（zh-CN，LCID 0x0804）下的语言配置文件 GUID，
 /// 与 `scripts/ime-identity.ps1` 中的 `ProfileGuid` 保持一致。
 pub const PROFILE_GUID_ZHU_YE: windows::core::GUID =
     windows::core::GUID::from_u128(0x6315FE74_92C3_439B_8CDF_FDB6E43EDAF1);
+
+/// 键盘输入处理器（TIP）类别的 TFCAT GUID，与 `scripts/ime-identity.ps1` 中的
+/// `KeyboardCategoryGuid` 保持一致；二级修复重建 `Category\Category` 与
+/// `Category\Item` 两棵子树时使用。
+pub const TFCAT_ZHU_YE_KEYBOARD: windows::core::GUID =
+    windows::core::GUID::from_u128(0x34745C63_B2F0_4784_8B67_5E12C8701A31);
+
+/// TSF 语言配置文件注册路径中的语言段（简体中文 zh-CN），与
+/// `scripts/ime-identity.ps1` 中的 `LanguageIdHex` 保持一致。
+pub const TSF_LANGUAGE_ID_HEX: &str = "0x00000804";
+
+/// 安装目录相对 `Program Files` 的路径段，与 `scripts/ime-identity.ps1` 的
+/// `Get-TsfInstallDir` 保持一致；二级修复在读不到 `InProcServer32` 时用它在
+/// 自身安装目录下推导 DLL 搜索位置。
+pub const TSF_INSTALL_DIR_RELATIVE: &str = "ai-zhu-ye-ime\\tsf";
 
 /// 当前由 DLL 创建且尚未释放的 COM 对象数（含类工厂与文本服务）。
 static ACTIVE_OBJECTS: AtomicUsize = AtomicUsize::new(0);
