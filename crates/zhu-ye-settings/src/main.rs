@@ -104,6 +104,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
                         .map_err(|_| "「--expand」需要非负整数".to_owned())?,
                 );
             }
+            "--packs" => {
+                options.shot_packs = true;
+            }
             "--shot-panel" => {
                 let kind = match next_value(&mut args, "--shot-panel")?.as_str() {
                     "emoji" => PanelKind::Emoji,
@@ -165,6 +168,7 @@ fn print_usage() {
     println!("  zhu-ye-settings                     打开设置窗口");
     println!("  zhu-ye-settings --shot <文件.bmp>   画出设置窗口首帧并写出 BMP（验收取证）");
     println!("                   [--page toolbox|common|about] [--expand <下标>]");
+    println!("                   [--packs]              截图时进入「添加词库」子视图");
     println!("  zhu-ye-settings --shot-panel emoji|symbol <文件.bmp>");
     println!("                   [--panel-page <页码>]  画出工具箱面板一帧并写出 BMP");
 }

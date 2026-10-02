@@ -41,6 +41,59 @@ pub fn is_distributable_pack(pack_id: &str) -> bool {
     DISTRIBUTABLE_PACK_IDS.contains(&pack_id)
 }
 
+/// 词典包的展示信息（第八期 FR-022：设置界面要求列出名称与简介）。
+///
+/// 名称与简介走这里的静态表，而不是从产物读：`manifest.json` 生成时把 `name` 写成包 id，
+/// 中文名此前只是构建期的打印常量，简介在产物与 manifest 中都不存在；`.zyct` 头部也只剩
+/// 两段共 20 字节的未写入预留区，装不下中文名与简介（D-37）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackDisplay {
+    /// 中文展示名。
+    pub name: &'static str,
+    /// 一行简介。
+    pub summary: &'static str,
+    /// 是否为开发期产物：不作为用户可勾选的领域包展示。
+    pub development: bool,
+}
+
+/// 取词典包的展示信息；未知包 id 返回 `None`。
+#[must_use]
+pub fn pack_display(pack_id: &str) -> Option<PackDisplay> {
+    Some(match pack_id {
+        "base" => PackDisplay {
+            name: "基础词典",
+            summary: "日常常用词与中英译文，始终加载，不可停用",
+            development: false,
+        },
+        "it" => PackDisplay {
+            name: "IT/编程",
+            summary: "编程与计算机术语（THUOCL_IT + MDN Web 术语表）",
+            development: false,
+        },
+        "med" => PackDisplay {
+            name: "医学",
+            summary: "医学与临床术语（THUOCL 医学）",
+            development: false,
+        },
+        "slang" => PackDisplay {
+            name: "网络语",
+            summary: "网络热词与字母缩写（yyds 一类）",
+            development: false,
+        },
+        "real" => PackDisplay {
+            name: "真实语料包",
+            summary: "开发期真实语料构建产物",
+            development: true,
+        },
+        "seed" => PackDisplay {
+            name: "演示种子包",
+            summary: "开发期演示用最小词典",
+            development: true,
+        },
+        _ => return None,
+    })
+}
+
 /// 候选窗主题选择（第八期设置窗口写入，FR-041）。
 ///
 /// 只提供浅色与深色：高对比度由系统接管，不作为可选值（D-31）。
@@ -91,6 +144,53 @@ where
     })
 }
 
+/// 新输入会话的默认中英模式（第八期设置窗口写入，FR-041）。
+///
+/// 这是**装配项**而不是会话状态：中英模式是每个宿主进程各自的 IME 实例状态，跨进程没有
+/// 单一的"当前模式"可供设置窗口展示或切换，因此设置窗口能表达的唯一有意义语义是
+/// "新会话从哪种模式开始"，由 TSF DLL 在下次装配时读取。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModeChoice {
+    /// 中文（默认，沿用既有行为）。
+    #[default]
+    Chinese,
+    /// 英文。
+    English,
+}
+
+impl ModeChoice {
+    /// 配置字符串（小写），与序列化表示一致。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chinese => "chinese",
+            Self::English => "english",
+        }
+    }
+
+    /// 宽松解析：未知值回退中文。
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "english" => Self::English,
+            _ => Self::Chinese,
+        }
+    }
+}
+
+/// `default_mode` 的反序列化：宽松解析，理由同 `theme`。
+fn deserialize_default_mode<'de, D>(deserializer: D) -> Result<ModeChoice, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(text)) => ModeChoice::parse(&text),
+        _ => ModeChoice::Chinese,
+    })
+}
+
 /// 磁盘上的配置格式。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigFile {
@@ -117,6 +217,9 @@ pub struct ConfigFile {
     /// 候选窗主题（第八期 FR-041）；缺失或未知值时按浅色处理。
     #[serde(default, deserialize_with = "deserialize_theme")]
     pub theme: ThemeChoice,
+    /// 新输入会话的默认中英模式（第八期 FR-041）；缺失或未知值时按中文处理。
+    #[serde(default, deserialize_with = "deserialize_default_mode")]
+    pub default_mode: ModeChoice,
 }
 
 fn default_version() -> u32 {
@@ -137,6 +240,7 @@ impl Default for ConfigFile {
             enable_domain_boost: true,
             contact_vcards: Vec::new(),
             theme: ThemeChoice::Light,
+            default_mode: ModeChoice::Chinese,
         }
     }
 }
@@ -350,6 +454,46 @@ mod tests {
         assert!(config.enable_domain_boost);
         // 主题缺失时按浅色（T-030 候选窗默认浅色口径）。
         assert_eq!(config.theme, super::ThemeChoice::Light);
+        // 新会话默认中英模式缺失时按中文（D-32 装配项口径）。
+        assert_eq!(config.default_mode, super::ModeChoice::Chinese);
+    }
+
+    #[test]
+    fn 默认中英模式解析与序列化往返() {
+        for (text, expected) in [
+            ("chinese", super::ModeChoice::Chinese),
+            ("english", super::ModeChoice::English),
+        ] {
+            let json = format!(r#"{{"default_mode": "{text}"}}"#);
+            let config = ConfigFile::from_json(&json).unwrap();
+            assert_eq!(config.default_mode, expected);
+            assert_eq!(config.default_mode.as_str(), text);
+        }
+        let config = ConfigFile {
+            default_mode: super::ModeChoice::English,
+            ..ConfigFile::default()
+        };
+        let text = config.to_json().unwrap();
+        assert!(
+            text.contains(r#""default_mode": "english""#),
+            "序列化应写出小写模式值"
+        );
+        assert_eq!(ConfigFile::from_json(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn 默认中英模式值拼错不回退整体配置() {
+        // 与主题同口径的宽松解析：未知值回退中文，用户已勾选的领域包不受影响。
+        let text = r#"{
+            "enabled_packs": ["it", "med"],
+            "default_mode": "English"
+        }"#;
+        let config = ConfigFile::from_json(text).unwrap();
+        assert_eq!(config.default_mode, super::ModeChoice::Chinese);
+        assert_eq!(config.enabled_packs, vec!["it", "med"]);
+        // 非字符串（如数字）同样降级，不整体失败。
+        let config = ConfigFile::from_json(r#"{"default_mode": 5}"#).unwrap();
+        assert_eq!(config.default_mode, super::ModeChoice::Chinese);
     }
 
     #[test]
@@ -555,5 +699,45 @@ mod tests {
         // 临时文件不应残留。
         assert!(!path.with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 每个已知包id都有展示信息() {
+        // 新增包 id 却忘了补名称/简介时，这条必须失败。
+        for id in super::KNOWN_PACK_IDS {
+            let display = super::pack_display(id).unwrap_or_else(|| panic!("{id} 缺少展示信息"));
+            assert!(!display.name.is_empty(), "{id} 名称为空");
+            assert!(!display.summary.is_empty(), "{id} 简介为空");
+            assert_ne!(display.name, *id, "{id} 的展示名不应退回包 id");
+        }
+    }
+
+    #[test]
+    fn 展示信息区分开发期产物() {
+        // 开发期产物不进用户可勾选的领域包列表，界面据此过滤。
+        for id in super::DISTRIBUTABLE_PACK_IDS {
+            let display = super::pack_display(id).expect("可分发包必须有展示信息");
+            assert!(!display.development, "{id} 是可分发包，不应标记为开发产物");
+        }
+        for id in ["real", "seed"] {
+            assert!(
+                super::pack_display(id)
+                    .expect("开发产物也应有展示信息")
+                    .development,
+                "{id} 是开发产物"
+            );
+        }
+        // 基础包始终加载，也不属于可分发的领域包。
+        let base = super::pack_display("base").expect("基础包应有展示信息");
+        assert!(!base.development);
+        assert!(!super::is_distributable_pack("base"));
+    }
+
+    #[test]
+    fn 未知包id没有展示信息() {
+        assert_eq!(super::pack_display("nope"), None);
+        assert_eq!(super::pack_display(""), None);
+        // 大小写不匹配也应视为未知，避免界面出现两个"同一个包"。
+        assert_eq!(super::pack_display("IT"), None);
     }
 }

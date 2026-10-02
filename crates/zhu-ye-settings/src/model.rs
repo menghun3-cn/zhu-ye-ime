@@ -8,7 +8,7 @@
 //! `Ready` 已接入；`Scheduled` 已在本阶段排期、由后续批次接入；`Planned` 是需求
 //! §17.3 明确的本期非目标，界面按"正在规划中"呈现。
 
-use zhu_ye_core::ThemeChoice;
+use zhu_ye_core::{ModeChoice, ThemeChoice};
 
 use crate::panel::PanelKind;
 
@@ -85,6 +85,42 @@ impl ItemState {
     }
 }
 
+/// 「更多设置」的打开动作（D-36）。
+///
+/// 以三个条目呈现，而不是一行三个按钮：条目行的控件机制只服务"二选一"，为三个动作再造
+/// 一套按钮渲染不划算，三个条目在列表里同样一目了然。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenTarget {
+    /// 配置文件 `config.json`。
+    ConfigFile,
+    /// 数据目录 `%APPDATA%\ai-zhu-ye-ime`。
+    DataDir,
+    /// 文件日志所在目录。
+    LogDir,
+}
+
+impl OpenTarget {
+    /// 条目标题。
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::ConfigFile => "更多设置：配置文件",
+            Self::DataDir => "更多设置：数据目录",
+            Self::LogDir => "更多设置：日志目录",
+        }
+    }
+
+    /// 条目说明。
+    #[must_use]
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::ConfigFile => "用系统默认方式打开 config.json（启用的领域包、主题等）",
+            Self::DataDir => "配置、用户词库与已安装的领域包都在这里",
+            Self::LogDir => "文件日志仅在验收期启用，生产环境通常不存在",
+        }
+    }
+}
+
 /// 条目右侧控件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemControl {
@@ -92,8 +128,14 @@ pub enum ItemControl {
     None,
     /// 主题二选一。
     ThemeChoice,
+    /// 新会话默认中英模式二选一（D-32 装配项）。
+    ModeChoice,
     /// 打开工具箱面板。
     OpenPanel(PanelKind),
+    /// 打开一个路径。
+    OpenPath(OpenTarget),
+    /// 进入"添加词库"子视图（FR-022 领域包启停与导入，FR-042）。
+    OpenPacks,
 }
 
 /// 条目定义。
@@ -157,21 +199,33 @@ static COMMON_ITEMS: &[Item] = &[
     ),
     item(
         "英文输入法",
-        "显示当前中英模式并立即切换（会话状态，不记忆）",
-        ItemState::Scheduled { batch: "M12-3" },
-        ItemControl::None,
+        "新会话默认中英模式；保存后重启输入法生效",
+        ItemState::Ready,
+        ItemControl::ModeChoice,
     ),
     item(
         "添加词库",
-        "领域包启停与本地 .zyct 导入",
-        ItemState::Scheduled { batch: "M12-3" },
-        ItemControl::None,
+        "领域包启停与导入本地 .zyct",
+        ItemState::Ready,
+        ItemControl::OpenPacks,
     ),
     item(
-        "更多设置",
-        "打开配置文件、数据目录与日志目录",
-        ItemState::Scheduled { batch: "M12-3" },
-        ItemControl::None,
+        OpenTarget::ConfigFile.title(),
+        OpenTarget::ConfigFile.summary(),
+        ItemState::Ready,
+        ItemControl::OpenPath(OpenTarget::ConfigFile),
+    ),
+    item(
+        OpenTarget::DataDir.title(),
+        OpenTarget::DataDir.summary(),
+        ItemState::Ready,
+        ItemControl::OpenPath(OpenTarget::DataDir),
+    ),
+    item(
+        OpenTarget::LogDir.title(),
+        OpenTarget::LogDir.summary(),
+        ItemState::Ready,
+        ItemControl::OpenPath(OpenTarget::LogDir),
     ),
     item(
         "恢复状态栏",
@@ -242,6 +296,10 @@ pub struct SettingsState {
     pub expanded: Option<usize>,
     /// 当前主题选择（来自 `config.json`）。
     pub theme: ThemeChoice,
+    /// 新会话默认中英模式选择（来自 `config.json`，D-32 装配项）。
+    pub default_mode: ModeChoice,
+    /// 是否处于"添加词库"子视图（FR-042）；子视图数据在窗口层，这里只记状态。
+    pub packs_view: bool,
 }
 
 impl Default for SettingsState {
@@ -250,12 +308,14 @@ impl Default for SettingsState {
             page: Page::Toolbox,
             expanded: None,
             theme: ThemeChoice::Light,
+            default_mode: ModeChoice::Chinese,
+            packs_view: false,
         }
     }
 }
 
 impl SettingsState {
-    /// 按已保存的主题建立状态。
+    /// 按已保存的主题建立状态（默认中英模式取配置装载后由窗口层覆盖）。
     #[must_use]
     pub fn new(theme: ThemeChoice) -> Self {
         Self {
@@ -264,12 +324,34 @@ impl SettingsState {
         }
     }
 
-    /// 切换页面；展开态属于页内下标，切页时清空。
+    /// 按已保存的主题与默认中英模式建立状态。
+    #[must_use]
+    pub fn with_defaults(theme: ThemeChoice, default_mode: ModeChoice) -> Self {
+        Self {
+            theme,
+            default_mode,
+            ..Self::default()
+        }
+    }
+
+    /// 切换页面；展开态属于页内下标，切页时清空；词库子视图不跨页。
     pub fn select_page(&mut self, page: Page) {
         if self.page != page {
             self.page = page;
             self.expanded = None;
+            self.packs_view = false;
         }
+    }
+
+    /// 进入"添加词库"子视图。
+    pub fn open_packs(&mut self) {
+        self.packs_view = true;
+        self.expanded = None;
+    }
+
+    /// 退出"添加词库"子视图，回到条目列表。
+    pub fn close_packs(&mut self) {
+        self.packs_view = false;
     }
 
     /// 点击条目：仅未接入的条目切换展开说明，已接入条目的动作由调用方执行。
@@ -297,8 +379,8 @@ impl SettingsState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ItemControl, ItemState, Page, SettingsState};
-    use zhu_ye_core::ThemeChoice;
+    use super::{ItemControl, ItemState, OpenTarget, Page, SettingsState};
+    use zhu_ye_core::{ModeChoice, ThemeChoice};
 
     #[test]
     fn 三页标题与条目齐备() {
@@ -319,24 +401,68 @@ mod tests {
             "恢复状态栏",
             "管理输入法",
             "修复输入法",
-            "更多设置",
             "简繁切换",
             "全半角切换",
             "生僻字输入",
         ] {
             assert!(titles.contains(&expected), "常用设置缺少条目：{expected}");
         }
+        // 「更多设置」按 D-36 的三个动作拆成三个条目。
+        for target in [
+            OpenTarget::ConfigFile,
+            OpenTarget::DataDir,
+            OpenTarget::LogDir,
+        ] {
+            assert!(
+                titles.contains(&target.title()),
+                "缺少更多设置动作：{}",
+                target.title()
+            );
+            assert!(!target.summary().is_empty());
+        }
     }
 
     #[test]
-    fn 已接入条目恰为工具箱两项与主题() {
+    fn 更多设置三个动作都已接入且各自带打开控件() {
+        let items = Page::Common.items();
+        let mut found = 0;
+        for target in [
+            OpenTarget::ConfigFile,
+            OpenTarget::DataDir,
+            OpenTarget::LogDir,
+        ] {
+            let item = items
+                .iter()
+                .find(|item| item.title == target.title())
+                .unwrap_or_else(|| panic!("缺少条目 {}", target.title()));
+            assert_eq!(item.state, ItemState::Ready, "{} 应已接入", target.title());
+            assert_eq!(item.control, ItemControl::OpenPath(target));
+            found += 1;
+        }
+        assert_eq!(found, 3);
+    }
+
+    #[test]
+    fn 已接入条目恰为工具箱两项主题英文输入法添加词库与更多设置三项() {
         let ready: Vec<&str> = Page::ALL
             .iter()
             .flat_map(|page| page.items())
             .filter(|item| item.state == ItemState::Ready)
             .map(|item| item.title)
             .collect();
-        assert_eq!(ready, vec!["emoji 面板", "符号大全", "主题"]);
+        assert_eq!(
+            ready,
+            vec![
+                "emoji 面板",
+                "符号大全",
+                "主题",
+                "英文输入法",
+                "添加词库",
+                "更多设置：配置文件",
+                "更多设置：数据目录",
+                "更多设置：日志目录"
+            ]
+        );
         // 主题用二选一控件；工具箱两项用"打开面板"控件。
         assert_eq!(Page::Common.items()[0].control, ItemControl::ThemeChoice);
         assert_eq!(
@@ -353,9 +479,31 @@ mod tests {
     }
 
     #[test]
+    fn 英文输入法与添加词库条目形态() {
+        let items = Page::Common.items();
+        // D-32 装配项：新会话默认中英模式二选一，不再是会话状态。
+        let english = items
+            .iter()
+            .find(|item| item.title == "英文输入法")
+            .expect("缺少英文输入法条目");
+        assert_eq!(english.state, ItemState::Ready);
+        assert_eq!(english.control, ItemControl::ModeChoice);
+        // FR-042：添加词库进入子视图，且已接入。
+        let packs = items
+            .iter()
+            .find(|item| item.title == "添加词库")
+            .expect("缺少添加词库条目");
+        assert_eq!(packs.state, ItemState::Ready);
+        assert_eq!(packs.control, ItemControl::OpenPacks);
+    }
+
+    #[test]
     fn 规划中条目说明以正在规划中开头() {
-        let planned = Page::Common.items()[7];
-        assert!(planned.state.is_planned());
+        let planned = Page::Common
+            .items()
+            .iter()
+            .find(|item| item.state.is_planned())
+            .expect("常用设置应有规划中条目");
         let message = planned.state.message().unwrap();
         assert!(message.starts_with("正在规划中。"), "实际：{message}");
     }
@@ -388,16 +536,50 @@ mod tests {
     fn 点击未接入条目切换展开而点击已接入条目无展开() {
         let mut state = SettingsState::new(ThemeChoice::Light);
         state.select_page(Page::Common);
-        state.click_item(1);
-        assert_eq!(state.expanded, Some(1));
-        assert!(state.expanded_message().unwrap().contains("M12-3"));
+        // 「恢复状态栏」仍是 M12-4 已排期条目：点击产生展开。
+        let scheduled = 6;
+        state.click_item(scheduled);
+        assert_eq!(state.expanded, Some(scheduled));
+        assert!(state.expanded_message().unwrap().contains("M12-4"));
         // 再点同一项收起。
-        state.click_item(1);
+        state.click_item(scheduled);
         assert_eq!(state.expanded, None);
-        // 主题（index 0）已接入：点击不产生展开。
+        // 主题（index 0）与英文输入法（index 1）已接入：点击不产生展开。
         state.click_item(0);
+        state.click_item(1);
         assert_eq!(state.expanded, None);
         assert_eq!(state.expanded_message(), None);
+    }
+
+    #[test]
+    fn 词库子视图进入退出与切页清空() {
+        let mut state = SettingsState::new(ThemeChoice::Light);
+        assert!(!state.packs_view);
+        state.open_packs();
+        assert!(state.packs_view, "进入添加词库子视图");
+        // 进入时清空展开态，避免与子视图叠加。
+        state.click_item(6);
+        state.open_packs();
+        assert!(state.packs_view);
+        assert_eq!(state.expanded, None);
+        state.close_packs();
+        assert!(!state.packs_view, "返回条目列表");
+        // 子视图不跨页：直接切页也退出。
+        state.open_packs();
+        state.select_page(Page::About);
+        assert!(!state.packs_view, "切页必须退出词库子视图");
+    }
+
+    #[test]
+    fn 默认中英模式随配置装载() {
+        let state = SettingsState::with_defaults(ThemeChoice::Dark, ModeChoice::English);
+        assert_eq!(state.theme, ThemeChoice::Dark);
+        assert_eq!(state.default_mode, ModeChoice::English);
+        // 无装载时为中文（与其他旧字段同口径的默认值）。
+        assert_eq!(
+            SettingsState::new(ThemeChoice::Light).default_mode,
+            ModeChoice::Chinese
+        );
     }
 
     #[test]
