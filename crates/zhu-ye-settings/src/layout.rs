@@ -424,6 +424,101 @@ pub fn packs_layout(metrics: &SettingsMetrics, client: UiRect, pack_count: usize
 }
 
 // ---------------------------------------------------------------------------
+// 「管理输入法」/「修复输入法」子视图布局（T-076 / FR-043）
+// ---------------------------------------------------------------------------
+
+/// 「管理输入法」子视图整体布局。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManageLayout {
+    /// 注册状态详情区（多行文本，`detail_lines` 逐行绘制，超出截断）。
+    pub status: UiRect,
+    /// "打开系统输入法设置"按钮。
+    pub sys_settings: UiRect,
+    /// "返回常用设置"按钮。
+    pub back: UiRect,
+}
+
+/// 「修复输入法」子视图整体布局。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairLayout {
+    /// 检测结果逐行区；行数由 `repair_scan.summary_lines()` 决定，超出可用高度截断。
+    pub rows: Vec<UiRect>,
+    /// "一级修复（无需管理员）"按钮。
+    pub l1: UiRect,
+    /// "二级修复（需管理员，UAC）"按钮。
+    pub l2: UiRect,
+    /// "返回常用设置"按钮。
+    pub back: UiRect,
+}
+
+/// 计算「管理输入法」子视图布局：状态区在上，两个按钮在底部。
+#[must_use]
+pub fn manage_layout(metrics: &SettingsMetrics, client: UiRect) -> ManageLayout {
+    let content = content_rect(metrics, client);
+    let status = UiRect {
+        left: content.left,
+        top: content.top,
+        right: content.right,
+        bottom: content.top + metrics.pack_note_height * 3,
+    };
+    let button_top = content.bottom - metrics.pack_button_height;
+    let back = UiRect {
+        left: content.left,
+        top: button_top,
+        right: content.left + metrics.pack_button_width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let sys_settings = UiRect {
+        left: back.right + metrics.gap,
+        top: button_top,
+        right: back.right + metrics.gap + metrics.pack_button_width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    ManageLayout {
+        status,
+        sys_settings,
+        back,
+    }
+}
+
+/// 计算「修复输入法」子视图布局：检测行在上，三个按钮在底部。
+#[must_use]
+pub fn repair_layout(metrics: &SettingsMetrics, client: UiRect, row_count: usize) -> RepairLayout {
+    let content = content_rect(metrics, client);
+    let row_height = metrics.pack_row_height.saturating_sub(metrics.gap);
+    let rows: Vec<UiRect> = (0..row_count)
+        .map(|index| UiRect {
+            left: content.left,
+            top: content.top + index as i32 * row_height,
+            right: content.right,
+            bottom: content.top + (index as i32 + 1) * row_height,
+        })
+        .collect();
+    let button_top = content.bottom - metrics.pack_button_height;
+    let gap = metrics.gap;
+    let width = (content.width() - gap * 2) / 3;
+    let l1 = UiRect {
+        left: content.left,
+        top: button_top,
+        right: content.left + width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let l2 = UiRect {
+        left: l1.right + gap,
+        top: button_top,
+        right: l1.right + gap + width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let back = UiRect {
+        left: l2.right + gap,
+        top: button_top,
+        right: content.right,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    RepairLayout { rows, l1, l2, back }
+}
+
+// ---------------------------------------------------------------------------
 // 工具箱面板（浮层）布局
 // ---------------------------------------------------------------------------
 
@@ -616,8 +711,8 @@ pub fn panel_layout(metrics: &PanelMetrics, client: UiRect, cell_count: usize) -
 #[cfg(test)]
 mod tests {
     use super::{
-        contains, content_rect, item_rows, nav_rows, panel_layout, scale, title_rect, PanelMetrics,
-        SettingsMetrics,
+        contains, content_rect, item_rows, manage_layout, nav_rows, panel_layout, repair_layout,
+        scale, title_rect, PanelMetrics, SettingsMetrics,
     };
     use crate::model::Page;
     use zhu_ye_ime::candidate_ui::UiRect;
@@ -692,8 +787,8 @@ mod tests {
     fn 展开条目追加说明区并把后续行下移() {
         let metrics = SettingsMetrics::new(96);
         let items = Page::Common.items();
-        // 「恢复状态栏」仍是 M12-4 已排期条目：点击可展开。
-        let expand_index = 6;
+        // 「简繁切换」仍是规划中条目：点击可展开。
+        let expand_index = 9;
         let plain = item_rows(&metrics, CLIENT, items, None);
         let expanded = item_rows(&metrics, CLIENT, items, Some(expand_index));
         // 展开项自身多出说明区。
@@ -718,6 +813,50 @@ mod tests {
         // 已接入条目没有说明区，即使下标指向它。
         let ready = item_rows(&metrics, CLIENT, items, Some(0));
         assert!(ready[0].expanded.is_none());
+    }
+
+    #[test]
+    fn 管理子视图状态区在上按钮在底部不重叠() {
+        let metrics = SettingsMetrics::new(96);
+        let layout = manage_layout(&metrics, CLIENT);
+        let content = content_rect(&metrics, CLIENT);
+        assert!(layout.status.top >= content.top);
+        assert!(
+            layout.status.bottom <= content.bottom,
+            "状态区不得越过内容区"
+        );
+        // 按钮贴内容区底部。
+        assert_eq!(layout.back.bottom, content.bottom);
+        assert_eq!(layout.sys_settings.bottom, content.bottom);
+        assert_eq!(layout.back.height(), metrics.pack_button_height);
+        assert_eq!(layout.sys_settings.height(), metrics.pack_button_height);
+        // 两个按钮不重叠，都在内容区内。
+        assert!(layout.back.right <= layout.sys_settings.left);
+        assert!(layout.sys_settings.right <= content.right);
+        // 按钮不得压住状态区。
+        assert!(layout.status.bottom <= layout.back.top);
+    }
+
+    #[test]
+    fn 修复子视图检测行数决定高度且按钮三列均分() {
+        let metrics = SettingsMetrics::new(96);
+        let layout = repair_layout(&metrics, CLIENT, 4);
+        assert_eq!(layout.rows.len(), 4);
+        assert_eq!(layout.l1.top, layout.back.top);
+        assert_eq!(layout.l2.top, layout.back.top);
+        assert_eq!(layout.l1.bottom, content_rect(&metrics, CLIENT).bottom);
+        // 三列按钮依次相接（隔一个 gap）、不重叠，覆盖整个内容区宽度。
+        assert_eq!(layout.l1.right + metrics.gap, layout.l2.left);
+        assert_eq!(layout.l2.right + metrics.gap, layout.back.left);
+        assert_eq!(layout.back.right, content_rect(&metrics, CLIENT).right);
+        // 检测行都在按钮上方且逐行不重叠。
+        for pair in layout.rows.windows(2) {
+            assert!(pair[0].bottom <= pair[1].top);
+        }
+        assert!(layout
+            .rows
+            .last()
+            .is_none_or(|row| row.bottom <= layout.l1.top));
     }
 
     #[test]

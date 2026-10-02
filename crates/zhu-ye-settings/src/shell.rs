@@ -16,7 +16,8 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SystemParametersInfoW, SPI_GETHIGHCONTRAST, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SystemParametersInfoW, SHOW_WINDOW_CMD, SPI_GETHIGHCONTRAST, SW_SHOWNORMAL,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 use zhu_ye_ime::candidate_ui::{SystemColors, UiThemeKind};
@@ -149,6 +150,36 @@ pub fn resolve_target(target: OpenTarget) -> Result<PathBuf, String> {
             crate::config::data_dir().ok_or_else(|| "未设置 APPDATA，无法定位数据目录".to_owned())
         }
         OpenTarget::LogDir => Ok(crate::config::acceptance_log_dir()),
+    }
+}
+
+/// 用系统协议处理器打开一个 URI（如 `ms-settings:keyboard` 系统设置页）。
+///
+/// 与 `open_path` 同机制（`ShellExecuteW` 的 `open` 动作），只是入参是 URI 字符串而非
+/// 文件路径。失败同样以返回值 `<= 32` 判定。
+///
+/// # Errors
+/// 系统拒绝打开时返回带返回码的描述。
+pub fn open_uri(uri: &str) -> Result<(), String> {
+    let operation = to_utf16("open");
+    let target = to_utf16(uri);
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SHOW_WINDOW_CMD(1),
+        )
+    };
+    if result.0 as usize <= 32 {
+        Err(format!(
+            "系统无法打开「{uri}」（返回码 {}）",
+            result.0 as usize
+        ))
+    } else {
+        Ok(())
     }
 }
 

@@ -121,6 +121,20 @@ impl OpenTarget {
     }
 }
 
+/// 内容区子视图（整区替换条目列表；互斥，最多一个生效）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Subview {
+    /// 普通条目列表。
+    #[default]
+    None,
+    /// 「添加词库」（FR-022 / FR-042）。
+    Packs,
+    /// 「管理输入法」（T-076 / FR-043：注册状态与打开系统输入法设置）。
+    Manage,
+    /// 「修复输入法」（T-076 / FR-043：一级/二级修复）。
+    Repair,
+}
+
 /// 条目右侧控件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemControl {
@@ -136,6 +150,12 @@ pub enum ItemControl {
     OpenPath(OpenTarget),
     /// 进入"添加词库"子视图（FR-022 领域包启停与导入，FR-042）。
     OpenPacks,
+    /// 进入"管理输入法"子视图（T-076 / FR-043）。
+    OpenManage,
+    /// 进入"修复输入法"子视图（T-076 / FR-043）。
+    OpenRepair,
+    /// 恢复状态栏：重启输入法进程（ctfmon）重建语言栏；执行前弹确认（D-43）。
+    RestoreLangBar,
 }
 
 /// 条目定义。
@@ -229,21 +249,21 @@ static COMMON_ITEMS: &[Item] = &[
     ),
     item(
         "恢复状态栏",
-        "重新注册语言栏按钮",
-        ItemState::Scheduled { batch: "M12-4" },
-        ItemControl::None,
+        "重启输入法进程，重建语言栏按钮",
+        ItemState::Ready,
+        ItemControl::RestoreLangBar,
     ),
     item(
         "管理输入法",
         "查看注册状态并打开系统输入法设置",
-        ItemState::Scheduled { batch: "M12-4" },
-        ItemControl::None,
+        ItemState::Ready,
+        ItemControl::OpenManage,
     ),
     item(
         "修复输入法",
         "分级检测与修复",
-        ItemState::Scheduled { batch: "M12-4" },
-        ItemControl::None,
+        ItemState::Ready,
+        ItemControl::OpenRepair,
     ),
     item(
         "简繁切换",
@@ -298,8 +318,8 @@ pub struct SettingsState {
     pub theme: ThemeChoice,
     /// 新会话默认中英模式选择（来自 `config.json`，D-32 装配项）。
     pub default_mode: ModeChoice,
-    /// 是否处于"添加词库"子视图（FR-042）；子视图数据在窗口层，这里只记状态。
-    pub packs_view: bool,
+    /// 当前子视图（互斥）；子视图数据在窗口层，这里只记状态。
+    pub subview: Subview,
 }
 
 impl Default for SettingsState {
@@ -309,7 +329,7 @@ impl Default for SettingsState {
             expanded: None,
             theme: ThemeChoice::Light,
             default_mode: ModeChoice::Chinese,
-            packs_view: false,
+            subview: Subview::None,
         }
     }
 }
@@ -334,24 +354,36 @@ impl SettingsState {
         }
     }
 
-    /// 切换页面；展开态属于页内下标，切页时清空；词库子视图不跨页。
+    /// 切换页面；展开态属于页内下标，切页时清空；子视图不跨页。
     pub fn select_page(&mut self, page: Page) {
         if self.page != page {
             self.page = page;
             self.expanded = None;
-            self.packs_view = false;
+            self.subview = Subview::None;
         }
     }
 
-    /// 进入"添加词库"子视图。
+    /// 进入「添加词库」子视图。
     pub fn open_packs(&mut self) {
-        self.packs_view = true;
+        self.subview = Subview::Packs;
         self.expanded = None;
     }
 
-    /// 退出"添加词库"子视图，回到条目列表。
-    pub fn close_packs(&mut self) {
-        self.packs_view = false;
+    /// 进入「管理输入法」子视图。
+    pub fn open_manage(&mut self) {
+        self.subview = Subview::Manage;
+        self.expanded = None;
+    }
+
+    /// 进入「修复输入法」子视图。
+    pub fn open_repair(&mut self) {
+        self.subview = Subview::Repair;
+        self.expanded = None;
+    }
+
+    /// 退出子视图，回到条目列表。
+    pub fn close_subview(&mut self) {
+        self.subview = Subview::None;
     }
 
     /// 点击条目：仅未接入的条目切换展开说明，已接入条目的动作由调用方执行。
@@ -443,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn 已接入条目恰为工具箱两项主题英文输入法添加词库与更多设置三项() {
+    fn m12_4_已接入条目清单() {
         let ready: Vec<&str> = Page::ALL
             .iter()
             .flat_map(|page| page.items())
@@ -460,7 +492,10 @@ mod tests {
                 "添加词库",
                 "更多设置：配置文件",
                 "更多设置：数据目录",
-                "更多设置：日志目录"
+                "更多设置：日志目录",
+                "恢复状态栏",
+                "管理输入法",
+                "修复输入法"
             ]
         );
         // 主题用二选一控件；工具箱两项用"打开面板"控件。
@@ -476,6 +511,29 @@ mod tests {
         // 图片表情仍是"正在规划中"，且没有控件。
         assert!(Page::Toolbox.items()[2].state.is_planned());
         assert_eq!(Page::Toolbox.items()[2].control, ItemControl::None);
+    }
+
+    #[test]
+    fn m12_4三项均已接入且控件齐备() {
+        let items = Page::Common.items();
+        let restore = items
+            .iter()
+            .find(|item| item.title == "恢复状态栏")
+            .expect("缺少恢复状态栏条目");
+        assert_eq!(restore.state, ItemState::Ready);
+        assert_eq!(restore.control, ItemControl::RestoreLangBar);
+        let manage = items
+            .iter()
+            .find(|item| item.title == "管理输入法")
+            .expect("缺少管理输入法条目");
+        assert_eq!(manage.state, ItemState::Ready);
+        assert_eq!(manage.control, ItemControl::OpenManage);
+        let repair = items
+            .iter()
+            .find(|item| item.title == "修复输入法")
+            .expect("缺少修复输入法条目");
+        assert_eq!(repair.state, ItemState::Ready);
+        assert_eq!(repair.control, ItemControl::OpenRepair);
     }
 
     #[test]
@@ -536,38 +594,46 @@ mod tests {
     fn 点击未接入条目切换展开而点击已接入条目无展开() {
         let mut state = SettingsState::new(ThemeChoice::Light);
         state.select_page(Page::Common);
-        // 「恢复状态栏」仍是 M12-4 已排期条目：点击产生展开。
-        let scheduled = 6;
-        state.click_item(scheduled);
-        assert_eq!(state.expanded, Some(scheduled));
-        assert!(state.expanded_message().unwrap().contains("M12-4"));
+        // 「简繁切换」仍是规划中条目：点击产生展开。
+        let planned = 9;
+        state.click_item(planned);
+        assert_eq!(state.expanded, Some(planned));
+        assert!(state
+            .expanded_message()
+            .unwrap()
+            .starts_with("正在规划中。"));
         // 再点同一项收起。
-        state.click_item(scheduled);
+        state.click_item(planned);
         assert_eq!(state.expanded, None);
-        // 主题（index 0）与英文输入法（index 1）已接入：点击不产生展开。
+        // 主题（index 0）与恢复状态栏（index 6）已接入：点击不产生展开。
         state.click_item(0);
-        state.click_item(1);
+        state.click_item(6);
         assert_eq!(state.expanded, None);
         assert_eq!(state.expanded_message(), None);
     }
 
     #[test]
-    fn 词库子视图进入退出与切页清空() {
+    fn 子视图进入退出与切页清空() {
+        use crate::model::Subview;
+
         let mut state = SettingsState::new(ThemeChoice::Light);
-        assert!(!state.packs_view);
+        assert_eq!(state.subview, Subview::None);
+        // 三个子视图互斥进入。
         state.open_packs();
-        assert!(state.packs_view, "进入添加词库子视图");
+        assert_eq!(state.subview, Subview::Packs, "进入添加词库子视图");
         // 进入时清空展开态，避免与子视图叠加。
-        state.click_item(6);
-        state.open_packs();
-        assert!(state.packs_view);
+        state.click_item(9);
+        state.open_manage();
+        assert_eq!(state.subview, Subview::Manage, "管理输入法覆盖词库子视图");
         assert_eq!(state.expanded, None);
-        state.close_packs();
-        assert!(!state.packs_view, "返回条目列表");
+        state.open_repair();
+        assert_eq!(state.subview, Subview::Repair);
+        state.close_subview();
+        assert_eq!(state.subview, Subview::None, "返回条目列表");
         // 子视图不跨页：直接切页也退出。
-        state.open_packs();
+        state.open_manage();
         state.select_page(Page::About);
-        assert!(!state.packs_view, "切页必须退出词库子视图");
+        assert_eq!(state.subview, Subview::None, "切页必须退出子视图");
     }
 
     #[test]

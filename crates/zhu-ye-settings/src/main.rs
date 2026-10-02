@@ -18,6 +18,8 @@ enum Mode {
     Settings(Box<RunOptions>),
     /// 画出工具箱面板的一帧并写出 BMP（验收取证）。
     PanelShot { view: PanelView, path: PathBuf },
+    /// 二级修复：TSF 两棵 HKLM 注册树重注册（由主窗口经 runas 提权拉起）。
+    RepairRegistry,
 }
 
 fn main() -> ExitCode {
@@ -33,6 +35,11 @@ fn main() -> ExitCode {
         }
     };
 
+    // 提权子命令不经过单实例：独立、幂等，只操作 HKLM 注册表。
+    if let Mode::RepairRegistry = mode {
+        return zhu_ye_settings::run_repair_default();
+    }
+
     // 取证模式不落任何状态，也不与正在运行的设置窗口互斥。
     let options = match mode {
         Mode::PanelShot { view, path } => {
@@ -45,6 +52,7 @@ fn main() -> ExitCode {
             };
         }
         Mode::Settings(options) => *options,
+        Mode::RepairRegistry => unreachable!(),
     };
 
     // 凭据必须活到窗口退出：match 臂内绑定会在臂结束时释放互斥体。
@@ -107,6 +115,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
             "--packs" => {
                 options.shot_packs = true;
             }
+            "--manage" => {
+                options.shot_manage = true;
+            }
+            "--repair" => {
+                options.shot_repair = true;
+            }
+            "--repair-registry" => return Ok(Some(Mode::RepairRegistry)),
             "--shot-panel" => {
                 let kind = match next_value(&mut args, "--shot-panel")?.as_str() {
                     "emoji" => PanelKind::Emoji,
@@ -143,6 +158,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
             path,
         }));
     }
+    let shots = [options.shot_packs, options.shot_manage, options.shot_repair];
+    if shots.iter().filter(|on| **on).count() > 1 {
+        return Err("--packs / --manage / --repair 子视图入口互斥，一次最多一个".to_owned());
+    }
+    if options.shot_expanded.is_some() && shots.iter().any(|on| *on) {
+        return Err("--expand 与子视图入口不能同时使用（子视图内没有条目展开）".to_owned());
+    }
     Ok(Some(Mode::Settings(Box::new(options))))
 }
 
@@ -168,7 +190,10 @@ fn print_usage() {
     println!("  zhu-ye-settings                     打开设置窗口");
     println!("  zhu-ye-settings --shot <文件.bmp>   画出设置窗口首帧并写出 BMP（验收取证）");
     println!("                   [--page toolbox|common|about] [--expand <下标>]");
-    println!("                   [--packs]              截图时进入「添加词库」子视图");
+    println!("                   [--packs]               截图时进入「添加词库」子视图");
+    println!("                   [--manage]              截图时进入「管理输入法」子视图");
+    println!("                   [--repair]              截图时进入「修复输入法」子视图");
     println!("  zhu-ye-settings --shot-panel emoji|symbol <文件.bmp>");
     println!("                   [--panel-page <页码>]  画出工具箱面板一帧并写出 BMP");
+    println!("  zhu-ye-settings --repair-registry   重注册 TSF 两棵注册树（提权环境执行）");
 }
