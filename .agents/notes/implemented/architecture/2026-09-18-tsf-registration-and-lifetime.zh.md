@@ -12,7 +12,7 @@ TSF 文本输入处理器只有在 Windows 能发现其 CLSID、在宿主进程�
 
 `zhu-ye-ime` 是名为 `zhu-ye-ime.dll` 的 Rust `cdylib`，安装目录中的 DLL 只导出两个 COM 入口 `DllGetClassObject` 与 `DllCanUnloadNow`，以及开发探针 `dll_probe`；全部使用 `#[no_mangle] extern "system"`。
 
-TIP 身份固定：CLSID 为 `{E54D6682-8650-40E7-A9EE-6FD1137849AE}`，zh-CN 语言 Profile 为 `{6315FE74-92C3-439B-8CDF-FDB6E43EDAF1}`，键盘类别为 `{34745C63-B2F0-4784-8B67-5E12C8701A31}`。常量同时位于 `crates/zhu-ye-ime/src/tsf.rs` 与 `scripts/ime-identity.ps1`，并保持同步。
+TIP 身份固定：CLSID 为 `{E54D6682-8650-40E7-A9EE-6FD1137849AE}`，zh-CN 语言 Profile 为 `{6315FE74-92C3-439B-8CDF-FDB6E43EDAF1}`，键盘类别为 `{34745C63-B2F0-4784-8B67-5E12C8701A31}`。Rust 侧单一主源位于 `crates/zhu-ye-core/src/identity.rs`（T-081 迁入，见 [2026-10-02-zhu-ye-ui-crate-and-rlib-removal.zh.md](2026-10-02-zhu-ye-ui-crate-and-rlib-removal.zh.md)），`zhu_ye_ime::tsf` 转发；PowerShell 侧 `scripts/ime-identity.ps1` 与主源保持同步，由 `scripts/verify-tsf-identity.ps1` 交叉比对。
 
 注册表由 `scripts/install.ps1` 与 `scripts/uninstall.ps1` 管理，DLL 本身永不写注册表。安装写入 HKLM TIP 键、键盘类别的 `Category` 与 `Item` 键、`LanguageProfile\0x00000804\{ProfileGuid}`（`Enable=1`），以及 `SOFTWARE\Classes\CLSID\{Clsid}\InProcServer32`（`ThreadingModel=Apartment`）。卸载删除两个顶层键，缺失时静默跳过。两条操作均幂等，安装会先清理旧注册再重建，保证不残留旧 DLL 路径。
 

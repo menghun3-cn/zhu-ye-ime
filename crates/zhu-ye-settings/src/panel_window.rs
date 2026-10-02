@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_THEMECHANGED, WNDCLASSW, WS_POPUP,
 };
 
-use zhu_ye_ime::candidate_ui::{UiRect, UiThemeKind, BASE_DPI};
+use zhu_ye_ui::{UiRect, UiThemeKind, BASE_DPI};
 
 use crate::deliver::{deliver_text, Delivery};
 use crate::gdi::{draw_text, fill, fill_round, BackBuffer, Fonts};

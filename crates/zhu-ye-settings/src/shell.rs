@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
-use zhu_ye_ime::candidate_ui::{SystemColors, UiThemeKind};
+use zhu_ye_ui::{SystemColors, UiThemeKind};
 
 use crate::model::OpenTarget;
 use crate::wide::to_utf16;

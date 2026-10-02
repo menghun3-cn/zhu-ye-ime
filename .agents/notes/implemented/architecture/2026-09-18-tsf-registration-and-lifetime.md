@@ -21,8 +21,11 @@ the development probe `dll_probe`. All exports use `#[no_mangle] extern "system"
 The TIP identity is fixed: CLSID
 `{E54D6682-8650-40E7-A9EE-6FD1137849AE}`, zh-CN language profile
 `{6315FE74-92C3-439B-8CDF-FDB6E43EDAF1}`, and keyboard category
-`{34745C63-B2F0-4784-8B67-5E12C8701A31}`. The constants live in
-`crates/zhu-ye-ime/src/tsf.rs` and `scripts/ime-identity.ps1`, which stay in sync.
+`{34745C63-B2F0-4784-8B67-5E12C8701A31}`. The Rust-side single source of truth is
+`crates/zhu-ye-core/src/identity.rs` (since T-081, see
+[2026-10-02-zhu-ye-ui-crate-and-rlib-removal.md](2026-10-02-zhu-ye-ui-crate-and-rlib-removal.md));
+`zhu_ye_ime::tsf` re-exports it, and `scripts/ime-identity.ps1` stays in sync, with
+`scripts/verify-tsf-identity.ps1` cross-checking both sides.
 
 Registration is owned by `scripts/install.ps1` and `scripts/uninstall.ps1`, never by
 the DLL. Install writes the HKLM TIP key, the keyboard Category `Category` and `Item`

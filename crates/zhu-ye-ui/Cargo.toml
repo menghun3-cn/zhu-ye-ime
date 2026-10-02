@@ -1,0 +1,7 @@
+[package]
+name = "zhu-ye-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "竹叶输入法 UI 原语：颜色、主题种类、系统色、矩形与文本测量（纯逻辑，无 Win32 依赖）"

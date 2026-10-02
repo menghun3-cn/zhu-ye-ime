@@ -2,9 +2,9 @@
 //!
 //! 与候选窗配色相互独立：候选窗受 T-030 约束固定浅色（不读系统深浅色），设置窗口是常规
 //! 桌面窗口，跟随系统深浅色（D-30）。两个窗口服务不同任务，配色口径不共享，只共享
-//! `candidate_ui` 的颜色与主题种类类型。
+//! `zhu-ye-ui` 原语 crate 的颜色与主题种类类型（T-081 抽取，S-10 收尾）。
 
-use zhu_ye_ime::candidate_ui::{SystemColors, UiColor, UiThemeKind};
+use zhu_ye_ui::{SystemColors, UiColor, UiThemeKind};
 
 /// 设置窗口配色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,32 +93,41 @@ pub fn settings_theme(kind: UiThemeKind) -> SettingsTheme {
 /// 按系统高对比度配色构建设置窗口配色；系统色为 `0x00BBGGRR` 字节序。
 #[must_use]
 pub fn settings_theme_from_system_colors(colors: SystemColors) -> SettingsTheme {
-    // `candidate_ui` 已实现 BGR→RGB 的转换与同一个高对比度映射口径，这里直接复用它，
-    // 免得再写一份字节序转换。
-    let base = zhu_ye_ime::candidate_ui::theme_from_system_colors(colors);
+    // 高对比度映射口径与 `candidate_ui::theme_from_system_colors` 完全一致（T-081
+    // 抽取后本地化，设置窗口不再依赖 TSF 侧代码）：窗口/控件底=window，选中块=
+    // highlight（文字取 highlight_text），主文字=window_text，弱化=gray_text，
+    // 边框=btn_face，警示/占位沿用选中文字色。字节序 BGR(0x00BBGGRR)→RGB。
+    let bgr_to_rgb =
+        |color: u32| UiColor(((color & 0xFF) << 16) | (color & 0x00FF00) | (color >> 16));
+    let window = bgr_to_rgb(colors.window);
+    let foreground = bgr_to_rgb(colors.window_text);
+    let secondary = bgr_to_rgb(colors.gray_text);
+    let border = bgr_to_rgb(colors.btn_face);
+    let highlight_background = bgr_to_rgb(colors.highlight);
+    let highlight_foreground = bgr_to_rgb(colors.highlight_text);
     SettingsTheme {
-        window: base.background,
-        nav_background: base.background,
-        nav_selected: base.highlight_background,
-        nav_selected_text: base.highlight_foreground,
-        nav_text: base.foreground,
-        title_text: base.foreground,
-        item_text: base.foreground,
-        secondary_text: base.secondary,
-        border: base.border,
-        accent: base.highlight_background,
-        control_background: base.background,
-        control_selected: base.highlight_background,
-        control_selected_text: base.highlight_foreground,
-        placeholder_text: base.foreground,
-        warn_text: base.highlight_foreground,
+        window,
+        nav_background: window,
+        nav_selected: highlight_background,
+        nav_selected_text: highlight_foreground,
+        nav_text: foreground,
+        title_text: foreground,
+        item_text: foreground,
+        secondary_text: secondary,
+        border,
+        accent: highlight_background,
+        control_background: window,
+        control_selected: highlight_background,
+        control_selected_text: highlight_foreground,
+        placeholder_text: foreground,
+        warn_text: highlight_foreground,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{settings_theme, settings_theme_from_system_colors};
-    use zhu_ye_ime::candidate_ui::{SystemColors, UiColor, UiThemeKind};
+    use zhu_ye_ui::{SystemColors, UiColor, UiThemeKind};
 
     #[test]
     fn 浅色与深色在窗口底色上互异() {
@@ -126,8 +135,7 @@ mod tests {
         let dark = settings_theme(UiThemeKind::Dark);
         assert_ne!(light.window, dark.window);
         // 深色的每个通道都不高于浅色（确实是"深"）。
-        let luma =
-            |c: zhu_ye_ime::candidate_ui::UiColor| (c.0 >> 16) + ((c.0 >> 8) & 0xFF) + (c.0 & 0xFF);
+        let luma = |c: UiColor| (c.0 >> 16) + ((c.0 >> 8) & 0xFF) + (c.0 & 0xFF);
         assert!(luma(dark.window) < luma(light.window));
         assert!(luma(dark.nav_background) < luma(light.nav_background));
     }

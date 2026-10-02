@@ -7,9 +7,10 @@ license.workspace = true
 description = "竹叶输入法 TSF 输入法 DLL 与候选窗"
 
 [lib]
-# `cdylib` 供 TSF 宿主加载；`rlib` 供设置窗口复用 `candidate_ui` 的纯逻辑主题与度量
-# （第八期 T-073），避免同一项目出现第二套 DPI/颜色语义。
-crate-type = ["cdylib", "rlib"]
+# 仅 `cdylib` 供 TSF 宿主加载；T-081 起不再产出 `rlib`——设置窗口经独立的
+# `zhu-ye-ui` crate 复用 UI 原语（S-10 收尾），本 crate 不再被任何库/二进制
+# 静态链接。
+crate-type = ["cdylib"]
 
 [[bin]]
 name = "candidate-demo"
@@ -21,6 +22,7 @@ path = "src/bin/host_e2e.rs"
 
 [dependencies]
 zhu-ye-core = { path = "../zhu-ye-core" }
+zhu-ye-ui = { path = "../zhu-ye-ui" }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
