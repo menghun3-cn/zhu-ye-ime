@@ -4,7 +4,7 @@
 //! 尺寸常量按 96 DPI 的逻辑值书写，经 `scale` 换算为像素。
 
 use zhu_ye_core::{ModeChoice, ThemeChoice};
-use zhu_ye_ime::candidate_ui::{UiRect, BASE_DPI};
+use zhu_ye_ui::{UiRect, BASE_DPI};
 
 use crate::model::{Item, ItemControl, Page};
 use crate::panel::{PANEL_COLUMNS, PANEL_ROWS};
@@ -825,7 +825,7 @@ mod tests {
         scale, title_rect, PanelMetrics, SettingsMetrics,
     };
     use crate::model::Page;
-    use zhu_ye_ime::candidate_ui::UiRect;
+    use zhu_ye_ui::UiRect;
 
     const CLIENT: UiRect = UiRect {
         left: 0,

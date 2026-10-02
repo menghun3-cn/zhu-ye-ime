@@ -20,6 +20,7 @@ pub mod emoji;
 pub mod en_words;
 pub mod error;
 pub mod format;
+pub mod identity;
 pub mod manifest;
 pub mod pack_config;
 pub mod pinyin;

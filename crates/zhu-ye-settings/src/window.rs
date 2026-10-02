@@ -34,9 +34,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_LBUTTONDOWN, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED,
     WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
+use zhu_ye_core::identity::DICTIONARY_FILE_NAME;
 use zhu_ye_core::{ModeChoice, ThemeChoice};
-use zhu_ye_ime::candidate_ui::{UiRect, UiThemeKind, BASE_DPI};
-use zhu_ye_ime::tsf::DICTIONARY_FILE_NAME;
+use zhu_ye_ui::{UiRect, UiThemeKind, BASE_DPI};
 
 use crate::config;
 use crate::gdi::{draw_text, fill, fill_round, BackBuffer, Fonts};

@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
-use zhu_ye_ime::candidate_ui::{UiColor, UiRect};
+use zhu_ye_ui::{UiColor, UiRect};
 
 use crate::shell;
 use crate::wide::to_utf16;

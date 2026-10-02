@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-09-18-tsf-registration-and-lifetime.md
 #   git hash-object 2026-09-18-tsf-registration-and-lifetime.zh.md
-2026-09-18-tsf-registration-and-lifetime.md: 3900bd459d437c4dd2f2e8d3a677f8d002b5c909
-2026-09-18-tsf-registration-and-lifetime.zh.md: c9e7455ed9031719fb7f6ad3634896418351587f
+2026-09-18-tsf-registration-and-lifetime.md: d688b353ed74c1373b63200a1c7b69fa3e734429
+2026-09-18-tsf-registration-and-lifetime.zh.md: d57ea72087e7097aaebc5533846cddac9889a1b9

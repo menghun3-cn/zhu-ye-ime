@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MB_ICONERROR, MB_OK, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE,
 };
 
-use zhu_ye_ime::tsf::{
+use zhu_ye_core::identity::{
     CLSID_ZHU_YE_TIP, PROFILE_GUID_ZHU_YE, TFCAT_ZHU_YE_KEYBOARD, TSF_LANGUAGE_ID_HEX,
 };
 
@@ -35,7 +35,10 @@ use crate::wide::to_utf16;
 const DISPLAY_NAME: &str = "竹叶输入法";
 
 /// GUID 的标准大括号文本（与 `ime-identity.ps1` 常量格式一致，全大写）。
-fn guid_text(guid: windows::core::GUID) -> String {
+/// 身份常量的主源在 `zhu_ye_core::identity`（u128 字面量，T-081），此处按
+/// Win32 层需要的 `windows::core::GUID` 形式转换。
+fn guid_text(value: u128) -> String {
+    let guid = windows::core::GUID::from_u128(value);
     format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
         guid.data1,
@@ -434,7 +437,7 @@ mod tests {
         category_key_path, clsid_key_path, guid_text, inproc_key_path, item_key_path,
         profile_key_path, tip_key_path,
     };
-    use zhu_ye_ime::tsf::{CLSID_ZHU_YE_TIP, PROFILE_GUID_ZHU_YE, TFCAT_ZHU_YE_KEYBOARD};
+    use zhu_ye_core::identity::{CLSID_ZHU_YE_TIP, PROFILE_GUID_ZHU_YE, TFCAT_ZHU_YE_KEYBOARD};
 
     #[test]
     fn guid文本与门禁侧一致() {

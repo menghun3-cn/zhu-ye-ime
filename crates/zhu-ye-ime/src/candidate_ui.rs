@@ -2,14 +2,17 @@
 //!
 //! 本模块刻意不依赖 Win32，深浅色、高对比度配色与不同 DPI 下的行布局
 //! 都可以纯单元测试验证；`candidate_window` 只负责把计算结果画出来。
+//! 颜色、主题种类、系统色、矩形与文本测量等原语自 T-081 起抽取到独立的
+//! `zhu-ye-ui` crate，这里以 `pub use` 转发保持既有调用路径不变。
+
+/// 原语转发：`zhu-ye-ui`（T-081 抽取，见 [todos-list](../../docs/todos-list.md)）。
+/// `fit_text` 无生产代码消费者（仅测试使用），由 `zhu_ye_ui` 直接承接，不复转发。
+pub use zhu_ye_ui::{estimate_text_width, SystemColors, UiColor, UiRect, UiThemeKind, BASE_DPI};
 
 use zhu_ye_core::candidate::CandidateSource;
 
 /// 单页默认候选项数，与 1-9 数字选择保持一致。
 pub const DEFAULT_PAGE_SIZE: usize = 9;
-
-/// 基准 DPI，布局全部按 `dpi / 96` 线性缩放。
-pub const BASE_DPI: u32 = 96;
 
 /// 候选窗展示项。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,36 +107,6 @@ pub fn display_main_text(item: &CandidateUiItem, translation_mode: bool) -> Stri
     item.text.clone()
 }
 
-/// ARGB-24 颜色，使用 `0xRRGGBB` 表示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UiColor(pub u32);
-
-impl UiColor {
-    /// 从 RGB 分量构造颜色。
-    #[must_use]
-    pub const fn rgb(red: u8, green: u8, blue: u8) -> Self {
-        Self(((red as u32) << 16) | ((green as u32) << 8) | blue as u32)
-    }
-
-    /// 转 GDI `COLORREF`（`0x00BBGGRR`）所需字节序。
-    #[must_use]
-    pub const fn to_colorref(self) -> u32 {
-        (self.0 & 0xFF) << 16 | (self.0 & 0x00FF00) | (self.0 >> 16)
-    }
-}
-
-/// 预设主题种类；系统高对比度走独立配色。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum UiThemeKind {
-    /// 浅色。
-    #[default]
-    Light,
-    /// 深色。
-    Dark,
-    /// 系统高对比度。
-    HighContrast,
-}
-
 /// 候选窗配色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CandidateUiTheme {
@@ -151,23 +124,6 @@ pub struct CandidateUiTheme {
     pub highlight_foreground: UiColor,
     /// 页码标记。
     pub marker: UiColor,
-}
-
-/// 系统高对比度颜色快照；由 Win32 层读取后交给主题转换。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SystemColors {
-    /// `COLOR_WINDOW`。
-    pub window: u32,
-    /// `COLOR_WINDOWTEXT`。
-    pub window_text: u32,
-    /// `COLOR_GRAYTEXT`。
-    pub gray_text: u32,
-    /// `COLOR_HIGHLIGHT`。
-    pub highlight: u32,
-    /// `COLOR_HIGHLIGHTTEXT`。
-    pub highlight_text: u32,
-    /// `COLOR_BTNFACE`。
-    pub btn_face: u32,
 }
 
 /// 返回预设主题；高对比度使用系统色构建，深浅色使用项目自定配色。
@@ -216,33 +172,6 @@ pub fn theme_from_system_colors(colors: SystemColors) -> CandidateUiTheme {
         highlight_background: UiColor(bgr_to_rgb(colors.highlight)),
         highlight_foreground: UiColor(bgr_to_rgb(colors.highlight_text)),
         marker: UiColor(bgr_to_rgb(colors.highlight_text)),
-    }
-}
-
-/// 布局矩形。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UiRect {
-    /// 左边界。
-    pub left: i32,
-    /// 上边界。
-    pub top: i32,
-    /// 右边界（不含）。
-    pub right: i32,
-    /// 下边界（不含）。
-    pub bottom: i32,
-}
-
-impl UiRect {
-    /// 矩形宽度。
-    #[must_use]
-    pub fn width(&self) -> i32 {
-        self.right - self.left
-    }
-
-    /// 矩形高度。
-    #[must_use]
-    pub fn height(&self) -> i32 {
-        self.bottom - self.top
     }
 }
 
@@ -472,48 +401,6 @@ pub fn page_footer_label(page: usize, page_count: usize) -> Option<String> {
     Some(format!("{}/{}", page + 1, page_count))
 }
 
-/// 估算文本像素宽度：ASCII 约为 0.55 倍字高，CJK 与其他字符约 1 倍字高。
-#[allow(dead_code)] // 供后续候选窗精确排版与 T-013 文本测量使用。
-#[must_use]
-pub fn estimate_text_width(text: &str, font_height: i32) -> f32 {
-    let mut width = 0.0f32;
-    for ch in text.chars() {
-        if ch.is_ascii() {
-            width += font_height.max(1) as f32 * 0.55;
-        } else {
-            width += font_height.max(1) as f32;
-        }
-    }
-    width
-}
-
-/// 按估算宽度截断文本并追加省略号；宽于 `max_width` 时返回短文本。
-#[allow(dead_code)] // 供后续候选窗精确排版与 T-013 文本测量使用。
-#[must_use]
-pub fn fit_text(text: &str, max_width: i32, font_height: i32) -> String {
-    if max_width <= 0 {
-        return String::new();
-    }
-    let ellipsis_width = estimate_text_width("…", font_height);
-    let max_width = max_width.max(0) as f32 - ellipsis_width;
-    let mut width = 0.0f32;
-    let mut fit = String::new();
-    for ch in text.chars() {
-        let char_width = if ch.is_ascii() {
-            font_height.max(1) as f32 * 0.55
-        } else {
-            font_height.max(1) as f32
-        };
-        if width + char_width > max_width {
-            fit.push('…');
-            return fit;
-        }
-        width += char_width;
-        fit.push(ch);
-    }
-    fit
-}
-
 fn bgr_to_rgb(color: u32) -> u32 {
     (color & 0xFF) << 16 | (color & 0x00FF00) | (color >> 16)
 }
@@ -521,11 +408,12 @@ fn bgr_to_rgb(color: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_main_text, estimate_text_width, fit_text, index_marker, page_footer_label, theme,
+        display_main_text, estimate_text_width, index_marker, page_footer_label, theme,
         theme_from_system_colors, CandidateMetrics, CandidateUiItem, CandidateUiView, SystemColors,
         UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE, SLANG_LABEL,
     };
     use zhu_ye_core::candidate::CandidateSource;
+    use zhu_ye_ui::fit_text;
 
     fn view_with(items: usize) -> CandidateUiView {
         CandidateUiView {

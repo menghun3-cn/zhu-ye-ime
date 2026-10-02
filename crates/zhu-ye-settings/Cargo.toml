@@ -16,12 +16,11 @@ path = "src/main.rs"
 
 [dependencies]
 zhu-ye-core = { path = "../zhu-ye-core" }
+# UI 原语来自独立纯逻辑 crate（T-081 / S-10）：本 crate 不再依赖 `zhu-ye-ime`
+# 的 `rlib`，可执行文件不再连带链接 TSF 侧代码（input/tsf/词典加载）。
+zhu-ye-ui = { path = "../zhu-ye-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 复用 `candidate_ui` 的纯逻辑主题、度量与文本测量，避免同一项目出现第二套
-# DPI/颜色语义（设计文档 §1）。代价是本 crate 会连带链接 TSF 侧代码；
-# 抽取独立 UI 原语 crate 已记为后续任务（S-10）。
-zhu-ye-ime = { path = "../zhu-ye-ime" }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

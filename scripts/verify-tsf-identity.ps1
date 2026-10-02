@@ -1,14 +1,14 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
 静态比对 TSF 标识常量的双份维护（Rust 侧 ↔ scripts/ime-identity.ps1）是否逐字一致。
 
 .DESCRIPTION
 TSF 标识常量（CLSID、Profile GUID、键盘 TFCAT、语言 ID、安装目录段、词典文件名）在
-Rust 侧（crates/zhu-ye-ime/src/tsf.rs）与 PowerShell 侧（scripts/ime-identity.ps1 的
-$script:TsfIdentity 与 Get-TsfInstallDir）中双份存在——这是 D-42 接受"注册表只由
-install/uninstall 脚本管理"不变量被部分取代的代价。本脚本从两侧提取上述常量并逐字比对，
-任一漂移即失败（退出码 1）。
+Rust 侧（crates/zhu-ye-core/src/identity.rs，T-081 起为 Rust 侧单一主源）与
+PowerShell 侧（scripts/ime-identity.ps1 的 $script:TsfIdentity 与 Get-TsfInstallDir）
+中双份存在——这是 D-42 接受"注册表只由 install/uninstall 脚本管理"不变量被部分取代的
+代价。本脚本从两侧提取上述常量并逐字比对，任一漂移即失败（退出码 1）。
 
 与 scripts/verify-tsf-dll.ps1 同类：只读源码与常量，不改动注册表与文件系统。
 
@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$rustSource = Join-Path $repoRoot 'crates\zhu-ye-ime\src\tsf.rs'
+$rustSource = Join-Path $repoRoot 'crates\zhu-ye-core\src\identity.rs'
 $identityScript = Join-Path $repoRoot 'scripts\ime-identity.ps1'
 
 if (-not (Test-Path -LiteralPath $rustSource)) {
@@ -39,11 +39,12 @@ $rust = Get-Content -Raw -LiteralPath $rustSource
 function Get-RustGuidConst {
     param([string]$ConstName)
 
-    $pattern = ("{0}\s*:\s*windows::core::GUID\s*=\s*windows::core::GUID::from_u128\(" +
-        "0x([0-9A-Fa-f_]+)\)") -f $ConstName
+    # zhu-ye-core 身份主源以纯 `u128` 字面量书写（不依赖 Windows 类型），
+    # 消费方按需转 `windows::core::GUID`。
+    $pattern = ('{0}\s*:\s*u128\s*=\s*0x([0-9A-Fa-f_]+)' -f $ConstName)
     $match = [regex]::Match($rust, $pattern)
     if (-not $match.Success) {
-        throw "tsf.rs 中找不到 GUID 常量 $ConstName"
+        throw "identity.rs 中找不到 GUID 常量 $ConstName"
     }
     $hex = ($match.Groups[1].Value -replace '_', '').ToUpperInvariant()
     if ($hex.Length -ne 32) {
@@ -59,7 +60,7 @@ function Get-RustStrConst {
     $pattern = ('{0}\s*:\s*&str\s*=\s*"([^"]+)"' -f $ConstName)
     $match = [regex]::Match($rust, $pattern)
     if (-not $match.Success) {
-        throw "tsf.rs 中找不到 &str 常量 $ConstName"
+        throw "identity.rs 中找不到 &str 常量 $ConstName"
     }
     # 展开 Rust 字符串字面量的转义：Rust 源码中的 `\\` 表示单个反斜杠（本项目常量只用到
     # 反斜杠转义）。用字面替换，避免正则替换语义的转义歧义。
@@ -102,7 +103,7 @@ foreach ($pair in $pairs) {
 
 if ($failed) {
     Write-Host ""
-    throw "TSF 标识常量两侧不一致：Rust（tsf.rs）与 PowerShell（ime-identity.ps1）必须逐字一致，" +
+    throw "TSF 标识常量两侧不一致：Rust（identity.rs）与 PowerShell（ime-identity.ps1）必须逐字一致，" +
         "请统一后重跑本脚本（D-42 双份维护约束）。"
 }
 Write-Host ""
