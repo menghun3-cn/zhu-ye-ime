@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use zhu_ye_core::{load_config, save_config, ConfigFile, ThemeChoice};
+use zhu_ye_core::{load_config, save_config, ConfigFile, ModeChoice, ThemeChoice};
 
 /// `%APPDATA%` 下的数据目录名。
 const APPDATA_DIR: &str = "ai-zhu-ye-ime";
@@ -51,6 +51,13 @@ pub fn load_theme(path: &Path) -> (ThemeChoice, Option<String>) {
     (config.theme, diagnostic)
 }
 
+/// 读取新会话默认中英模式（D-32 装配项）；缺失或损坏回退中文。
+#[must_use]
+pub fn load_mode(path: &Path) -> (ModeChoice, Option<String>) {
+    let (config, diagnostic) = load_config(path);
+    (config.default_mode, diagnostic)
+}
+
 /// 只更新主题并原子保存。
 ///
 /// 保存前重读配置：更新器会写 `last_check`，若用窗口启动时的旧快照整体覆盖就会丢掉它的
@@ -58,6 +65,23 @@ pub fn load_theme(path: &Path) -> (ThemeChoice, Option<String>) {
 pub fn save_theme(path: &Path, theme: ThemeChoice) -> Result<(), String> {
     let (mut config, _) = load_config(path);
     config.theme = theme;
+    save_config(path, &config)
+}
+
+/// 只更新新会话默认中英模式并原子保存（与主题同口径，S-8）。
+pub fn save_mode(path: &Path, mode: ModeChoice) -> Result<(), String> {
+    let (mut config, _) = load_config(path);
+    config.default_mode = mode;
+    save_config(path, &config)
+}
+
+/// 只更新领域包启停集合并原子保存（S-8 同口径）。
+///
+/// 列表页的勾选是装配项：写进 `enabled_packs` 后由 TSF DLL 下次装配读取，保存前重读
+/// 避免覆盖更新器写入的 `last_check`。
+pub fn save_packs(path: &Path, enabled_packs: &[String]) -> Result<(), String> {
+    let (mut config, _) = load_config(path);
+    config.enabled_packs = enabled_packs.to_vec();
     save_config(path, &config)
 }
 
@@ -163,5 +187,100 @@ mod tests {
         let second = std::fs::read_to_string(&path).unwrap();
         assert_eq!(first, second);
         assert_eq!(load_theme(&path).0, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn 缺失配置默认中英模式回退中文且无诊断() {
+        let path = temp_dir("mode-missing").join("config.json");
+        let (mode, diagnostic) = super::load_mode(&path);
+        assert_eq!(mode, zhu_ye_core::ModeChoice::Chinese);
+        assert_eq!(diagnostic, None);
+    }
+
+    #[test]
+    fn 只改默认中英模式不动其他字段() {
+        let dir = temp_dir("mode-preserve");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "enabled_packs": ["it"],
+                "theme": "dark",
+                "last_check": 1759420800,
+                "default_mode": "chinese"
+            }"#,
+        )
+        .unwrap();
+
+        super::save_mode(&path, zhu_ye_core::ModeChoice::English).unwrap();
+
+        let (config, diagnostic) = super::load(&path);
+        assert_eq!(diagnostic, None);
+        assert_eq!(config.default_mode, zhu_ye_core::ModeChoice::English);
+        assert_eq!(config.enabled_packs, vec!["it"], "领域包勾选不得丢失");
+        assert_eq!(
+            config.theme,
+            zhu_ye_core::ThemeChoice::Dark,
+            "主题不得被重置"
+        );
+        assert_eq!(
+            config.last_check,
+            Some(1_759_420_800),
+            "提交前重读，更新器写入的 last_check 必须保留（S-8）"
+        );
+    }
+
+    #[test]
+    fn 默认中英模式保存后序列化可读回() {
+        let dir = temp_dir("mode-roundtrip");
+        let path = dir.join("config.json");
+        super::save_mode(&path, zhu_ye_core::ModeChoice::English).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(r#""default_mode": "english""#),
+            "序列化应写出小写模式值：{text}"
+        );
+        assert_eq!(super::load_mode(&path).0, zhu_ye_core::ModeChoice::English);
+    }
+
+    #[test]
+    fn 只改启停集合不动其他字段() {
+        let dir = temp_dir("packs-preserve");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "enabled_packs": ["it"],
+                "theme": "dark",
+                "default_mode": "english",
+                "last_check": 1759420800
+            }"#,
+        )
+        .unwrap();
+
+        super::save_packs(&path, &["slang".to_owned(), "med".to_owned()]).unwrap();
+
+        let (config, diagnostic) = super::load(&path);
+        assert_eq!(diagnostic, None);
+        assert_eq!(
+            config.enabled_packs,
+            vec!["slang", "med"],
+            "启停集合应被写入"
+        );
+        assert_eq!(
+            config.theme,
+            zhu_ye_core::ThemeChoice::Dark,
+            "主题不得被重置"
+        );
+        assert_eq!(
+            config.default_mode,
+            zhu_ye_core::ModeChoice::English,
+            "默认中英模式不得被重置（D-32）"
+        );
+        assert_eq!(
+            config.last_check,
+            Some(1_759_420_800),
+            "提交前重读，更新器写入的 last_check 必须保留（S-8）"
+        );
     }
 }

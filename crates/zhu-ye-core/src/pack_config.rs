@@ -144,6 +144,53 @@ where
     })
 }
 
+/// 新输入会话的默认中英模式（第八期设置窗口写入，FR-041）。
+///
+/// 这是**装配项**而不是会话状态：中英模式是每个宿主进程各自的 IME 实例状态，跨进程没有
+/// 单一的"当前模式"可供设置窗口展示或切换，因此设置窗口能表达的唯一有意义语义是
+/// "新会话从哪种模式开始"，由 TSF DLL 在下次装配时读取。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModeChoice {
+    /// 中文（默认，沿用既有行为）。
+    #[default]
+    Chinese,
+    /// 英文。
+    English,
+}
+
+impl ModeChoice {
+    /// 配置字符串（小写），与序列化表示一致。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chinese => "chinese",
+            Self::English => "english",
+        }
+    }
+
+    /// 宽松解析：未知值回退中文。
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "english" => Self::English,
+            _ => Self::Chinese,
+        }
+    }
+}
+
+/// `default_mode` 的反序列化：宽松解析，理由同 `theme`。
+fn deserialize_default_mode<'de, D>(deserializer: D) -> Result<ModeChoice, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(text)) => ModeChoice::parse(&text),
+        _ => ModeChoice::Chinese,
+    })
+}
+
 /// 磁盘上的配置格式。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigFile {
@@ -170,6 +217,9 @@ pub struct ConfigFile {
     /// 候选窗主题（第八期 FR-041）；缺失或未知值时按浅色处理。
     #[serde(default, deserialize_with = "deserialize_theme")]
     pub theme: ThemeChoice,
+    /// 新输入会话的默认中英模式（第八期 FR-041）；缺失或未知值时按中文处理。
+    #[serde(default, deserialize_with = "deserialize_default_mode")]
+    pub default_mode: ModeChoice,
 }
 
 fn default_version() -> u32 {
@@ -190,6 +240,7 @@ impl Default for ConfigFile {
             enable_domain_boost: true,
             contact_vcards: Vec::new(),
             theme: ThemeChoice::Light,
+            default_mode: ModeChoice::Chinese,
         }
     }
 }
@@ -403,6 +454,46 @@ mod tests {
         assert!(config.enable_domain_boost);
         // 主题缺失时按浅色（T-030 候选窗默认浅色口径）。
         assert_eq!(config.theme, super::ThemeChoice::Light);
+        // 新会话默认中英模式缺失时按中文（D-32 装配项口径）。
+        assert_eq!(config.default_mode, super::ModeChoice::Chinese);
+    }
+
+    #[test]
+    fn 默认中英模式解析与序列化往返() {
+        for (text, expected) in [
+            ("chinese", super::ModeChoice::Chinese),
+            ("english", super::ModeChoice::English),
+        ] {
+            let json = format!(r#"{{"default_mode": "{text}"}}"#);
+            let config = ConfigFile::from_json(&json).unwrap();
+            assert_eq!(config.default_mode, expected);
+            assert_eq!(config.default_mode.as_str(), text);
+        }
+        let config = ConfigFile {
+            default_mode: super::ModeChoice::English,
+            ..ConfigFile::default()
+        };
+        let text = config.to_json().unwrap();
+        assert!(
+            text.contains(r#""default_mode": "english""#),
+            "序列化应写出小写模式值"
+        );
+        assert_eq!(ConfigFile::from_json(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn 默认中英模式值拼错不回退整体配置() {
+        // 与主题同口径的宽松解析：未知值回退中文，用户已勾选的领域包不受影响。
+        let text = r#"{
+            "enabled_packs": ["it", "med"],
+            "default_mode": "English"
+        }"#;
+        let config = ConfigFile::from_json(text).unwrap();
+        assert_eq!(config.default_mode, super::ModeChoice::Chinese);
+        assert_eq!(config.enabled_packs, vec!["it", "med"]);
+        // 非字符串（如数字）同样降级，不整体失败。
+        let config = ConfigFile::from_json(r#"{"default_mode": 5}"#).unwrap();
+        assert_eq!(config.default_mode, super::ModeChoice::Chinese);
     }
 
     #[test]

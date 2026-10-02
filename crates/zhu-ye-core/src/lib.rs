@@ -61,7 +61,7 @@ pub use manifest::{
 };
 pub use pack_config::{
     is_distributable_pack, load_config, pack_display, plan_packs, save_config, ConfigFile,
-    PackDisplay, PackPlan, ThemeChoice, BASE_PACK_FILE_NAME, CONFIG_FORMAT_VERSION,
+    ModeChoice, PackDisplay, PackPlan, ThemeChoice, BASE_PACK_FILE_NAME, CONFIG_FORMAT_VERSION,
     DISTRIBUTABLE_PACK_IDS, KNOWN_PACK_IDS, PACKS_DIR_NAME,
 };
 pub use pinyin::{

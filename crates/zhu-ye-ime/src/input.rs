@@ -321,6 +321,11 @@ impl InputEngine {
         };
     }
 
+    /// 直接设置输入模式（第八期：按配置决定新输入会话的起始模式）。
+    pub fn set_mode(&mut self, mode: InputMode) {
+        self.mode = mode;
+    }
+
     /// 是否存在活动组合（不区分中英模式，TSF 层判断组合生命周期使用）。
     #[must_use]
     pub fn is_composing(&self) -> bool {

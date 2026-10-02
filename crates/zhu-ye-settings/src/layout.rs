@@ -3,7 +3,7 @@
 //! 布局从 DPI 与客户区尺寸算出，绘制与命中测试共用同一份结果，避免"看得见的地方点不到"。
 //! 尺寸常量按 96 DPI 的逻辑值书写，经 `scale` 换算为像素。
 
-use zhu_ye_core::ThemeChoice;
+use zhu_ye_core::{ModeChoice, ThemeChoice};
 use zhu_ye_ime::candidate_ui::{UiRect, BASE_DPI};
 
 use crate::model::{Item, ItemControl, Page};
@@ -68,6 +68,18 @@ pub struct SettingsMetrics {
     pub chip_gap: i32,
     /// 通用小间距。
     pub gap: i32,
+    /// 词库子视图行高。
+    pub pack_row_height: i32,
+    /// 词库子视图"不验签"说明区高。
+    pub pack_note_height: i32,
+    /// 词库启用开关块宽。
+    pub pack_toggle_width: i32,
+    /// 词库元信息列宽。
+    pub pack_meta_width: i32,
+    /// 词库底部按钮宽。
+    pub pack_button_width: i32,
+    /// 词库底部按钮高。
+    pub pack_button_height: i32,
     /// 期望客户区宽。
     pub desired_width: i32,
     /// 期望客户区高。
@@ -92,6 +104,12 @@ impl SettingsMetrics {
             chip_height: scale(dpi, LOGICAL_CHIP_HEIGHT),
             chip_gap: scale(dpi, LOGICAL_CHIP_GAP),
             gap: scale(dpi, LOGICAL_GAP),
+            pack_row_height: scale(dpi, LOGICAL_PACK_ROW),
+            pack_note_height: scale(dpi, LOGICAL_PACK_NOTE),
+            pack_toggle_width: scale(dpi, LOGICAL_PACK_TOGGLE_WIDTH),
+            pack_meta_width: scale(dpi, LOGICAL_PACK_META_WIDTH),
+            pack_button_width: scale(dpi, LOGICAL_PACK_BUTTON_WIDTH),
+            pack_button_height: scale(dpi, LOGICAL_PACK_BUTTON_HEIGHT),
             desired_width: scale(dpi, LOGICAL_WIDTH),
             desired_height: scale(dpi, LOGICAL_HEIGHT),
         }
@@ -165,6 +183,26 @@ pub fn hint_rect(metrics: &SettingsMetrics, client: UiRect) -> UiRect {
     }
 }
 
+/// 二选一控件块的取值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipValue {
+    /// 主题选择（浅色 / 深色）。
+    Theme(ThemeChoice),
+    /// 新会话默认中英模式（中文 / 英文，D-32 装配项）。
+    Mode(ModeChoice),
+}
+
+/// 二选一控件块：取值决定绘制时的选中状态与点击后的动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chip {
+    /// 取值。
+    pub value: ChipValue,
+    /// 块上文字。
+    pub label: &'static str,
+    /// 块矩形。
+    pub rect: UiRect,
+}
+
 /// 条目行布局结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemRow {
@@ -175,7 +213,7 @@ pub struct ItemRow {
     /// 展开的说明区；未展开为 `None`。
     pub expanded: Option<UiRect>,
     /// 二选一控件块；无控件时为空。
-    pub chips: Vec<(ThemeChoice, UiRect)>,
+    pub chips: Vec<Chip>,
 }
 
 /// 按顺序排列条目行；展开项追加说明区并把后续行下移。
@@ -207,10 +245,10 @@ pub fn item_rows(
             });
             next_top += metrics.expanded_height;
         }
-        let chips = if item.control == ItemControl::ThemeChoice {
-            theme_chips(metrics, rect)
-        } else {
-            Vec::new()
+        let chips = match item.control {
+            ItemControl::ThemeChoice => theme_chips(metrics, rect),
+            ItemControl::ModeChoice => mode_chips(metrics, rect),
+            _ => Vec::new(),
         };
         rows.push(ItemRow {
             index,
@@ -224,32 +262,165 @@ pub fn item_rows(
 }
 
 /// 主题二选一控件：两个等宽块右对齐于条目行，浅色在前、深色在后。
-fn theme_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<(ThemeChoice, UiRect)> {
+fn theme_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
+    two_chips(
+        metrics,
+        row,
+        ("浅色", ChipValue::Theme(ThemeChoice::Light)),
+        ("深色", ChipValue::Theme(ThemeChoice::Dark)),
+    )
+}
+
+/// 中英模式二选一控件：中文在前、英文在后（D-32 装配项）。
+fn mode_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
+    two_chips(
+        metrics,
+        row,
+        ("中文", ChipValue::Mode(ModeChoice::Chinese)),
+        ("英文", ChipValue::Mode(ModeChoice::English)),
+    )
+}
+
+/// 两个等宽块右对齐于条目行，前值在左、后值在右。
+fn two_chips(
+    metrics: &SettingsMetrics,
+    row: UiRect,
+    first: (&'static str, ChipValue),
+    second: (&'static str, ChipValue),
+) -> Vec<Chip> {
     let top = row.top + (row.height() - metrics.chip_height) / 2;
     let right = row.right - metrics.gap;
-    let dark_left = right - metrics.chip_width;
-    let light_left = dark_left - metrics.chip_gap - metrics.chip_width;
-    let chip = |left: i32, choice: ThemeChoice| {
-        (
-            choice,
-            UiRect {
-                left,
-                top,
-                right: left + metrics.chip_width,
-                bottom: top + metrics.chip_height,
-            },
-        )
+    let second_left = right - metrics.chip_width;
+    let first_left = second_left - metrics.chip_gap - metrics.chip_width;
+    let chip = |left: i32, (label, value): (&'static str, ChipValue)| Chip {
+        value,
+        label,
+        rect: UiRect {
+            left,
+            top,
+            right: left + metrics.chip_width,
+            bottom: top + metrics.chip_height,
+        },
     };
-    vec![
-        chip(light_left, ThemeChoice::Light),
-        chip(dark_left, ThemeChoice::Dark),
-    ]
+    vec![chip(first_left, first), chip(second_left, second)]
 }
 
 /// 点是否落在矩形内；右、下边界为开区间，避免相邻行的边界点双重命中。
 #[must_use]
 pub fn contains(rect: UiRect, x: i32, y: i32) -> bool {
     x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
+// ---------------------------------------------------------------------------
+// 「添加词库」子视图（FR-022 / FR-042）布局
+// ---------------------------------------------------------------------------
+
+/// 词库行高。
+const LOGICAL_PACK_ROW: i32 = 52;
+/// "导入不验签"说明区高度。
+const LOGICAL_PACK_NOTE: i32 = 42;
+/// 启用开关块宽。
+const LOGICAL_PACK_TOGGLE_WIDTH: i32 = 92;
+/// 词条数/体积/版本元信息列宽。
+const LOGICAL_PACK_META_WIDTH: i32 = 190;
+/// 底部按钮宽高。
+const LOGICAL_PACK_BUTTON_WIDTH: i32 = 172;
+const LOGICAL_PACK_BUTTON_HEIGHT: i32 = 30;
+
+/// 词库子视图的一行：行矩形供命中整行，分区供绘制。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackRowLayout {
+    /// 整行。
+    pub row: UiRect,
+    /// 名称 + 简介文字区。
+    pub label: UiRect,
+    /// 词条数 / 体积 / 版本元信息区。
+    pub meta: UiRect,
+    /// 启用开关块；基础包与不存在的包不画开关。
+    pub toggle: UiRect,
+}
+
+/// 「添加词库」子视图整体布局。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PacksLayout {
+    /// "导入包不验签"说明区。
+    pub note: UiRect,
+    /// 包行；包很多时超出可用高度的行由绘制方截断，布局本身不裁。
+    pub rows: Vec<PackRowLayout>,
+    /// "返回常用设置"按钮。
+    pub back: UiRect,
+    /// "导入本地 .zyct…"按钮。
+    pub import: UiRect,
+}
+
+/// 计算「添加词库」子视图布局。
+///
+/// 行高固定、超出部分截断：领域包数量受磁盘限制（可分发三个 + 开发产物 + 用户导入），
+/// 实际场景放得下；极端堆叠时宁可截断也不压缩到不可点击。
+#[must_use]
+pub fn packs_layout(metrics: &SettingsMetrics, client: UiRect, pack_count: usize) -> PacksLayout {
+    let content = content_rect(metrics, client);
+    let note = UiRect {
+        left: content.left,
+        top: content.top,
+        right: content.right,
+        bottom: content.top + metrics.pack_note_height.min(content.height()),
+    };
+    let row_height = metrics.pack_row_height;
+    let rows_top = note.bottom + metrics.gap;
+    let rows: Vec<PackRowLayout> = (0..pack_count)
+        .map(|index| {
+            let row = UiRect {
+                left: content.left,
+                top: rows_top + index as i32 * row_height,
+                right: content.right,
+                bottom: rows_top + (index as i32 + 1) * row_height,
+            };
+            let toggle = UiRect {
+                left: row.right - metrics.pack_toggle_width,
+                top: row.top + (row.height() - metrics.chip_height) / 2,
+                right: row.right,
+                bottom: row.top + (row.height() + metrics.chip_height) / 2,
+            };
+            let meta = UiRect {
+                left: toggle.left - metrics.pack_meta_width - metrics.gap,
+                top: row.top,
+                right: toggle.left - metrics.gap,
+                bottom: row.bottom,
+            };
+            let label = UiRect {
+                left: row.left,
+                top: row.top,
+                right: meta.left - metrics.gap,
+                bottom: row.bottom,
+            };
+            PackRowLayout {
+                row,
+                label,
+                meta,
+                toggle,
+            }
+        })
+        .collect();
+    let button_top = content.bottom - metrics.pack_button_height;
+    let back = UiRect {
+        left: content.left,
+        top: button_top,
+        right: content.left + metrics.pack_button_width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let import = UiRect {
+        left: content.right - metrics.pack_button_width,
+        top: button_top,
+        right: content.right,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    PacksLayout {
+        note,
+        rows,
+        back,
+        import,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -521,21 +692,26 @@ mod tests {
     fn 展开条目追加说明区并把后续行下移() {
         let metrics = SettingsMetrics::new(96);
         let items = Page::Common.items();
+        // 「恢复状态栏」仍是 M12-4 已排期条目：点击可展开。
+        let expand_index = 6;
         let plain = item_rows(&metrics, CLIENT, items, None);
-        let expanded = item_rows(&metrics, CLIENT, items, Some(1));
+        let expanded = item_rows(&metrics, CLIENT, items, Some(expand_index));
         // 展开项自身多出说明区。
-        assert!(plain[1].expanded.is_none());
-        let note = expanded[1].expanded.expect("展开项应有说明区");
+        assert!(plain[expand_index].expanded.is_none());
+        let note = expanded[expand_index].expanded.expect("展开项应有说明区");
         assert_eq!(note.height(), metrics.expanded_height);
-        assert_eq!(note.top, expanded[1].rect.bottom, "说明区紧接条目行下方");
+        assert_eq!(
+            note.top, expanded[expand_index].rect.bottom,
+            "说明区紧接条目行下方"
+        );
         // 后续行整体下移一个说明区高度。
         assert_eq!(
-            expanded[2].rect.top,
-            plain[2].rect.top + metrics.expanded_height
+            expanded[expand_index + 1].rect.top,
+            plain[expand_index + 1].rect.top + metrics.expanded_height
         );
         assert_eq!(
-            expanded[2].rect.bottom,
-            plain[2].rect.bottom + metrics.expanded_height
+            expanded[expand_index + 1].rect.bottom,
+            plain[expand_index + 1].rect.bottom + metrics.expanded_height
         );
         // 展开项之前的行不受影响。
         assert_eq!(expanded[0].rect, plain[0].rect);
@@ -550,18 +726,102 @@ mod tests {
         let rows = item_rows(&metrics, CLIENT, Page::Common.items(), None);
         let chips = &rows[0].chips;
         assert_eq!(chips.len(), 2);
-        assert_eq!(chips[0].0, zhu_ye_core::ThemeChoice::Light);
-        assert_eq!(chips[1].0, zhu_ye_core::ThemeChoice::Dark);
-        assert!(chips[0].1.right <= chips[1].1.left, "两个控件块不得重叠");
-        assert_eq!(chips[1].1.right, rows[0].rect.right - metrics.gap);
-        for (_, chip) in chips {
-            assert_eq!(chip.height(), metrics.chip_height);
-            assert!(chip.top >= rows[0].rect.top);
-            assert!(chip.bottom <= rows[0].rect.bottom);
+        assert_eq!(
+            chips[0].value,
+            super::ChipValue::Theme(zhu_ye_core::ThemeChoice::Light)
+        );
+        assert_eq!(
+            chips[1].value,
+            super::ChipValue::Theme(zhu_ye_core::ThemeChoice::Dark)
+        );
+        assert_eq!(chips[0].label, "浅色");
+        assert_eq!(chips[1].label, "深色");
+        assert!(
+            chips[0].rect.right <= chips[1].rect.left,
+            "两个控件块不得重叠"
+        );
+        assert_eq!(chips[1].rect.right, rows[0].rect.right - metrics.gap);
+        for chip in chips {
+            assert_eq!(chip.rect.height(), metrics.chip_height);
+            assert!(chip.rect.top >= rows[0].rect.top);
+            assert!(chip.rect.bottom <= rows[0].rect.bottom);
         }
-        // 无控件条目没有块。
-        assert!(rows[1].chips.is_empty());
+        // 无控件条目没有块（添加词库与最后的生僻字条目）。
+        assert!(rows[2].chips.is_empty());
         assert!(rows[rows.len() - 1].chips.is_empty());
+    }
+
+    #[test]
+    fn 英文输入法条目有两个中英模式控件块() {
+        let metrics = SettingsMetrics::new(96);
+        let rows = item_rows(&metrics, CLIENT, Page::Common.items(), None);
+        let chips = &rows[1].chips;
+        assert_eq!(chips.len(), 2, "英文输入法是 D-32 装配项二选一");
+        assert_eq!(
+            chips[0].value,
+            super::ChipValue::Mode(zhu_ye_core::ModeChoice::Chinese)
+        );
+        assert_eq!(
+            chips[1].value,
+            super::ChipValue::Mode(zhu_ye_core::ModeChoice::English)
+        );
+        assert_eq!(chips[0].label, "中文");
+        assert_eq!(chips[1].label, "英文");
+        assert!(chips[0].rect.right <= chips[1].rect.left);
+        assert_eq!(chips[1].rect.right, rows[1].rect.right - metrics.gap);
+    }
+
+    #[test]
+    fn 词库子视图行与按钮布局成立() {
+        let metrics = SettingsMetrics::new(96);
+        let content = content_rect(&metrics, CLIENT);
+        // 基础包 + 三个领域包 + 两个开发产物，最典型的六行。
+        let layout = super::packs_layout(&metrics, CLIENT, 6);
+        assert_eq!(layout.rows.len(), 6);
+        // 说明区在内容区顶部，行紧接其后。
+        assert_eq!(layout.note.top, content.top);
+        assert_eq!(layout.rows[0].row.top, layout.note.bottom + metrics.gap);
+        for (index, pack) in layout.rows.iter().enumerate() {
+            assert_eq!(pack.row.height(), metrics.pack_row_height);
+            assert_eq!(pack.row.left, content.left);
+            assert_eq!(pack.row.right, content.right);
+            if index > 0 {
+                assert_eq!(pack.row.top, layout.rows[index - 1].row.bottom);
+            }
+            // 分区互不重叠且都在行内。
+            assert!(pack.label.right <= pack.meta.left);
+            assert!(pack.meta.right <= pack.toggle.left);
+            assert_eq!(pack.toggle.right, pack.row.right);
+            assert!(pack.toggle.top >= pack.row.top && pack.toggle.bottom <= pack.row.bottom);
+        }
+        // 按钮贴底、互不重叠、左右分开。
+        assert_eq!(layout.back.bottom, content.bottom);
+        assert_eq!(layout.import.bottom, content.bottom);
+        assert_eq!(layout.back.height(), metrics.pack_button_height);
+        assert_eq!(layout.import.height(), metrics.pack_button_height);
+        assert!(layout.back.right <= layout.import.left);
+    }
+
+    #[test]
+    fn 词库子视图工具栏不与行重叠() {
+        let metrics = SettingsMetrics::new(96);
+        let layout = super::packs_layout(&metrics, CLIENT, 6);
+        // 常规行数下最后一行不与底部按钮重叠。
+        let last = layout.rows.last().expect("应有行");
+        assert!(
+            last.row.bottom <= layout.back.top,
+            "最后一行不得压到按钮：{} > {}",
+            last.row.bottom,
+            layout.back.top
+        );
+        // 极端堆叠时布局不 panic、不越界：行矩形单调递增，按钮位置固定不动。
+        let crowded = super::packs_layout(&metrics, CLIENT, 40);
+        assert_eq!(crowded.rows.len(), 40);
+        for pair in crowded.rows.windows(2) {
+            assert_eq!(pair[1].row.top, pair[0].row.bottom, "行必须首尾相接");
+        }
+        assert_eq!(crowded.back, layout.back, "按钮位置与行数无关");
+        assert_eq!(crowded.import, layout.import);
     }
 
     #[test]

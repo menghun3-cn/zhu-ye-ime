@@ -121,6 +121,25 @@ pub fn resolve_theme_kind() -> UiThemeKind {
     }
 }
 
+/// 设置程序 exe 所在目录；失败时回退当前目录。
+///
+/// 安装器把设置窗口与 DLL、基础包放在同一目录，因此 exe 目录就是基础包目录的
+/// 等价物（与 TSF 侧 `resolve_base_dir` 的"DLL 同目录"同级）。
+#[must_use]
+pub fn exe_dir() -> PathBuf {
+    use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+    unsafe {
+        let mut buffer = [0u16; 4096];
+        let length = GetModuleFileNameW(None, &mut buffer);
+        if length == 0 || length as usize >= buffer.len() {
+            return PathBuf::from(".");
+        }
+        let mut path = PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
+        path.pop();
+        path
+    }
+}
+
 /// 解析「更多设置」的目标路径；未设置 `APPDATA` 时返回描述。
 pub fn resolve_target(target: OpenTarget) -> Result<PathBuf, String> {
     match target {

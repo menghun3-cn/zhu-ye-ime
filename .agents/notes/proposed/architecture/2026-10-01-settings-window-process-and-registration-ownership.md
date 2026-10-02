@@ -67,8 +67,13 @@ flattening everything into a switch:
 - **Runtime toggle** — takes effect immediately and is persisted.
 - **Assembly item** — written to configuration and applied when the input method
   reassembles on its next start.
-- **Session state** — takes effect immediately and is deliberately not persisted; the
-  Chinese/English mode is the first member of this kind.
+- **Session state** — takes effect immediately and is deliberately not persisted. The
+  Chinese/English mode that Shift toggles mid-session remains session state, but **no
+  settings-window entry expresses it**; the window's 英文输入法 entry is an assembly item
+  instead (revised from the original draft of D-32: there is no single "current mode"
+  across host processes for the window to display or flip, so the only meaningful semantics
+  is the default mode a new input session starts from, written to `config.json` as
+  `default_mode` and applied by the TSF DLL on its next activation).
 
 Runtime toggles are written to `config.json` as they change; assembly items are committed
 by an explicit save. The window is single-instance — a second launch activates the
@@ -267,9 +272,15 @@ online features are off" auditable in one binary.
 fixed-light default decided for the candidate window. Users who want the dark palette
 select 深色 explicitly.
 
-**Persist the Chinese/English mode as a setting.** Rejected: the mode is session state.
-Making it persist produces "I left it in Chinese and it came back English", and it would
-also mean a restart changes what the next keystroke does.
+**Persist the Chinese/English mode as a setting.** Rejected in the original D-32 draft
+with the argument that the mode is session state; persisting it would make a restart change
+what the next keystroke does. **Revised:** the 英文输入法 entry is now an **assembly item**
+persisting the *default mode of a new session* (`default_mode` in `config.json`), not the
+mode itself. The window cannot display or flip the runtime mode — it is per-host-process
+IME instance state with no single cross-process value — so the original "show current mode
+and switch instantly" semantics had nothing to display. The mid-session Shift toggle stays
+session state and stays outside the window; a restart changing the *starting* mode of the
+next session is exactly what an assembly item is for.
 
 **Resolve FR-022's name, description, and version from a new manifest shipped alongside
 the packs.** Rejected: the published manifest is a remote release artifact and is never

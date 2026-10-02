@@ -106,7 +106,31 @@ pub fn read_entry_count(path: &Path) -> Option<u64> {
     Some(u64::from(header.entry_count))
 }
 
-/// 列出全部包：基础包在最前，其后按可分发包顺序，最后是磁盘上出现的其他已知包。
+/// 列出 `packs/` 目录里的 `.zyct` 文件名（去扩展名）；目录不存在或读取失败时为空。
+///
+/// 导入的本地包（FR-042）只以磁盘产物形式存在，不进入已知包表，必须靠这里发现。
+fn read_dir_pack_ids(packs_dir: &Path) -> impl Iterator<Item = String> {
+    let entries = match std::fs::read_dir(packs_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new().into_iter(),
+    };
+    entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("zyct") {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_owned)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+/// 列出全部包：基础包在最前，其后按可分发包顺序，再是磁盘上出现的其他已知包
+/// （如开发期的 real/seed），最后是按字典序的磁盘未知包（本地导入，FR-042）。
 ///
 /// 顺序完全确定，不依赖目录遍历顺序。
 #[must_use]
@@ -116,29 +140,44 @@ pub fn list_packs(
     packs_dir: &Path,
     record: &InstalledRecord,
 ) -> Vec<PackInfo> {
-    let mut ids: Vec<&str> = Vec::new();
-    ids.push("base");
-    ids.extend(DISTRIBUTABLE_PACK_IDS.iter().copied());
+    let mut ids: Vec<String> = Vec::new();
+    ids.push("base".to_owned());
+    ids.extend(DISTRIBUTABLE_PACK_IDS.iter().map(|id| (*id).to_owned()));
     // 磁盘上出现的其余已知包（如开发期的 real/seed）追加在后，保持列表确定性。
     let mut extra: Vec<&str> = KNOWN_PACK_IDS
         .iter()
         .copied()
-        .filter(|id| !ids.contains(id))
+        .filter(|id| !ids.iter().any(|known| known == id))
         .filter(|id| pack_file(base_dir, packs_dir, id).is_file())
         .collect();
     extra.sort_unstable();
-    ids.extend(extra);
+    ids.extend(extra.iter().map(|id| (*id).to_owned()));
+    // 磁盘上出现的未知包（本地导入）排在已知集合之后，各自按字典序。
+    let mut unknown: Vec<String> = read_dir_pack_ids(packs_dir)
+        .filter(|id| !KNOWN_PACK_IDS.contains(&id.as_str()) && !ids.contains(id))
+        .collect();
+    unknown.sort();
+    ids.extend(unknown);
 
     ids.into_iter()
-        .filter_map(|id| {
-            let display = pack_display(id)?;
-            let path = pack_file(base_dir, packs_dir, id);
+        .map(|id| {
+            let path = pack_file(base_dir, packs_dir, &id);
             let size = std::fs::metadata(&path).ok().map(|meta| meta.len());
-            let entry = record.get(id);
-            Some(PackInfo {
-                id: id.to_owned(),
-                name: display.name.to_owned(),
-                summary: display.summary.to_owned(),
+            let entry = record.get(&id);
+            let (name, summary, development) = match pack_display(&id) {
+                Some(display) => (
+                    display.name.to_owned(),
+                    display.summary.to_owned(),
+                    display.development,
+                ),
+                None => (id.clone(), "本地导入或未收录的词典包".to_owned(), false),
+            };
+            let enabled = id == "base" || config.enabled_packs.iter().any(|pack| pack == &id);
+            let base = id == "base";
+            PackInfo {
+                id,
+                name,
+                summary,
                 entry_count: if size.is_some() {
                     read_entry_count(&path)
                 } else {
@@ -146,12 +185,12 @@ pub fn list_packs(
                 },
                 size,
                 version: entry.and_then(|pack| pack.version.clone()),
-                enabled: id == "base" || config.enabled_packs.iter().any(|pack| pack == id),
-                base: id == "base",
-                development: display.development,
+                enabled,
+                base,
+                development,
                 source: entry.map(|pack| pack.source),
                 present: size.is_some(),
-            })
+            }
         })
         .collect()
 }
@@ -335,6 +374,43 @@ mod tests {
         assert_eq!(it.size_label(), "—");
         assert_eq!(it.entry_label(), "—");
         assert!(!it.toggleable(), "不存在的包不能勾选");
+    }
+
+    #[test]
+    fn 磁盘上未知的本地导入包被列出并排最后() {
+        let dir = temp_dir("unknown-import");
+        // 不止 .zyct：目录里的杂物（installed.json、临时文件）不得被当成包。
+        write_header_only(&dir.join("packs").join("it.zyct"), 10);
+        write_header_only(&dir.join("packs").join("real.zyct"), 5);
+        write_header_only(&dir.join("packs").join("自建词库.zyct"), 3);
+        write_header_only(&dir.join("packs").join("zz-extra.zyct"), 4);
+        std::fs::write(dir.join("packs").join("installed.json"), "{}").unwrap();
+        std::fs::write(dir.join("packs").join("scratch.txt"), "杂物").unwrap();
+        let packs = list_packs(
+            &ConfigFile::default(),
+            &dir,
+            &dir.join("packs"),
+            &InstalledRecord::default(),
+        );
+        // 已知集合顺序不变，未知包按 UTF-8 字节字典序追加在最后（"z" 的字节低于汉字首字节）。
+        let ids: Vec<&str> = packs.iter().map(|pack| pack.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["base", "it", "med", "slang", "real", "zz-extra", "自建词库"]
+        );
+        let unknown = packs
+            .iter()
+            .find(|pack| pack.id == "自建词库")
+            .expect("未知包应出现在清单里");
+        assert_eq!(unknown.name, "自建词库", "未知包用原始 id 作为展示名");
+        assert!(!unknown.development, "未知包不是开发期产物");
+        assert_eq!(unknown.summary, "本地导入或未收录的词典包");
+        assert!(unknown.present);
+        assert!(unknown.toggleable());
+        assert_eq!(unknown.entry_count, Some(3));
+        assert_eq!(unknown.source, None);
+        // 杂物文件不被当成包。
+        assert!(!packs.iter().any(|pack| pack.id == "scratch"));
     }
 
     #[test]

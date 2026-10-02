@@ -181,7 +181,22 @@ fn configured_theme_preference() -> ThemePreference {
     }
 }
 
+/// 从配置解析新输入会话的默认中英模式（FR-041）。
+///
+/// 中英模式本身是每个宿主进程各自的 IME 实例状态，跨进程没有单一的"当前模式"；设置窗口
+/// 能表达的唯一有意义语义就是"新会话从哪种模式开始"，因此这条配置是**装配项**——每次
+/// `create_text_service` 实例化输入法时读取一次，之后本会话里的 Shift 切换照旧。
+fn configured_default_mode() -> crate::input::InputMode {
+    let (config, _) = zhu_ye_core::load_config(&config_path());
+    match config.default_mode {
+        zhu_ye_core::ModeChoice::English => crate::input::InputMode::English,
+        zhu_ye_core::ModeChoice::Chinese => crate::input::InputMode::Chinese,
+    }
+}
+
 impl EngineState {
+    /// 纯逻辑构造：不读任何配置（单元测试与无配置环境统一从中文模式开始）。
+    #[cfg(test)]
     fn new() -> Self {
         Self {
             engine: create_engine(None),
@@ -193,9 +208,12 @@ impl EngineState {
         }
     }
 
-    fn with_user_store(store: UserDictStore) -> Self {
+    /// 生产装配：新输入法实例的起始模式按配置决定（FR-041，装配项）。
+    fn with_start_mode(user_store: Option<UserDictStore>, mode: crate::input::InputMode) -> Self {
+        let mut engine = create_engine(user_store);
+        engine.set_mode(mode);
         Self {
-            engine: create_engine(Some(store)),
+            engine,
             tid: 0,
             keystroke_mgr: None,
             composition: None,
@@ -1468,10 +1486,10 @@ fn create_class_factory(user_store: Option<UserDictStore>) -> IClassFactory {
 fn create_text_service(user_store: Option<UserDictStore>) -> IUnknown {
     object_created();
     TextService {
-        state: Rc::new(Mutex::new(match user_store {
-            Some(store) => EngineState::with_user_store(store),
-            None => EngineState::new(),
-        })),
+        state: Rc::new(Mutex::new(EngineState::with_start_mode(
+            user_store,
+            configured_default_mode(),
+        ))),
     }
     .into()
 }
