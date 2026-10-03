@@ -44,6 +44,10 @@ FR-058.
   CSS gated by `prefers-reduced-motion`.
 - All internal links are **relative paths** (mandatory so the site also works
   when Pages serves it under a `/repo/` prefix and when opened via `file://`).
+  Page-to-page links target **explicit `index.html` files** (`./docs/index.html`,
+  `../index.html`) because Chromium's `file://` renders a directory listing for
+  slash-terminated directory URLs instead of the directory's index.html; the
+  pretty `/docs/` form is used only in sitemap.xml (deployment semantics).
   The contract is enforced by `scripts/check-site-links.ps1` (PowerShell 5.1
   compatible, ASCII-only comments).
 - Header/footer are copy-maintained across the five pages (design S-14);

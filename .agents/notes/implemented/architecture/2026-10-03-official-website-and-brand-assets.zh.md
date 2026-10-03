@@ -32,7 +32,10 @@ Releases。需要决策的是：照搬该技术栈还是自研，以及内容边
   （设计 S-16）：唯一 `<script>` 是首页 JSON-LD 数据声明；动效纯 CSS 且由
   `prefers-reduced-motion` 门控。
 - 所有站内链接使用**相对路径**（强制约定：Pages 以 `/repo/` 前缀发布与 `file://` 直开
-  时都可用）。该契约由 `scripts/check-site-links.ps1` 强制（PowerShell 5.1 兼容、
+  时都可用）。页间链接一律**显式写 `index.html`**（如 `./docs/index.html`、`../index.html`）：
+  Chromium 系浏览器在 `file://` 下对以 `/` 结尾的目录 URL 渲染目录列表而非该目录的
+  index.html；`/docs/` 这种目录形式 URL 仅用于 sitemap.xml（部署环境语义）。
+  该契约由 `scripts/check-site-links.ps1` 强制（PowerShell 5.1 兼容、
   ASCII 注释）。
 - header/footer 在 5 个页面间复制式维护（设计 S-14）；一致性由验收核对兜底，不用模板引擎。
 - **下载页以安装包为主**（D-69）：「发行包」表区分便携 zip（内测期产物）与规划中的

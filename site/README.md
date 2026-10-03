@@ -7,8 +7,10 @@
 
 - **零构建**：纯 HTML + 一份 CSS + 手绘 SVG，**无任何 JS 文件**（唯一 `<script>` 是首页
   JSON-LD 数据声明）。无第三方脚本、无统计、无外部字体/图标 CDN（NFR-012）。
-- **相对链接契约**：站内链接一律相对路径（`../docs/`、`./assets/...`），禁止站内绝对 URL；
-  这样 `file://` 直开、以及 GitHub Pages 以 `/repo/` 子路径发布都可用。
+- **相对链接契约**：站内链接一律相对路径（`../docs/index.html`、`./assets/...`），禁止站内绝对 URL。
+  **页面链接必须显式写 `index.html`**（如 `./docs/index.html`、`../index.html`）：Chromium 系浏览器在
+  `file://` 下对以 `/` 结尾的目录 URL 显示目录列表而非 `index.html`，显式文件名才能保证
+  `file://` 直开与 GitHub Pages 以 `/repo/` 子路径发布两种环境行为一致。
 - **共享布局为复制式维护**（S-14）：header/footer 在 6 个 HTML 中各自一份，改布局要 6 处一起
   改；一致性由验收标准 15.1 的"每页必需元素"核对兜底。
 
@@ -39,7 +41,7 @@ site/
 
 ## 本地预览
 
-双击 `site/index.html` 即可（相对链接保证 file:// 可用）。也可起任意静态服务器：
+双击 `site/index.html` 即可（页面链接为显式 `index.html`，file:// 下逐页点击正常）。也可起任意静态服务器：
 
 ```powershell
 # PowerShell 简易 http 服务（root 需为站点目录）
