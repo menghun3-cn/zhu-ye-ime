@@ -104,7 +104,9 @@ roadmap block or an explicitly 规划中-tagged cell. The
 shared version-status line ("Windows 内测版 · M1–M12 核心能力已实现（自动化验证
 通过）· 格式候选与设置窗口的真实环境交互验收收尾中") matches the T-061/T-080
 acceptance-owed state. The llms.txt/agents.txt files are site content too and
-obey the same vocabulary rules (S-18).
+obey the same vocabulary rules (S-18). Per user directive the site never names
+third parties or competitors (青简, 搜狗, …) on any page; attribution records
+live only in repo docs (设计 §12 借鉴模式清单, docs/竞品和参考.txt).
 
 ### Domain vocabulary
 
