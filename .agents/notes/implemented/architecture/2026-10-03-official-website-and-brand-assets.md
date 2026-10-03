@@ -27,7 +27,11 @@ to an explicitly labeled roadmap block; original visual language (bamboo-leaf
 theme) rather than a pixel copy; Chinese only; logo with a bamboo-leaf motif and
 a **personified bamboo leaf** as mascot (D-64); all brand assets as
 hand-written SVG; zero-build static site; GitHub Pages configuration ready,
-actual deployment deferred.
+actual deployment deferred. Same-day refinement (D-69): the download page is
+installer-centric with all downloads as GitHub Releases asset direct links (an
+exe installer is planned, explicitly tagged 规划中), and the site ships
+AI-discovery entry files (llms.txt / agents.txt / robots.txt / sitemap.xml),
+FR-058.
 
 ## Decision
 
@@ -44,13 +48,27 @@ actual deployment deferred.
   compatible, ASCII-only comments).
 - Header/footer are copy-maintained across the five pages (design S-14);
   consistency is checked by the acceptance pass, not by a template engine.
+- The download page is **installer-centric** (D-69): a 发行包 table separates
+  the portable zip (current beta artifact) from the planned exe installer
+  (tagged 规划中); every download goes through GitHub Releases asset links —
+  the site never hosts installers and shows no button for a nonexistent asset.
+- **AI-discovery entry files** at the site root (FR-058, design §5.7/S-18):
+  `llms.txt` follows llmstxt.org v2 (H1 + blockquote summary + sectioned file
+  lists); `agents.txt` uses a site-owned structure (H1 + summary + 项目事实 /
+  内容边界 / 可信路径 / 文件索引 sections) since no universal agents.txt
+  standard exists; `robots.txt` allows all crawlers and points at
+  `sitemap.xml`, whose absolute URLs are pinned to the default GitHub Pages
+  address until a custom domain is configured. All four files are covered by
+  `check-site-links.ps1` (markdown links and `<loc>` sets) and share the page
+  content-honesty rules.
 - Deployment readiness (design §10): `.github/workflows/pages.yml` publishes
   `site/` to GitHub Pages via `upload-pages-artifact`; actual deployment is a
   later task (D-68). `site/README.md` documents maintenance and deployment.
-- Design tokens (S-13~S-17, `docs/官网设计.md §13`): zero-build is the current
+- Design tokens (S-13~S-18, `docs/官网设计.md §13`): zero-build is the current
   optimum with a defined revisit trigger (S-13); copy-maintained layout (S-14);
   candidate-window illustration locked to the verified UI palette (S-15); zero
-  JS (S-16); version-status line kept in sync with milestones (S-17).
+  JS (S-16); version-status line kept in sync with milestones (S-17);
+  AI-entry-file format/linkage contract (S-18).
 
 ### Brand assets: hand-written SVG, self-owned
 
@@ -77,16 +95,20 @@ spelling/email/URL completion, domain boost, contacts, dictionary-pack system
 with signed online updates, settings window, performance benchmarks, offline by
 default) and forbidden claims (macOS, AI cloud services, memorization systems,
 multi-language parallel translations). Planned items (M13 five, the release
-process, the English site) appear only in the home-page roadmap block with an
-explicit 规划中 tag. The shared version-status line ("Windows 内测版 · M6-M12
-已实现 · 发布流程收尾中") matches the T-080 acceptance-owed state.
+process, the English site, the exe installer) appear only in the home-page
+roadmap block or an explicitly 规划中-tagged cell. The
+shared version-status line ("Windows 内测版 · M1–M12 核心能力已实现（自动化验证
+通过）· 格式候选与设置窗口的真实环境交互验收收尾中") matches the T-061/T-080
+acceptance-owed state. The llms.txt/agents.txt files are site content too and
+obey the same vocabulary rules (S-18).
 
 ### Domain vocabulary
 
 CONTEXT.md gained a 站点 (site) section: 官网, 文档页 (distinct from `docs/`),
-路线图区块, 品牌资产, 吉祥物. Requirement FR-051~FR-057, design S-13~S-17, and
-this note are cross-linked; task T-083 (docs batch, done) and T-084
-(implementation) track delivery.
+路线图区块, 品牌资产, 吉祥物, plus zhu-ye (the English name), AI 发现入口, and
+发行包形态. Requirement FR-051~FR-058, design S-13~S-18, and this note are
+cross-linked; task T-083 (docs batch, done) and T-084 (implementation) track
+delivery.
 
 ## Alternatives considered
 
@@ -131,5 +153,7 @@ distinctive and derives directly from the name.
   checks and, at scale, the S-13 revisit trigger); no JS interactivity (mobile
   nav is line-wrapped, motion is CSS-only); the version-status line and the
   candidate-window illustration must be updated whenever UI/milestone truth
-  changes (S-15/S-17 duties); the site content is only Chinese until an English
-  site task is raised.
+  changes (S-15/S-17 duties); AI entry files must stay in lockstep with the
+  pages (S-18) and sitemap.xml URLs must be updated on a custom-domain
+  deployment; the site content is only Chinese until an English site task is
+  raised.

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>下载 — 竹叶输入法</title>
-<meta name="description" content="竹叶输入法下载：Windows 10/11 x64。当前为内测阶段，安装包将在 GitHub Releases 最先提供；也可从源码构建。">
+<meta name="description" content="竹叶输入法下载：Windows 10/11 x64。发行包（便携 zip；exe 安装包规划中）将最先出现在 GitHub Releases；内测阶段也可从源码构建。">
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/site.css">
 </head>
@@ -34,12 +34,30 @@
   <div class="note">
     <h3>发布状态：内测阶段</h3>
     <p>竹叶输入法目前是 <strong>Windows 内测版（v0.1.x）</strong>，正式对外发布与自动更新源正在
-    收尾。安装包（<code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>）会最先出现在
-    <a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases 页</a>；
-    在正式版发布前，也可按仓库
+    收尾。<strong>所有安装包都通过
+    <a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases</a>
+    提供，本站不托管安装包</strong>，下载以 Releases 页实际发布为准；正式版发布前，也可按仓库
     <a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">README</a>
     从源码自行构建。在线自动更新源尚未开通，升级方式为重新安装新发行包。</p>
   </div>
+
+  <h2>发行包</h2>
+  <table class="docs">
+    <thead><tr><th>形态</th><th>状态</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>便携 zip（<code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>）</td>
+        <td>内测期产物</td>
+        <td>含安装脚本、设置窗口、更新器与基础/领域词典；免安装 Rust，解压后以管理员运行
+        <code>install.ps1</code> 即可安装</td>
+      </tr>
+      <tr>
+        <td>Windows exe 安装包</td>
+        <td><span class="tag">规划中</span></td>
+        <td>图形化安装包随正式发布流程制作，就绪后同样作为 Releases 资产提供，本站届时放上直链</td>
+      </tr>
+    </tbody>
+  </table>
 
   <h2>系统要求</h2>
   <table class="docs">
@@ -54,7 +72,8 @@
   <h2>安装</h2>
   <ol>
     <li>从 <a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases</a>
-      取得发行包 <code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>，解压到目标机（无需安装 Rust）。</li>
+      取得当前发行包（内测期为 <code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>），解压到目标机
+      （无需安装 Rust）。</li>
     <li>右键「以管理员身份运行」PowerShell，执行包内脚本：<code>.\scripts\install.ps1</code>。</li>
     <li>进入系统设置
       <code>设置 → 时间和语言 → 语言和区域 → 中文（简体，中国）→ 键盘</code>，
@@ -101,7 +120,7 @@
       </ul>
     </nav>
     <div class="footer-status">Windows 内测版 · M1–M12 核心能力已实现（自动化验证通过）· 格式候选与设置窗口的真实环境交互验收收尾中</div>
-    <div class="footer-copy">© 2026 竹叶输入法 · 代码 MIT OR Apache-2.0 · 词典数据来源与许可证见仓库 docs/licenses.md</div>
+    <div class="footer-copy">© 2026 竹叶输入法 · 代码 MIT OR Apache-2.0 · 词典数据来源与许可证见仓库 docs/licenses.md · <a href="../llms.txt">llms.txt（AI 阅读版）</a></div>
   </div>
 </footer>
 

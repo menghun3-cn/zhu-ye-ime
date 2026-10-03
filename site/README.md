@@ -22,6 +22,10 @@ site/
   privacy/index.html   隐私页（零网络 / 本机处理）
   about/index.html     关于页（简介 / 状态 / 许可 / 借鉴记录）
   404.html             未找到（吉祥物探头姿态）
+  llms.txt             AI 检索入口（llmstxt.org v2，FR-058/S-18）
+  agents.txt           面向 AI 代理的站点导读（本站格式，FR-058/S-18）
+  robots.txt           爬虫允许声明（FR-058）
+  sitemap.xml          全部页面 URL（FR-058；部署自定义域名后必改，见下）
   assets/
     css/site.css           全站样式（唯一 CSS，令牌见官网设计.md §4）
     logo.svg               logo 主标（图形 + 字标 + 拉丁名）
@@ -49,13 +53,27 @@ site/
 ```
 
 解析所有 HTML 的 `href`/`src`，站内相对引用必须命中真实文件（以 `/` 结尾的链接要求目录下有
-`index.html`）；站外链接只列出不校验。任一失效 exit 1。**修改任何页面后、提交前必须跑一次。**
+`index.html`）；同时校验 `llms.txt`/`agents.txt` 中的 Markdown 链接与 `sitemap.xml` 的
+`<loc>` 页面集合。站外链接只列出不校验。任一失效 exit 1。
+**修改任何页面后、提交前必须跑一次。**
+
+## AI 与机器可读入口（FR-058，改内容必读）
+
+- **llms.txt**：遵循 llmstxt.org v2（`# 标题` + `> 摘要` + 说明段 + `## 分节`文件列表）。
+  链接一律相对路径，随 Pages 前缀自适应。
+- **agents.txt**：无人认领的统一标准——**本站自有结构**（S-18）：`# 标题` + `>` 摘要 +
+  「项目事实 / 内容边界 / 可信路径 / 文件索引」四节；改动须保持该结构，验收 15.3 断言。
+- **robots.txt**：全允许，指向 `sitemap.xml`。
+- **sitemap.xml**：绝对 URL **暂钉默认 Pages 地址**（`https://menghun3-cn.github.io/zhu-ye-ime/`）；
+  配置自定义域后必须同步更新 `<loc>` 与 robots.txt 的 Sitemap 行。
+- **口径联动**：这四个文件与页面同源同口径（NFR-011）：页面能力、发布状态、发行包形态
+  变动时同步改入口文件；入口文件不得出现页面未声明的能力。
 
 ## 页面如何增删
 
-- 新增页面：复制既有页面的 header/footer 块，改导航的 `aria-current="page"`，按相对链接契约
-  写资源引用；保持与 5 页（+404）一致。
-- 删除/改名页面：同步所有页面的导航与页脚链接，然后跑内链自检确认无残留。
+- 新增页面/删除页面：**同时维护四个 AI 入口文件**（llms.txt 文件列表、agents.txt 文件索引、
+  sitemap.xml 页面集合、robots.txt 无需动），复制既有页面的 header/footer 块，改导航的
+  `aria-current="page"`，按相对链接契约写资源引用；然后跑内链自检确认无残留。
 - 首页 JSON-LD 只在 `site/index.html`，新页面一般不需要。
 
 ## 品牌资产如何替换
@@ -74,7 +92,9 @@ site/
 - 规划中的能力（如 M13 五项）只能出现在首页"路线图"区块并带 `<span class="tag">规划中</span>`。
 - 版本状态行（footer/下载页/关于页共用的同一句话）与当前里程碑口径必须一致（S-17）；
   发布流程中，CHANGELOG 发布条目需同步更新该行。
-- 下载页不得出现指向不存在产物的下载按钮；发布状态以 GitHub Releases 实际展示为准。
+- 下载页以安装包为主：所有安装包（便携 zip；exe 安装包规划中）一律来自 GitHub Releases 资产
+  直链，本站不托管安装包；不得出现指向不存在产物的下载按钮；发布状态以 GitHub Releases
+  实际展示为准。
 
 ## GitHub Pages 部署
 
@@ -85,7 +105,8 @@ site/
 3. 上线前检查（验收标准 15.4）：`check-site-links.ps1` 全绿、内容核对表全过、版本状态行与
    当前发布口径一致。
 
-之后如需自定义域名：在仓库 Settings → Pages 配置并同步 CNAME 文件。
+之后如需自定义域名：在仓库 Settings → Pages 配置并同步 CNAME 文件；**同时更新
+`sitemap.xml` 的所有 `<loc>` 与 `robots.txt` 的 Sitemap 行**。
 
 ## 本项目零 JS 决策（S-16）
 
@@ -94,6 +115,6 @@ site/
 
 ## 相关链接
 
-- 设计：`docs/官网设计.md`（视觉令牌、页面规格、S-13~S-17、风险）
+- 设计：`docs/官网设计.md`（视觉令牌、页面规格、S-13~S-18、风险）
 - 决策：Agent Note `.agents/notes/implemented/architecture/2026-10-03-official-website-and-brand-assets.md`
 - 验收：`docs/验收标准.md` 第 15 节（含 15.5 实测回填表格）
