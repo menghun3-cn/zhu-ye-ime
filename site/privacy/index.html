@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>隐私 — 竹叶输入法</title>
+<meta name="description" content="竹叶输入法隐私说明：默认完全离线、输入内容只在本机处理、用户词库仅写本地、AI 能力默认关闭。本站亦无任何第三方脚本或统计。">
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../">
+      <img class="brand-mark" src="../assets/logo-mark.svg" alt="竹叶输入法标志" width="26" height="26">
+      <span class="brand-zh">竹叶</span><span class="brand-latin">ZHUYE</span>
+    </a>
+    <nav class="site-nav" aria-label="站点导航">
+      <a class="nav-link" href="../">首页</a>
+      <a class="nav-link" href="../docs/">文档</a>
+      <a class="nav-link" href="../download/">下载</a>
+      <a class="nav-link" href="../privacy/" aria-current="page">隐私</a>
+      <a class="nav-link" href="../about/">关于</a>
+    </nav>
+    <a class="nav-gh" href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</header>
+
+<main class="wrap prose">
+
+  <h1>隐私</h1>
+  <p>竹叶输入法的默认行为是：<strong>完全离线，输入内容只在本机处理</strong>。以下逐项说明。</p>
+
+  <h2>默认零网络</h2>
+  <ul>
+    <li>默认配置下不发起任何网络请求；运行时 AI 能力未启用。</li>
+    <li>输入内容只在本机处理；用户词库仅写本地用户目录。</li>
+    <li>日志仅写入本地，无自动上传行为。</li>
+  </ul>
+
+  <h2>唯一联网组件：可选的词典更新器</h2>
+  <p>项目中唯一可能联网的组件是词典在线更新器（<code>zhu-ye-updater</code>），且
+  <strong>默认关闭</strong>：配置项 <code>online_update</code> 为 <code>false</code>，显式开启后
+  才会联网检查更新。更新器下载前校验签名与内容哈希，任何一步失败都不会改动本地词典。</p>
+
+  <h2>AI 能力：预留接口，默认关闭</h2>
+  <p>后续可选的 AI 能力是显式预留接口，默认关闭；即便未来启用，也必须用户显式开启，且结果带
+  来源标识。当前发行版不包含任何云端调用。</p>
+
+  <h2>数据都在哪里</h2>
+  <table class="docs">
+    <thead><tr><th>位置</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr><td><code>%APPDATA%\ai-zhu-ye-ime</code></td><td>用户词库（<code>user_words.json</code>）、
+        配置（<code>config.json</code>）、已安装包清单、本地日志、领域包（<code>packs\</code>）</td></tr>
+      <tr><td><code>C:\Program Files\ai-zhu-ye-ime</code></td><td>程序文件：TSF 输入法 DLL、
+        设置窗口、更新器、基础词典（随安装写入）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>卸载与数据保留</h2>
+  <p>卸载脚本默认<strong>保留</strong> <code>%APPDATA%\ai-zhu-ye-ime</code> 下的用户数据（属用户
+  财产）；确认不再需要时手动删除该目录即可。无广告、无统计、无捆绑行为。</p>
+
+  <h2>本站自身</h2>
+  <p>本官网为纯静态页面：无第三方脚本、无访问统计、无外部字体或图标 CDN，也不放置任何追踪
+  Cookie。访问本站不会向除 GitHub（页面托管与站外链接）以外的服务发起请求。</p>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div>
+      <div class="footer-brand-zh">竹叶输入法</div>
+      <div class="footer-slogan">输入中文，候选词旁有译文。</div>
+    </div>
+    <nav class="footer-col" aria-label="站点">
+      <h4>站点</h4>
+      <ul>
+        <li><a href="../">首页</a></li>
+        <li><a href="../docs/">文档</a></li>
+        <li><a href="../download/">下载</a></li>
+        <li><a href="../privacy/">隐私</a></li>
+        <li><a href="../about/">关于</a></li>
+      </ul>
+    </nav>
+    <nav class="footer-col" aria-label="社区">
+      <h4>社区</h4>
+      <ul>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub 仓库</a></li>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">Releases</a></li>
+      </ul>
+    </nav>
+    <div class="footer-status">Windows 内测版 · M1–M12 核心能力已实现（自动化验证通过）· 格式候选与设置窗口的真实环境交互验收收尾中</div>
+    <div class="footer-copy">© 2026 竹叶输入法 · 代码 MIT OR Apache-2.0 · 词典数据来源与许可证见仓库 docs/licenses.md</div>
+  </div>
+</footer>
+
+</body>
+</html>
