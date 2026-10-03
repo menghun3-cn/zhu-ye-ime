@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://menghun3-cn.github.io/zhu-ye-ime/sitemap.xml

@@ -1,0 +1,30 @@
+# 竹叶输入法官网：面向 AI 代理的站点导读
+
+> 本文件帮助 AI 代理正确理解与使用竹叶输入法（zhu-ye）官方网站。站点为纯静态、零 JS、可整体抓取；本文件为站点自有约定的 `agents.txt` 结构（S-18），与 [llms.txt](llms.txt) 配合使用。
+
+## 项目事实
+
+- 竹叶输入法：Windows 10/11（x64）拼音输入法，Rust + TSF 架构；核心特色是输入中文时候选行内附英文译文，按 Tab 可上屏英文
+- 当前状态：内测版（v0.1.x）；M1–M12 核心能力已实现并通过自动化验证；格式候选与设置窗口的真实环境交互验收收尾中
+- 许可：MIT；英文名：zhu-ye
+- 仓库：https://github.com/menghun3-cn/zhu-ye-ime
+
+## 内容边界
+
+- 能力口径：站点只宣称已实现并经过测试/验收的能力，完整清单见 [首页](index.html) 特性区与 [关于](about/index.html)
+- 规划中（仅首页「路线图」区块，带「规划中」标注）：英文词典全面扩容、网络语扩充、设置窗口增强闭环、中英混合整句解码、正式版发布与在线更新源、Windows exe 安装包
+- 平台：仅支持 Windows 10/11 x64；无其他平台版本；英文站为后续任务
+- 下载：本站不托管安装包，任何页面不得声称存在可下载的安装文件——下载一律以 GitHub Releases 实际发布为准
+
+## 可信路径
+
+- 下载：https://github.com/menghun3-cn/zhu-ye-ime/releases（当前内测阶段，以页面实际发布为准）
+- 用户文档：[文档页](docs/index.html)（安装 / 启用与切换 / 键位表 / 译文 / 用户词 / 卸载 / 故障排查）
+- 隐私：[隐私页](privacy/index.html)（默认零网络、输入只在本机处理、数据位置）
+- 源码与许可：https://github.com/menghun3-cn/zhu-ye-ime ；数据来源与许可证见仓库 docs/licenses.md
+
+## 文件索引
+
+- [llms.txt](llms.txt): 面向 LLM 的站点摘要与文件列表（llmstxt.org v2）
+- [sitemap.xml](sitemap.xml): 全部页面 URL（绝对地址，暂绑定默认 GitHub Pages 域名）
+- [robots.txt](robots.txt): 爬虫策略（全允许）

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>竹叶输入法 — 候选词旁，有译文</title>
+<meta name="description" content="竹叶输入法：Windows 上的轻量拼音输入法。全拼输入、候选行内英文译文、Tab 上屏英文，默认完全离线。仅支持 Windows 10/11 x64，当前为内测版。">
+<link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./assets/css/site.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "竹叶输入法",
+  "alternateName": "zhu-ye",
+  "operatingSystem": "Windows 10, Windows 11 (x64)",
+  "applicationCategory": "UtilityApplication",
+  "applicationSubCategory": "中文输入法",
+  "description": "Windows 轻量拼音输入法：全拼输入、候选行内英文译文、Tab 上屏英文，默认完全离线。",
+  "inLanguage": "zh-CN",
+  "license": "https://github.com/menghun3-cn/zhu-ye-ime",
+  "softwareVersion": "0.1.0+",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" }
+}
+</script>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="./index.html">
+      <img class="brand-mark" src="./assets/logo-mark.svg" alt="竹叶输入法标志" width="26" height="26">
+      <span class="brand-zh">竹叶</span><span class="brand-latin">ZHUYE</span>
+    </a>
+    <nav class="site-nav" aria-label="站点导航">
+      <a class="nav-link" href="./index.html" aria-current="page">首页</a>
+      <a class="nav-link" href="./docs/index.html">文档</a>
+      <a class="nav-link" href="./download/index.html">下载</a>
+      <a class="nav-link" href="./privacy/index.html">隐私</a>
+      <a class="nav-link" href="./about/index.html">关于</a>
+    </nav>
+    <a class="nav-gh" href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <div>
+      <h1>候选词旁，有译文。</h1>
+      <p class="lead">竹叶输入法——Windows 上的轻量拼音输入法：全拼输入，候选行内附英文译文；按
+      <kbd>Tab</kbd> 切到译文层，直接上屏英文。默认完全离线，词库与排序全部在本机。</p>
+      <div class="cta">
+        <a class="btn" href="./download/index.html">下载体验</a>
+        <a class="btn secondary" href="./docs/index.html">查看文档</a>
+      </div>
+      <p class="hero-note">仅支持 Windows 10/11 x64 · 当前为内测版（v0.1.x）</p>
+    </div>
+    <div class="hero-art">
+      <img src="./assets/cand-window.svg" alt="候选窗示例：输入 nihao，第一候选「你好」右侧显示英文译文 hello" width="560" height="330">
+    </div>
+  </section>
+
+  <section class="features" aria-labelledby="features-h">
+    <div class="features-head">
+      <h2 id="features-h">已经实现的能力</h2>
+      <p class="note-line">以下每一项都来自测试与验收记录，见
+        <a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">仓库文档</a>。</p>
+    </div>
+    <div class="features-grid">
+      <div class="feature">
+        <h3>译文就在候选里</h3>
+        <p>中文候选行内附英文译文，不打断输入；按 <kbd>Tab</kbd> 切换译文层，选中即上屏英文。</p>
+      </div>
+      <div class="feature">
+        <h3>全拼与更多</h3>
+        <p>全拼输入之外，支持简拼/首字母、模糊音纠错、整句候选，全部本机计算，零联网。</p>
+      </div>
+      <div class="feature">
+        <h3>默认全离线</h3>
+        <p>拼音、词库、排序、学习、释义默认都不联网；用户词与个人上下文只写入本地文件。</p>
+      </div>
+      <div class="feature">
+        <h3>轻快</h3>
+        <p>词典 mmap 只读加载、无后台常驻进程；候选刷新毫秒级（bench 实测 ≤1.7ms）。</p>
+      </div>
+      <div class="feature">
+        <h3>词典包体系</h3>
+        <p>基础包约 38 万词条随安装预置；<code>it</code>/<code>med</code>/<code>slang</code> 领域包
+        与网络语缩写可选启用，在线更新走签名信任链。</p>
+      </div>
+      <div class="feature">
+        <h3>越用越准</h3>
+        <p>词频 + 上下文 bigram 排序与用户词学习；命中率评测基准 Top1 84.7% / Top3 97.2%。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="showcase" aria-labelledby="showcase-h">
+    <h2 id="showcase-h">候选窗长这样</h2>
+    <div class="row">
+      <div>
+        <p>输入 <code>nihao</code>：第一候选「你好」右侧就是英文译文 <em>hello</em>。想要英文？
+        按 <kbd>Tab</kbd> 切到译文层，数字键直接上屏——不用切输入法，也不用复制去词典。</p>
+        <p>候选窗为 Win32 自绘：跟随系统深浅色、支持高像素密度（DPI）与高对比度模式。</p>
+      </div>
+      <div>
+        <img src="./assets/cand-window.svg" alt="候选窗示例插图（同首页）" width="560" height="330">
+      </div>
+    </div>
+  </section>
+
+  <section class="roadmap" aria-labelledby="roadmap-h">
+    <h2 id="roadmap-h">路线图 <span class="tag">规划中</span></h2>
+    <p class="note-line">以下条目需求已定稿、尚未实现，不与上方"已实现能力"混淆：</p>
+    <ul>
+      <li><div class="item"><b>英文词典全面扩容</b>（ECDICT 全量词库，不截断）</div><span class="tag">规划中</span></li>
+      <li><div class="item"><b>网络语词典扩充</b>（social 高频子集，与缩写注解体系配套）</div><span class="tag">规划中</span></li>
+      <li><div class="item"><b>设置窗口增强闭环</b>（检查更新、安装包管理、导入等五项）</div><span class="tag">规划中</span></li>
+      <li><div class="item"><b>中英混合整句解码</b>（如 <code>python代码</code> 整体候选）</div><span class="tag">规划中</span></li>
+      <li><div class="item"><b>正式版发布与在线更新源开通</b></div><span class="tag">流程收尾中</span></li>
+      <li><div class="item"><b>英文官网</b></div><span class="tag">规划中</span></li>
+    </ul>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div>
+      <div class="footer-brand-zh">竹叶输入法</div>
+      <div class="footer-slogan">输入中文，候选词旁有译文。</div>
+    </div>
+    <nav class="footer-col" aria-label="站点">
+      <h4>站点</h4>
+      <ul>
+        <li><a href="./index.html">首页</a></li>
+        <li><a href="./docs/index.html">文档</a></li>
+        <li><a href="./download/index.html">下载</a></li>
+        <li><a href="./privacy/index.html">隐私</a></li>
+        <li><a href="./about/index.html">关于</a></li>
+      </ul>
+    </nav>
+    <nav class="footer-col" aria-label="社区">
+      <h4>社区</h4>
+      <ul>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub 仓库</a></li>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">Releases</a></li>
+      </ul>
+    </nav>
+    <div class="footer-status">Windows 内测版 · M1–M12 核心能力已实现（自动化验证通过）· 格式候选与设置窗口的真实环境交互验收收尾中</div>
+    <div class="footer-copy">© 2026 竹叶输入法 · 代码 MIT · 词典数据来源与许可证见仓库 docs/licenses.md · <a href="./llms.txt">llms.txt（AI 阅读版）</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

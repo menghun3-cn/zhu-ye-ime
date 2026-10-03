@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>关于 — 竹叶输入法</title>
+<meta name="description" content="关于竹叶输入法：Rust 编写的 Windows 轻量拼音输入法，候选行内附英文译文；当前为内测版。技术栈、许可与借鉴记录。">
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html">
+      <img class="brand-mark" src="../assets/logo-mark.svg" alt="竹叶输入法标志" width="26" height="26">
+      <span class="brand-zh">竹叶</span><span class="brand-latin">ZHUYE</span>
+    </a>
+    <nav class="site-nav" aria-label="站点导航">
+      <a class="nav-link" href="../index.html">首页</a>
+      <a class="nav-link" href="../docs/index.html">文档</a>
+      <a class="nav-link" href="../download/index.html">下载</a>
+      <a class="nav-link" href="../privacy/index.html">隐私</a>
+      <a class="nav-link" href="../about/index.html" aria-current="page">关于</a>
+    </nav>
+    <a class="nav-gh" href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</header>
+
+<main class="wrap prose">
+
+  <h1>关于竹叶输入法</h1>
+
+  <h2>项目简介</h2>
+  <p>竹叶输入法是一款面向 <strong>Windows 10/11（x64）</strong> 的轻量拼音输入法，全部代码以
+  Rust 编写，基于 TSF 框架接入系统，候选窗为 Win32 自绘（跟随系统深浅色、支持高 DPI 与
+  高对比度）。它的核心特色是：<strong>输入中文时，候选行内直接附英文译文</strong>，按
+  <kbd>Tab</kbd> 即可切到译文层上屏英文。</p>
+
+  <h2>技术栈</h2>
+  <table class="docs">
+    <thead><tr><th>层面</th><th>选型</th></tr></thead>
+    <tbody>
+      <tr><td>语言</td><td>Rust（workspace 多 crate：core / dict / ime / settings / updater / cli 等）</td></tr>
+      <tr><td>系统接入</td><td>Windows TSF（Text Services Framework）</td></tr>
+      <tr><td>界面</td><td>候选窗与设置窗口均为 Win32 自绘（GDI），不依赖任何 GUI 框架</td></tr>
+      <tr><td>词典</td><td>自研 v2 二进制格式 + mmap 只读加载；词典包体系带签名在线更新</td></tr>
+      <tr><td>对外站点</td><td>本官网为零构建纯静态站（HTML/CSS/手绘 SVG，无 JS）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>许可与数据来源</h2>
+  <p>项目代码采用 <code>MIT</code> 许可证（见根 <code>Cargo.toml</code>）。词典与
+  语料数据均有来源与许可证记录（CC-CEDICT、FrequencyWords、OPUS GlobalVoices、规范字表等），
+  完整清单见仓库 <a href="https://github.com/menghun3-cn/zhu-ye-ime/blob/develop/docs/licenses.md" target="_blank" rel="noopener">docs/licenses.md</a>。
+  版本与变更记录见 <a href="https://github.com/menghun3-cn/zhu-ye-ime/blob/develop/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>。</p>
+
+  <h2>链接</h2>
+  <ul>
+    <li><a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub 仓库</a>（源码、issues、PR）</li>
+    <li><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases</a>（发行包）</li>
+    <li><a href="../docs/index.html">用户文档</a> · <a href="../privacy/index.html">隐私说明</a></li>
+  </ul>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div>
+      <div class="footer-brand-zh">竹叶输入法</div>
+      <div class="footer-slogan">输入中文，候选词旁有译文。</div>
+    </div>
+    <nav class="footer-col" aria-label="站点">
+      <h4>站点</h4>
+      <ul>
+        <li><a href="../index.html">首页</a></li>
+        <li><a href="../docs/index.html">文档</a></li>
+        <li><a href="../download/index.html">下载</a></li>
+        <li><a href="../privacy/index.html">隐私</a></li>
+        <li><a href="../about/index.html">关于</a></li>
+      </ul>
+    </nav>
+    <nav class="footer-col" aria-label="社区">
+      <h4>社区</h4>
+      <ul>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub 仓库</a></li>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">Releases</a></li>
+      </ul>
+    </nav>
+    <div class="footer-status">Windows 内测版 · M1–M12 核心能力已实现（自动化验证通过）· 格式候选与设置窗口的真实环境交互验收收尾中</div>
+    <div class="footer-copy">© 2026 竹叶输入法 · 代码 MIT · 词典数据来源与许可证见仓库 docs/licenses.md · <a href="../llms.txt">llms.txt（AI 阅读版）</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

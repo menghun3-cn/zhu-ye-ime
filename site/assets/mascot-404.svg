@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="竹叶吉祥物（探头姿态）">
+  <defs>
+    <linearGradient id="fGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9ac36a"/>
+      <stop offset="1" stop-color="#3d7a4e"/>
+    </linearGradient>
+  </defs>
+  <rect x="60" y="0" width="8" height="16" rx="4" fill="#9c7b4f"/>
+  <path d="M 64 10 C 40 26 26 58 32 92 C 36 110 50 120 64 120 C 78 120 92 110 96 92 C 102 58 88 26 64 10 Z" fill="url(#fGrad)"/>
+  <path d="M 64 14 C 62 48 66 80 60 108" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="51" cy="60" r="7" fill="#22302a"/>
+  <circle cx="77" cy="60" r="7" fill="#22302a"/>
+  <circle cx="53.5" cy="57" r="2.4" fill="#ffffff"/>
+  <circle cx="79.5" cy="57" r="2.4" fill="#ffffff"/>
+  <path d="M 55 74 Q 64 68 73 74" fill="none" stroke="#22302a" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="43" cy="69" r="4.5" fill="#e8c9c0" opacity="0.85"/>
+  <circle cx="85" cy="69" r="4.5" fill="#e8c9c0" opacity="0.85"/>
+  <path d="M 40 78 C 32 82 28 84 24 82" fill="none" stroke="#2c5a3b" stroke-width="5" stroke-linecap="round"/>
+  <path d="M 88 78 C 96 82 100 84 104 82" fill="none" stroke="#2c5a3b" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="22" cy="82" r="5" fill="#2c5a3b"/>
+  <circle cx="106" cy="82" r="5" fill="#2c5a3b"/>
+  <rect x="6" y="86" width="116" height="38" rx="10" fill="#ffffff" stroke="#e2e8de" stroke-width="2"/>
+</svg>

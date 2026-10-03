@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="竹叶输入法标志">
+  <defs>
+    <linearGradient id="leafGrad" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9ac36a"/>
+      <stop offset="1" stop-color="#3d7a4e"/>
+    </linearGradient>
+  </defs>
+  <path d="M 14 54 C 6 42 20 18 54 10 C 56 34 40 52 14 54 Z" fill="url(#leafGrad)"/>
+  <path d="M 16 52 C 28 40 40 26 52 12" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M 14 54 L 7 60" stroke="#9c7b4f" stroke-width="3.5" stroke-linecap="round"/>
+</svg>
