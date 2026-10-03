@@ -106,7 +106,9 @@ shared version-status line ("Windows 内测版 · M1–M12 核心能力已实现
 acceptance-owed state. The llms.txt/agents.txt files are site content too and
 obey the same vocabulary rules (S-18). Per user directive the site never names
 third parties or competitors (青简, 搜狗, …) on any page; attribution records
-live only in repo docs (设计 §12 借鉴模式清单, docs/竞品和参考.txt).
+live only in repo docs (设计 §12 借鉴模式清单, docs/竞品和参考.txt). The about
+page carries no dedicated 状态/借鉴 sections by user request: status claims
+live in the shared footer version-status line and the home page.
 
 ### Domain vocabulary
 
