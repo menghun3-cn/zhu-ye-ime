@@ -13,6 +13,7 @@
 - 产品化日志目录（M14，FR-060）：分级文件日志落盘 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`（默认 warn 级、热路径零 IO，1 MiB 写前轮转），`config.json` 新增 `log_level` 字段可调（宽松解析、不升配置版本）；TSF 53 调用点分级（8 error/7 warn/14 info/24 debug）+ 11 热路径守卫；调试哨兵双轨保留旧路径全量日志（`C:\zhu-ye-test\tsf-debug.enable` 存在时原样写 tsf-debug.log）（T-091，PR #60）
 - 官网页面对齐 v0.1.2-alpha（T-092/T-093）：版本状态行统一 M1–M14 口径（S-17，六页 footer + agents.txt）、hero-note 与 llms.txt 版本号同步，AI 入口四件套口径一致（S-18）；todos-done 里程碑归档补全（G-016~G-078）
 - 发布分发闭环（P-01 第十期）：更新器内置 ed25519 发布公钥，可分发的词典领域包经签名 manifest 通过 GitHub Releases 分发（it/med/slang，默认关闭、开启后验签下载原子替换）；新增发布密钥生成（keygen）、发布资产组装（assemble-release）与端到端验证（verify-release-e2e）工具链，发布操作手册见 `docs/发布流程.md`（T-094）
+- 正式发布打包 CI 化（T-095）：正式发布密钥对配置 GitHub Actions（私钥入 secret `ZHU_YE_RELEASE_SECRET_KEY`、公钥入 variable `ZHU_YE_RELEASE_PUBLIC_KEY`，测试密钥作废）；`release.yml` 工作流在推送 `v*` tag 时自动全链执行（数据源 pins 锁定校验 → CC-CEDICT 解压 → 词典全量构建 en.zyen/base/it/med/slang → 公钥注入构建 + 私钥签名 manifest + 复核 → zip/SHA256SUMS → 端到端验证 4/4 → 上传 GitHub Release），`workflow_dispatch` 手动试跑默认不上传；CI 试跑全链通过（run 37242703873）
 
 ## [0.1.1-alpha] - 2026-10-04
 
