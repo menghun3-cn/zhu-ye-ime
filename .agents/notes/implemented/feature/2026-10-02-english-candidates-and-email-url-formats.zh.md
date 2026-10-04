@@ -14,7 +14,7 @@ Status: implemented
 ## Decision
 
 自 T-085（M13）起，英文词主数据源为 ECDICT 全量的词表文件 `en.zyen`
-（[英文词表文件 ZYEN v1](../../implemented/feature/2026-10-16-en-wordbook-zyen-v1.zh.md)）；
+（[英文词表文件 ZYEN v1](../../implemented/feature/2026-10-04-en-wordbook-zyen-v1.zh.md)）；
 本文所述静态表保留为文件缺失或加载失败时的内嵌回退，公开语义一致（按 rank 排序→截断、
 置主候选之后、`pinyin = None`）。英文词表位于 `zhu-ye-core/src/en_words.rs`，由
 `scripts/build-en-words.ps1` 生成
