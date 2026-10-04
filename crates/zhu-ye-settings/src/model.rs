@@ -137,6 +137,12 @@ pub enum Subview {
     Update,
     /// 「版本与诊断信息」（T-077 / FR-044：版本、路径与已装包列表）。
     Diagnostics,
+    /// 「用户词表导入导出」（T-088 / FR-048）。
+    UserWords,
+    /// 「通讯录」（T-088 / FR-048：.vcf 界面化导入）。
+    Contacts,
+    /// 「自定义主题」（T-088 / FR-048：themes\*.json 加载与回退）。
+    Themes,
 }
 
 /// 条目右侧控件。
@@ -166,6 +172,12 @@ pub enum ItemControl {
     OpenUpdate,
     /// 进入"版本与诊断信息"子视图（T-077 / FR-044）。
     OpenDiagnostics,
+    /// 进入"用户词表导入导出"子视图（T-088 / FR-048）。
+    OpenUserWords,
+    /// 进入"通讯录"子视图（T-088 / FR-048：.vcf 界面化导入）。
+    OpenContacts,
+    /// 进入"自定义主题"子视图（T-088 / FR-048：themes\*.json 加载与回退）。
+    OpenThemes,
 }
 
 /// 条目定义。
@@ -228,6 +240,12 @@ static COMMON_ITEMS: &[Item] = &[
         ItemControl::ThemeChoice,
     ),
     item(
+        "自定义主题",
+        "从 themes\\*.json 加载配色；缺键回退预设，系统高对比度仍由系统接管（D-31）",
+        ItemState::Ready,
+        ItemControl::OpenThemes,
+    ),
+    item(
         "英文输入法",
         "新会话默认中英模式；保存后重启输入法生效",
         ItemState::Ready,
@@ -238,6 +256,18 @@ static COMMON_ITEMS: &[Item] = &[
         "领域包启停与导入本地 .zyct",
         ItemState::Ready,
         ItemControl::OpenPacks,
+    ),
+    item(
+        "用户词表",
+        "导入导出 user_words.json；导入合并去重（同拼音同词取较大词频）",
+        ItemState::Ready,
+        ItemControl::OpenUserWords,
+    ),
+    item(
+        "通讯录",
+        "导入 .vcf 通讯录文件，生成联系人拼音候选",
+        ItemState::Ready,
+        ItemControl::OpenContacts,
     ),
     item(
         OpenTarget::ConfigFile.title(),
@@ -324,7 +354,7 @@ static ABOUT_ITEMS: &[Item] = &[
 ];
 
 /// 设置窗口的交互状态（纯逻辑部分）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsState {
     /// 当前页。
     pub page: Page,
@@ -423,6 +453,24 @@ impl SettingsState {
         self.expanded = None;
     }
 
+    /// 进入「用户词表导入导出」子视图（T-088 / FR-048）。
+    pub fn open_user_words(&mut self) {
+        self.subview = Subview::UserWords;
+        self.expanded = None;
+    }
+
+    /// 进入「通讯录」子视图（T-088 / FR-048）。
+    pub fn open_contacts(&mut self) {
+        self.subview = Subview::Contacts;
+        self.expanded = None;
+    }
+
+    /// 进入「自定义主题」子视图（T-088 / FR-048）。
+    pub fn open_themes(&mut self) {
+        self.subview = Subview::Themes;
+        self.expanded = None;
+    }
+
     /// 退出子视图，回到条目列表。
     pub fn close_subview(&mut self) {
         self.subview = Subview::None;
@@ -470,8 +518,11 @@ mod tests {
         let titles: Vec<&str> = Page::Common.items().iter().map(|item| item.title).collect();
         for expected in [
             "主题",
+            "自定义主题",
             "英文输入法",
             "添加词库",
+            "用户词表",
+            "通讯录",
             "恢复状态栏",
             "管理输入法",
             "修复输入法",
@@ -530,8 +581,11 @@ mod tests {
                 "emoji 面板",
                 "符号大全",
                 "主题",
+                "自定义主题",
                 "英文输入法",
                 "添加词库",
+                "用户词表",
+                "通讯录",
                 "更多设置：配置文件",
                 "更多设置：数据目录",
                 "更多设置：日志目录",
@@ -631,9 +685,9 @@ mod tests {
         assert_eq!(state.expanded, None, "展开态属于页内下标，切页必须清空");
         // 同页重复选择不清空（关于页现已全接入，用常用设置的规划中条目复验）。
         state.select_page(Page::Common);
-        state.click_item(9);
+        state.click_item(12);
         state.select_page(Page::Common);
-        assert_eq!(state.expanded, Some(9));
+        assert_eq!(state.expanded, Some(12));
     }
 
     #[test]
@@ -641,7 +695,7 @@ mod tests {
         let mut state = SettingsState::new(ThemeChoice::Light);
         state.select_page(Page::Common);
         // 「简繁切换」仍是规划中条目：点击产生展开。
-        let planned = 9;
+        let planned = 12;
         state.click_item(planned);
         assert_eq!(state.expanded, Some(planned));
         assert!(state
@@ -651,9 +705,9 @@ mod tests {
         // 再点同一项收起。
         state.click_item(planned);
         assert_eq!(state.expanded, None);
-        // 主题（index 0）与恢复状态栏（index 6）已接入：点击不产生展开。
+        // 主题（index 0）与恢复状态栏（index 9）已接入：点击不产生展开。
         state.click_item(0);
-        state.click_item(6);
+        state.click_item(9);
         assert_eq!(state.expanded, None);
         assert_eq!(state.expanded_message(), None);
     }
@@ -668,7 +722,7 @@ mod tests {
         state.open_packs();
         assert_eq!(state.subview, Subview::Packs, "进入添加词库子视图");
         // 进入时清空展开态，避免与子视图叠加。
-        state.click_item(9);
+        state.click_item(12);
         state.open_manage();
         assert_eq!(state.subview, Subview::Manage, "管理输入法覆盖词库子视图");
         assert_eq!(state.expanded, None);

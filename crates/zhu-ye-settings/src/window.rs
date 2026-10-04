@@ -18,8 +18,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
 use windows::Win32::UI::Controls::Dialogs::{
-    GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST,
-    OPENFILENAMEW,
+    GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR,
+    OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
@@ -121,6 +121,12 @@ pub struct RunOptions {
     pub shot_update: bool,
     /// 截图时进入「版本与诊断信息」子视图（同上互斥规则）。
     pub shot_diag: bool,
+    /// 截图时进入「用户词表」子视图（T-088 取证，同上互斥规则）。
+    pub shot_user_words: bool,
+    /// 截图时进入「通讯录」子视图（T-088 取证，同上互斥规则）。
+    pub shot_contacts: bool,
+    /// 截图时进入「自定义主题」子视图（T-088 取证，同上互斥规则）。
+    pub shot_themes: bool,
 }
 
 /// 窗口运行状态。
@@ -156,6 +162,26 @@ struct WindowState {
     update_seq: u32,
     /// 「版本与诊断信息」子视图的逐行内容；进入时从本地收集（不联网）。
     diagnostics: Option<Vec<String>>,
+    /// 自定义主题（`Custom(name)`）解析出的设置窗配色与覆盖键数；非自定义主题为
+    /// `None`。文件缺失/解析失败回退系统深浅预设（T-088 / FR-048）。
+    custom_theme: Option<(SettingsTheme, usize)>,
+    /// 「用户词表」子视图的上次导入/导出结果消息。
+    user_words_message: Option<String>,
+    /// 「通讯录」子视图的已登记 .vcf 路径列表；进入子视图时从配置装载（T-088）。
+    contacts: Vec<PathBuf>,
+    /// 「自定义主题」子视图的主题文件清单；进入子视图时扫描 themes 目录（T-088）。
+    theme_files: Vec<ThemeInfo>,
+}
+
+/// 「自定义主题」子视图中的一个主题文件。
+#[derive(Debug, Clone)]
+struct ThemeInfo {
+    /// 文件名（不含 `.json` 后缀，即主题 id，写进配置 `theme: Custom(name)`）。
+    id: String,
+    /// 显示名（取文件内 `name` 字段，缺省用文件名）。
+    display_name: String,
+    /// 完整解析结果；`None` 表示文件损坏或版本过高，选择时给出错误提示。
+    file: Option<zhu_ye_core::ThemeFile>,
 }
 
 impl WindowState {
@@ -175,7 +201,7 @@ impl WindowState {
             Some(path) => config::load_online_update(path).0,
             None => false,
         };
-        let mut settings = SettingsState::with_config(theme, default_mode, online_update);
+        let mut settings = SettingsState::with_config(theme.clone(), default_mode, online_update);
         if let Some(page) = options.shot_page {
             settings.page = page;
             settings.expanded = options.shot_expanded;
@@ -199,6 +225,18 @@ impl WindowState {
         if options.shot_diag {
             settings.page = Page::About;
             settings.open_diagnostics();
+        }
+        if options.shot_user_words {
+            settings.page = Page::Common;
+            settings.open_user_words();
+        }
+        if options.shot_contacts {
+            settings.page = Page::Common;
+            settings.open_contacts();
+        }
+        if options.shot_themes {
+            settings.page = Page::Common;
+            settings.open_themes();
         }
         let packs = if settings.subview == Subview::Packs {
             list_packs_now(config_path.as_deref())
@@ -227,6 +265,20 @@ impl WindowState {
         } else {
             None
         };
+        let custom_theme =
+            resolve_custom_theme(shell::resolve_theme_kind(), &theme, config_path.as_deref());
+        // 取证模式直接进入 T-088 三子视图时，首帧就需要真实数据。
+        let user_words_message = None;
+        let contacts = if settings.subview == Subview::Contacts {
+            load_contacts(config_path.as_deref())
+        } else {
+            Vec::new()
+        };
+        let theme_files = if settings.subview == Subview::Themes {
+            list_theme_files(config_path.as_deref())
+        } else {
+            Vec::new()
+        };
         Self {
             settings,
             theme_kind: shell::resolve_theme_kind(),
@@ -247,16 +299,25 @@ impl WindowState {
             update_rx: None,
             update_seq: 0,
             diagnostics,
+            custom_theme,
+            user_words_message,
+            contacts,
+            theme_files,
         }
     }
 
     /// 当前配色。
     fn theme(&self) -> SettingsTheme {
         if self.theme_kind == UiThemeKind::HighContrast {
-            settings_theme_from_system_colors(shell::system_colors())
-        } else {
-            settings_theme(self.theme_kind)
+            // D-31：高对比度由系统接管，自定义主题文件不覆盖。
+            return settings_theme_from_system_colors(shell::system_colors());
         }
+        if let ThemeChoice::Custom(_) = self.settings.theme {
+            if let Some((theme, _)) = &self.custom_theme {
+                return *theme;
+            }
+        }
+        settings_theme(self.theme_kind)
     }
 }
 
@@ -532,6 +593,18 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
             on_diagnostics_click(state, &metrics, client, x, y);
             return;
         }
+        Subview::UserWords => {
+            on_user_words_click(hwnd, state, &metrics, client, x, y);
+            return;
+        }
+        Subview::Contacts => {
+            on_contacts_click(hwnd, state, &metrics, client, x, y);
+            return;
+        }
+        Subview::Themes => {
+            on_themes_click(hwnd, state, &metrics, client, x, y);
+            return;
+        }
         Subview::None => {}
     }
 
@@ -580,6 +653,21 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
                 ItemControl::OpenDiagnostics => {
                     state.diagnostics = Some(build_diagnostics(state.config_path.as_deref()));
                     state.settings.open_diagnostics();
+                    invalidate(hwnd);
+                }
+                ItemControl::OpenUserWords => {
+                    state.settings.open_user_words();
+                    state.hint = None;
+                    invalidate(hwnd);
+                }
+                ItemControl::OpenContacts => {
+                    state.contacts = load_contacts(state.config_path.as_deref());
+                    state.settings.open_contacts();
+                    invalidate(hwnd);
+                }
+                ItemControl::OpenThemes => {
+                    state.theme_files = list_theme_files(state.config_path.as_deref());
+                    state.settings.open_themes();
                     invalidate(hwnd);
                 }
                 ItemControl::OnlineUpdate => {}
@@ -1012,24 +1100,42 @@ fn open_target(state: &mut WindowState, target: OpenTarget) {
 
 /// 应用主题选择并持久化。
 fn apply_theme(state: &mut WindowState, choice: ThemeChoice) {
-    state.settings.theme = choice;
+    // 自定义主题：立即解析进 `custom_theme`（缺键回退当前深浅预设），窗口即时重绘；
+    // 候选窗与设置窗同源，TSF DLL 下次装配时按配置的值读取同一文件。
+    state.custom_theme =
+        resolve_custom_theme(state.theme_kind, &choice, state.config_path.as_deref());
+    state.settings.theme = choice.clone();
     state.hint = Some(match &state.config_path {
-        Some(path) => match config::save_theme(path, choice) {
+        Some(path) => match config::save_theme(path, choice.clone()) {
             // 主题是装配项：由 TSF DLL 在下次装配时读取（P-12）。
-            Ok(()) => format!(
-                "已保存主题：{}，重启输入法后候选窗生效",
-                theme_label(choice)
-            ),
+            Ok(()) => {
+                let base = match &choice {
+                    ThemeChoice::Custom(name) => match &state.custom_theme {
+                        Some((_, covered)) => {
+                            format!("已保存主题：自定义（{name}），应用 {covered}/15 键；重启输入法后候选窗生效")
+                        }
+                        None => format!(
+                            "已保存主题：自定义（{name}）；未找到可用主题文件，回退当前深浅预设"
+                        ),
+                    },
+                    _ => format!(
+                        "已保存主题：{}，重启输入法后候选窗生效",
+                        theme_label(&choice)
+                    ),
+                };
+                base
+            }
             Err(error) => format!("保存失败：{error}"),
         },
         None => "未找到配置目录（APPDATA 未设置），本次选择不会保留".to_owned(),
     });
 }
 
-const fn theme_label(choice: ThemeChoice) -> &'static str {
+fn theme_label(choice: &ThemeChoice) -> std::borrow::Cow<'static, str> {
     match choice {
-        ThemeChoice::Light => "浅色",
-        ThemeChoice::Dark => "深色",
+        ThemeChoice::Light => std::borrow::Cow::Borrowed("浅色"),
+        ThemeChoice::Dark => std::borrow::Cow::Borrowed("深色"),
+        ThemeChoice::Custom(name) => std::borrow::Cow::Owned(format!("自定义（{name}）")),
     }
 }
 
@@ -1042,10 +1148,10 @@ const fn mode_label(mode: ModeChoice) -> &'static str {
 
 /// 二选一控件命中后的分发：主题、默认中英模式（D-32）或在线更新开关（P-03）。
 fn apply_chip(state: &mut WindowState, chip: &Chip) {
-    match chip.value {
-        ChipValue::Theme(choice) => apply_theme(state, choice),
-        ChipValue::Mode(mode) => apply_mode(state, mode),
-        ChipValue::OnlineUpdate(on) => apply_online_update(state, on),
+    match &chip.value {
+        ChipValue::Theme(choice) => apply_theme(state, choice.clone()),
+        ChipValue::Mode(mode) => apply_mode(state, *mode),
+        ChipValue::OnlineUpdate(on) => apply_online_update(state, *on),
     }
 }
 
@@ -1218,6 +1324,704 @@ fn pick_zyct_file(hwnd: HWND) -> Option<PathBuf> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// T-088 / FR-048：用户词表、通讯录、自定义主题三子视图
+// ---------------------------------------------------------------------------
+
+/// themes 目录：`%APPDATA%\ai-zhu-ye-ime\themes`。
+fn themes_dir(config_path: Option<&std::path::Path>) -> Option<PathBuf> {
+    let data_dir = config_path?.parent()?;
+    Some(data_dir.join("themes"))
+}
+
+/// 解析自定义主题文件为设置窗配色：文件缺失/解析失败回退系统深浅预设（`None`）；
+/// 高对比度由系统接管（D-31），不在本函数处理（调用方在 `HighContrast` 时跳过）。
+fn resolve_custom_theme(
+    kind: UiThemeKind,
+    theme: &ThemeChoice,
+    config_path: Option<&std::path::Path>,
+) -> Option<(SettingsTheme, usize)> {
+    let ThemeChoice::Custom(name) = theme else {
+        return None;
+    };
+    // 主题 id 校验见 zhu_ye_core::is_safe_theme_name：配置里手写的 `../x` 之类一律
+    // 视为"无此主题"，回退系统深浅预设（防目录逃逸）。
+    if !zhu_ye_core::is_safe_theme_name(name) {
+        return None;
+    }
+    let file = zhu_ye_core::load_theme_file(&themes_dir(config_path)?.join(format!("{name}.json")))
+        .ok()?;
+    Some(settings_theme(kind).with_theme_file(&file))
+}
+
+/// 扫描 themes 目录列出 `*.json` 主题（按显示名排序）；目录不存在或不可读返回空。
+fn list_theme_files(config_path: Option<&std::path::Path>) -> Vec<ThemeInfo> {
+    let Some(dir) = themes_dir(config_path) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut infos = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let file = zhu_ye_core::load_theme_file(&path).ok();
+        let display_name = file
+            .as_ref()
+            .and_then(|theme| theme.name.clone())
+            .unwrap_or_else(|| id.clone());
+        infos.push(ThemeInfo {
+            id,
+            display_name,
+            file,
+        });
+    }
+    infos.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    infos
+}
+
+/// 装载已登记的 .vcf 路径列表（来自 `config.contact_vcards`；无配置时为空）。
+fn load_contacts(config_path: Option<&std::path::Path>) -> Vec<PathBuf> {
+    match config_path {
+        Some(path) => config::load_contact_vcards(path).0,
+        None => Vec::new(),
+    }
+}
+
+/// 追加一个 .vcf 路径（同路径不重复，按规范化路径比较）；保存前重读配置（S-8）。
+fn append_contact_vcard(
+    config_path: Option<&std::path::Path>,
+    vcard: &std::path::Path,
+) -> Result<bool, String> {
+    let Some(path) = config_path else {
+        return Err("未找到配置目录（APPDATA 未设置），无法保存".to_owned());
+    };
+    let mut vcards = config::load_contact_vcards(path).0;
+    let canonical = vcard.to_path_buf();
+    let existed = vcards.iter().any(|existing| {
+        if let (Ok(a), Ok(b)) = (existing.canonicalize(), canonical.canonicalize()) {
+            a == b
+        } else {
+            existing == &canonical
+        }
+    });
+    if existed {
+        return Ok(false);
+    }
+    vcards.push(canonical);
+    config::save_contact_vcards(path, &vcards)?;
+    Ok(true)
+}
+
+/// 弹出系统保存对话框挑导出路径（默认 `user_words_YYYYMMDD.json`，覆盖前确认）；
+/// 取消返回 `None`（调用方保持静默）。
+unsafe fn pick_user_words_save_file(hwnd: HWND) -> Option<PathBuf> {
+    let filter = to_utf16("用户词表 (*.json)\0*.json\0全部文件 (*.*)\0*.*\0");
+    let mut file_buffer = [0u16; 1024];
+    let default_name = to_utf16(&format!("user_words_{}.json", zhu_ye_core::today_compact()));
+    let copied = default_name.len().min(file_buffer.len() - 1);
+    file_buffer[..copied].copy_from_slice(&default_name[..copied]);
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: hwnd,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(file_buffer.as_mut_ptr()),
+        nMaxFile: file_buffer.len() as u32,
+        Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !GetSaveFileNameW(&mut ofn).as_bool() {
+        return None;
+    }
+    let length = file_buffer.iter().position(|unit| *unit == 0).unwrap_or(0);
+    Some(PathBuf::from(String::from_utf16_lossy(
+        &file_buffer[..length],
+    )))
+}
+
+/// 通用打开对话框挑选 `.json` / `.vcf` / `.zyct` 文件；取消返回 `None`。
+unsafe fn pick_any_file(hwnd: HWND, filter: &str) -> Option<PathBuf> {
+    let filter = to_utf16(filter);
+    let mut file_buffer = [0u16; 1024];
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: hwnd,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(file_buffer.as_mut_ptr()),
+        nMaxFile: file_buffer.len() as u32,
+        Flags: OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !GetOpenFileNameW(&mut ofn).as_bool() {
+        return None;
+    }
+    let length = file_buffer.iter().position(|unit| *unit == 0).unwrap_or(0);
+    Some(PathBuf::from(String::from_utf16_lossy(
+        &file_buffer[..length],
+    )))
+}
+
+/// 导出用户词表：保存对话框 → 序列化 v1 交换 JSON → 写入目标路径。
+///
+/// 先序列化成功再写文件（写失败提示，不影响磁盘上的词表）。
+unsafe fn export_user_words_now(hwnd: HWND, state: &mut WindowState) {
+    let Some(target) = pick_user_words_save_file(hwnd) else {
+        return; // 用户取消，不打扰。
+    };
+    let store = zhu_ye_core::UserDictStore::new(repair_user_words_path());
+    let dictionary = match store.load() {
+        Ok(dictionary) => dictionary,
+        Err(error) => {
+            state.user_words_message = Some(format!("导出失败：{error}"));
+            invalidate(hwnd);
+            return;
+        }
+    };
+    let text = match zhu_ye_core::export_user_words(&dictionary) {
+        Ok(text) => text,
+        Err(error) => {
+            state.user_words_message = Some(error);
+            invalidate(hwnd);
+            return;
+        }
+    };
+    if let Err(error) = std::fs::write(&target, text) {
+        state.user_words_message =
+            Some(format!("导出失败：无法写入 {}：{error}", target.display()));
+        invalidate(hwnd);
+        return;
+    }
+    state.user_words_message = Some(format!(
+        "已导出 {} 条到 {}",
+        dictionary.len(),
+        target.display()
+    ));
+    invalidate(hwnd);
+}
+
+/// 导入用户词表：选 JSON → 整体校验（格式/版本/逐条合法性在解析时过滤）→ 内存合并
+/// → 原子落盘。先校验后写：解析失败不动磁盘；保存失败也保持原词表。
+unsafe fn import_user_words_now(hwnd: HWND, state: &mut WindowState) {
+    let Some(source) = pick_any_file(hwnd, "用户词表 (*.json)\0*.json\0全部文件 (*.*)\0*.*\0")
+    else {
+        return; // 用户取消，不打扰。
+    };
+    let text = match std::fs::read_to_string(&source) {
+        Ok(text) => text,
+        Err(error) => {
+            state.user_words_message =
+                Some(format!("导入失败：无法读取 {}：{error}", source.display()));
+            invalidate(hwnd);
+            return;
+        }
+    };
+    let items = match zhu_ye_core::parse_exchange_file(&text) {
+        Ok(file) => file.items,
+        Err(reason) => {
+            state.user_words_message = Some(format!("导入失败：{reason}（未改动本地词表）"));
+            invalidate(hwnd);
+            return;
+        }
+    };
+    let store = zhu_ye_core::UserDictStore::new(repair_user_words_path());
+    let mut dictionary = match store.load() {
+        Ok(dictionary) => dictionary,
+        Err(error) => {
+            state.user_words_message = Some(format!("导入失败：{error}"));
+            invalidate(hwnd);
+            return;
+        }
+    };
+    let added = zhu_ye_core::merge_exchange_items(&mut dictionary, &items);
+    // 已整体校验（解析）+ 内存合并；保存是原子写（.tmp + rename），失败不动原文件。
+    match store.save(&dictionary) {
+        Ok(()) => {
+            state.user_words_message = Some(format!(
+                "导入完成：新增 {added} 条，本地用户词表共 {} 条",
+                dictionary.len()
+            ));
+        }
+        Err(error) => {
+            state.user_words_message = Some(format!("导入失败：{error}（未改动本地词表）"));
+        }
+    }
+    invalidate(hwnd);
+}
+
+/// 通讯录 .vcf 界面化导入：选文件 → 解析 → 确认 → 复制进数据目录 + 追加配置。
+///
+/// 任何失败都发生在写入前（解析失败/确认取消），不会留下半截状态；复制失败同样不
+/// 碰配置。已登记的同路径不重复追加（S-8 保存前重读）。
+unsafe fn import_vcf_now(hwnd: HWND, state: &mut WindowState) {
+    let Some(source) = pick_any_file(hwnd, "通讯录 (*.vcf)\0*.vcf\0全部文件 (*.*)\0*.*\0")
+    else {
+        return; // 用户取消，不打扰。
+    };
+    let text = match std::fs::read_to_string(&source) {
+        Ok(text) => text,
+        Err(error) => {
+            state.hint = Some(format!("导入失败：无法读取 {}：{error}", source.display()));
+            invalidate(hwnd);
+            return;
+        }
+    };
+    let contacts = match zhu_ye_core::parse_vcard(&text) {
+        Ok(contacts) => contacts,
+        Err(error) => {
+            state.hint = Some(format!("导入失败：不是有效的 vCard：{error}"));
+            invalidate(hwnd);
+            return;
+        }
+    };
+    if contacts.is_empty() {
+        state.hint = Some("导入失败：文件中没有联系人记录".to_owned());
+        invalidate(hwnd);
+        return;
+    }
+    let confirmed = registry::message_box(
+        Some(hwnd),
+        &format!(
+            "检测到 {} 条联系人，导入后将生成对应的联系人拼音候选。\n是否继续？",
+            contacts.len()
+        ),
+        "通讯录导入",
+        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+    );
+    if !confirmed {
+        return; // 用户取消，不打扰。
+    }
+    let Some(data_dir) = config::data_dir() else {
+        state.hint = Some("未找到配置目录（APPDATA 未设置），无法导入".to_owned());
+        invalidate(hwnd);
+        return;
+    };
+    let contacts_dir = data_dir.join("contacts");
+    if let Err(error) = std::fs::create_dir_all(&contacts_dir) {
+        state.hint = Some(format!("导入失败：无法创建通讯录目录：{error}"));
+        invalidate(hwnd);
+        return;
+    }
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "contacts".to_owned());
+    let extension = source
+        .extension()
+        .map(|ext| ext.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "vcf".to_owned());
+    // 同名文件冲突时追加序号，避免覆盖既有导入。
+    let mut target = contacts_dir.join(format!("{stem}.{extension}"));
+    let mut serial = 1;
+    while target.exists() {
+        target = contacts_dir.join(format!("{stem}({serial}).{extension}"));
+        serial += 1;
+    }
+    if let Err(error) = std::fs::copy(&source, &target) {
+        state.hint = Some(format!("导入失败：无法复制文件：{error}"));
+        invalidate(hwnd);
+        return;
+    }
+    match append_contact_vcard(state.config_path.as_deref(), &target) {
+        Ok(true) => {
+            state.hint = Some(format!(
+                "已导入 {} 条联系人（{}），重启输入法后生效",
+                contacts.len(),
+                target.display()
+            ));
+        }
+        Ok(false) => {
+            state.hint = Some(format!(
+                "该 .vcf 已在列表中（{}），未重复登记",
+                target.display()
+            ));
+        }
+        Err(error) => {
+            state.hint = Some(format!("已复制文件但登记失败：{error}"));
+        }
+    }
+    state.contacts = load_contacts(state.config_path.as_deref());
+    invalidate(hwnd);
+}
+
+/// 「用户词表」子视图内命中：返回 / 导出 / 导入。
+unsafe fn on_user_words_click(
+    hwnd: HWND,
+    state: &mut WindowState,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+    x: i32,
+    y: i32,
+) {
+    let layout = layout::userwords_layout(metrics, client);
+    if layout::contains(layout.back, x, y) {
+        state.settings.close_subview();
+        invalidate(hwnd);
+        return;
+    }
+    if layout::contains(layout.export, x, y) {
+        export_user_words_now(hwnd, state);
+        return;
+    }
+    if layout::contains(layout.import, x, y) {
+        import_user_words_now(hwnd, state);
+    }
+}
+
+/// 「通讯录」子视图内命中：返回 / 导入 .vcf。
+unsafe fn on_contacts_click(
+    hwnd: HWND,
+    state: &mut WindowState,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+    x: i32,
+    y: i32,
+) {
+    let layout = layout::contacts_layout(metrics, client, state.contacts.len());
+    if layout::contains(layout.back, x, y) {
+        state.settings.close_subview();
+        invalidate(hwnd);
+        return;
+    }
+    if layout::contains(layout.import, x, y) {
+        import_vcf_now(hwnd, state);
+    }
+}
+
+/// 「自定义主题」子视图内命中：返回 / 选择主题行（损坏行给出提示保持当前主题）。
+unsafe fn on_themes_click(
+    hwnd: HWND,
+    state: &mut WindowState,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+    x: i32,
+    y: i32,
+) {
+    let layout = layout::themes_layout(metrics, client, state.theme_files.len());
+    if layout::contains(layout.back, x, y) {
+        state.settings.close_subview();
+        invalidate(hwnd);
+        return;
+    }
+    for (index, row) in layout.rows.iter().enumerate() {
+        if !layout::contains(*row, x, y) {
+            continue;
+        }
+        let Some(info) = state.theme_files.get(index) else {
+            break;
+        };
+        if state.theme_kind == UiThemeKind::HighContrast {
+            state.hint =
+                Some("系统处于高对比度模式，由系统接管配色（D-31），自定义主题不生效".to_owned());
+            invalidate(hwnd);
+            return;
+        }
+        if info.file.is_none() {
+            state.hint = Some(format!(
+                "「{}」文件损坏或版本过高，无法应用（保持当前主题）",
+                info.display_name
+            ));
+            invalidate(hwnd);
+            return;
+        }
+        state.hint = None;
+        apply_theme(state, ThemeChoice::Custom(info.id.clone()));
+        invalidate(hwnd);
+        return;
+    }
+}
+
+/// 绘制「用户词表」子视图：说明、结果消息、导出/导入/返回按钮。
+unsafe fn draw_user_words(
+    hdc: HDC,
+    state: &mut WindowState,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+) {
+    let layout = layout::userwords_layout(metrics, client);
+    draw_text(
+        hdc,
+        "导出：把本地用户词表按词频导出为 JSON（zhu-ye-user-words v1 交换格式）",
+        layout.info,
+        theme.item_text,
+        state.fonts.small,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+    );
+    let second = UiRect {
+        left: layout.info.left,
+        top: layout.info.top + layout.info.height() / 3,
+        right: layout.info.right,
+        bottom: layout.info.bottom,
+    };
+    draw_text(
+        hdc,
+        "导入：先整体校验（格式/版本），合并在内存完成（同拼音同词取较大词频），通过后才原子写入",
+        second,
+        theme.secondary_text,
+        state.fonts.small,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+    );
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout.export,
+        "导出用户词表…",
+    );
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout.import,
+        "从文件导入…",
+    );
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout.back,
+        "← 返回常用设置",
+    );
+    if let Some(message) = &state.user_words_message {
+        let result_rect = UiRect {
+            left: layout.result.left + metrics.gap,
+            top: layout.result.top,
+            right: layout.result.right,
+            bottom: layout.result.bottom,
+        };
+        draw_text(
+            hdc,
+            message,
+            result_rect,
+            theme.item_text,
+            state.fonts.small,
+            DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
+        );
+    }
+}
+
+/// 绘制「通讯录」子视图：说明、已登记 .vcf 列表、导入/返回按钮。
+unsafe fn draw_contacts(
+    hdc: HDC,
+    state: &mut WindowState,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+) {
+    let layout = layout::contacts_layout(metrics, client, state.contacts.len());
+    draw_text(
+        hdc,
+        "导入 .vcf 通讯录文件，生成联系人拼音候选（TSF 下次装配时读取，需重启输入法）",
+        layout.info,
+        theme.item_text,
+        state.fonts.small,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+    );
+    let empty_note = UiRect {
+        left: layout.info.left,
+        top: layout.info.top + layout.info.height() / 3,
+        right: layout.info.right,
+        bottom: layout.info.bottom,
+    };
+    if state.contacts.is_empty() {
+        draw_text(
+            hdc,
+            "尚未登记任何 .vcf（导入后路径记录在 config.json 的 contact_vcards）",
+            empty_note,
+            theme.placeholder_text,
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    } else {
+        draw_text(
+            hdc,
+            &format!("已登记 {} 个 .vcf：", state.contacts.len()),
+            empty_note,
+            theme.secondary_text,
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        for (index, row) in layout.rows.iter().enumerate() {
+            let Some(vcard) = state.contacts.get(index) else {
+                break;
+            };
+            let rect = UiRect {
+                left: row.left + metrics.gap,
+                top: row.top,
+                right: row.right,
+                bottom: row.bottom,
+            };
+            draw_text(
+                hdc,
+                &vcard.to_string_lossy(),
+                rect,
+                theme.item_text,
+                state.fonts.small,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+        }
+        if state.contacts.len() > layout.rows.len() {
+            let overflow = UiRect {
+                left: layout.info.left,
+                top: layout
+                    .rows
+                    .last()
+                    .map(|row| row.bottom)
+                    .unwrap_or(layout.info.bottom),
+                right: layout.info.right,
+                bottom: layout.info.bottom + layout.info.height() / 3,
+            };
+            draw_text(
+                hdc,
+                &format!(
+                    "…另有 {} 个未显示",
+                    state.contacts.len() - layout.rows.len()
+                ),
+                overflow,
+                theme.secondary_text,
+                state.fonts.small,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+        }
+    }
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout.import,
+        "导入 .vcf…",
+    );
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout.back,
+        "← 返回常用设置",
+    );
+}
+
+/// 绘制「自定义主题」子视图：说明、主题文件行（选中/损坏标注）、返回按钮。
+unsafe fn draw_themes(
+    hdc: HDC,
+    state: &mut WindowState,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+) {
+    let layout = layout::themes_layout(metrics, client, state.theme_files.len());
+    draw_text(
+        hdc,
+        "主题文件位于 %APPDATA%\\ai-zhu-ye-ime\\themes\\*.json，每文件一个主题",
+        layout.info,
+        theme.item_text,
+        state.fonts.small,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+    );
+    let empty_note = UiRect {
+        left: layout.info.left,
+        top: layout.info.top + layout.info.height() / 3,
+        right: layout.info.right,
+        bottom: layout.info.bottom,
+    };
+    if state.theme_files.is_empty() {
+        draw_text(
+            hdc,
+            "no themes：把主题 JSON 放进该目录后重新进入本页（轻点“返回”再进入）",
+            empty_note,
+            theme.placeholder_text,
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    } else {
+        draw_text(
+            hdc,
+            "选择即应用并写入 config.json；缺键回退预设，候选窗重启输入法生效",
+            empty_note,
+            theme.secondary_text,
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
+    for (index, row) in layout.rows.iter().enumerate() {
+        let Some(info) = state.theme_files.get(index) else {
+            break;
+        };
+        let selected =
+            matches!(&state.settings.theme, ThemeChoice::Custom(name) if name == &info.id);
+        if selected {
+            fill_round(hdc, *row, metrics.gap / 2, theme.control_selected);
+        }
+        let name_rect = UiRect {
+            left: row.left + metrics.gap,
+            top: row.top,
+            right: row.right - metrics.pack_button_width - metrics.gap,
+            bottom: row.bottom,
+        };
+        draw_text(
+            hdc,
+            &info.display_name,
+            name_rect,
+            if selected {
+                theme.control_selected_text
+            } else {
+                theme.item_text
+            },
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        let status = if info.file.is_none() {
+            "文件损坏或版本过高"
+        } else if selected {
+            "当前"
+        } else {
+            "未应用"
+        };
+        let status_rect = UiRect {
+            left: row.right - metrics.pack_button_width - metrics.gap,
+            top: row.top,
+            right: row.right - metrics.gap,
+            bottom: row.bottom,
+        };
+        draw_text(
+            hdc,
+            status,
+            status_rect,
+            if info.file.is_none() {
+                theme.warn_text
+            } else if selected {
+                theme.control_selected_text
+            } else {
+                theme.secondary_text
+            },
+            state.fonts.small,
+            DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
+    draw_button(
+        hdc,
+        state.fonts.small,
+        theme,
+        metrics,
+        layout.back,
+        "← 返回常用设置",
+    );
+}
+
 unsafe fn client_rect(hwnd: HWND) -> Option<UiRect> {
     let mut rect = RECT::default();
     unsafe { GetClientRect(hwnd, &mut rect) }.ok()?;
@@ -1334,6 +2138,9 @@ unsafe fn draw(hdc: HDC, state: &mut WindowState, client: UiRect) {
             Subview::Repair => draw_repair(hdc, state, theme, &metrics, client),
             Subview::Update => draw_update(hdc, state, theme, &metrics, client),
             Subview::Diagnostics => draw_diagnostics(hdc, state, theme, &metrics, client),
+            Subview::UserWords => draw_user_words(hdc, state, theme, &metrics, client),
+            Subview::Contacts => draw_contacts(hdc, state, theme, &metrics, client),
+            Subview::Themes => draw_themes(hdc, state, theme, &metrics, client),
             Subview::None => draw_items(hdc, state, theme, &metrics, client),
         }
 
@@ -1399,10 +2206,11 @@ unsafe fn draw_items(
         );
 
         for chip in &row.chips {
-            let selected = match chip.value {
-                ChipValue::Theme(choice) => choice == state.settings.theme,
-                ChipValue::Mode(mode) => mode == state.settings.default_mode,
-                ChipValue::OnlineUpdate(on) => on == state.settings.online_update,
+            let selected = match &chip.value {
+                // 自定义主题不是二选一预设，两 Chip 均不选中（选中态展示在自定义主题子视图）。
+                ChipValue::Theme(choice) => *choice == state.settings.theme,
+                ChipValue::Mode(mode) => *mode == state.settings.default_mode,
+                ChipValue::OnlineUpdate(on) => *on == state.settings.online_update,
             };
             let background = if selected {
                 theme.control_selected
@@ -1942,35 +2750,70 @@ unsafe fn draw_update(
     );
 }
 
-/// 结果区的逐行内容：任务进行中 / 最近一次结果（含错误，如实展示）。
+/// 结果区的逐行内容：任务进行中 / 最近一次手动检查结果 / 启动异步检查状态文件 /
+/// 都为空时的占位文案。手动检查优先，其次展示 update_status.json（T-088 / FR-048）。
 fn update_result_lines(state: &WindowState) -> Vec<String> {
     if let Some(kind) = state.update_busy {
         return vec![kind.busy_label().to_owned()];
     }
-    let Some((kind, result)) = &state.update_result else {
-        return vec!["尚未执行检查。".to_owned()];
-    };
-    let mut lines = vec![format!("{}：", kind.done_title())];
-    match result {
-        Ok(text) => {
-            let output = updater::output_lines(text);
-            if output.is_empty() {
-                lines.push("（无输出）".to_owned());
-            } else {
-                lines.extend(output);
+    if let Some((kind, result)) = &state.update_result {
+        let mut lines = vec![format!("{}：", kind.done_title())];
+        match result {
+            Ok(text) => {
+                let output = updater::output_lines(text);
+                if output.is_empty() {
+                    lines.push("（无输出）".to_owned());
+                } else {
+                    lines.extend(output);
+                }
+            }
+            Err(text) => {
+                lines.push("更新器执行失败：".to_owned());
+                let output = updater::output_lines(text);
+                if output.is_empty() {
+                    lines.push("（无输出）".to_owned());
+                } else {
+                    lines.extend(output);
+                }
             }
         }
-        Err(text) => {
-            lines.push("更新器执行失败：".to_owned());
-            let output = updater::output_lines(text);
-            if output.is_empty() {
-                lines.push("（无输出）".to_owned());
-            } else {
-                lines.extend(output);
-            }
-        }
+        return lines;
     }
-    lines
+    if let Some(lines) = update_status_lines(state.config_path.as_deref()) {
+        return lines;
+    }
+    vec!["尚未执行检查。".to_owned()]
+}
+
+/// 读取启动异步检查的状态文件（update_status.json），生成摘要行；文件不存在或损坏
+/// 返回 `None`（调用方显示占位文案）。本函数不联网（S-4）。
+fn update_status_lines(config_path: Option<&std::path::Path>) -> Option<Vec<String>> {
+    let path = config_path
+        .and_then(|path| path.parent())
+        .map(|dir| dir.join(zhu_ye_core::UPDATE_STATUS_FILE_NAME))?;
+    let status = zhu_ye_core::read_update_status(&path).ok()??;
+    let mut lines = vec!["启动时异步检查（update_status.json）：".to_owned()];
+    if let Some(error) = &status.error {
+        lines.push(format!("检查失败：{error}"));
+    } else if status.available {
+        let packs = if status.outdated_packs.is_empty() {
+            "但清单为空".to_owned()
+        } else {
+            format!("（{}）", status.outdated_packs.join("、"))
+        };
+        lines.push(format!(
+            "发现可用更新：可更新 {} 个包{packs}，最新版本 {}",
+            status.outdated_packs.len(),
+            status.latest_version.as_deref().unwrap_or("未知")
+        ));
+    } else {
+        lines.push("未发现可用更新。".to_owned());
+    }
+    lines.push(format!(
+        "检查时间：{}",
+        zhu_ye_core::format_date(status.last_checked)
+    ));
+    Some(lines)
 }
 
 /// 不可点按钮：底色与前景都用"禁用"色，命中端不响应。

@@ -13,7 +13,7 @@
 
 use std::sync::OnceLock;
 
-use zhu_ye_core::{EMOJI_TABLE, MATH_SYMBOLS, NUMBER_SYMBOLS, PUNCT_SYMBOLS};
+use zhu_ye_core::EMOJI_TABLE;
 
 /// 面板每页列数与行数。
 pub const PANEL_COLUMNS: usize = 10;
@@ -86,16 +86,13 @@ fn emoji_entries() -> &'static [PanelEntry] {
     })
 }
 
-/// 符号全量条目：三组各 9 个，组名直接作为分组与副标签。
+/// 符号全量条目：三组各 9 个 + 扩展分类（D-33，T-088 扩充至 150-300 字符），
+/// 组名直接作为分组与副标签。
 fn symbol_entries() -> &'static [PanelEntry] {
     static ENTRIES: OnceLock<Vec<PanelEntry>> = OnceLock::new();
     ENTRIES.get_or_init(|| {
         let mut entries = Vec::new();
-        for (group, symbols) in [
-            ("序号", NUMBER_SYMBOLS.as_slice()),
-            ("数学", MATH_SYMBOLS.as_slice()),
-            ("标点", PUNCT_SYMBOLS.as_slice()),
-        ] {
+        for (group, symbols) in zhu_ye_core::all_panel_groups() {
             for symbol in symbols {
                 entries.push(PanelEntry {
                     text: symbol,
@@ -279,12 +276,18 @@ mod tests {
     }
 
     #[test]
-    fn 符号面板三组各九个() {
+    fn 符号面板按全部组展开且规模合规() {
         let entries = PanelKind::Symbol.entries();
-        assert_eq!(entries.len(), 27);
-        for group in ["序号", "数学", "标点"] {
-            let count = entries.iter().filter(|entry| entry.group == group).count();
-            assert_eq!(count, 9, "{group} 组应有 9 个符号");
+        // T-088 扩展后总规模在 150-300（D-33），v 模式三组仍各 9 个打头。
+        assert!(
+            (150..=300).contains(&entries.len()),
+            "符号大全规模 {} 应在 150-300",
+            entries.len()
+        );
+        let original: [(&str, usize); 3] = [("序号", 9), ("数学", 9), ("标点", 9)];
+        for (group, count) in original {
+            let got = entries.iter().filter(|entry| entry.group == group).count();
+            assert_eq!(got, count, "{group} 组符号数保持 {count}");
         }
         assert_eq!(entries[0].text, "①");
         assert_eq!(entries[9].text, "±");

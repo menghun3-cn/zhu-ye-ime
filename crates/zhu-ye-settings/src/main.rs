@@ -127,6 +127,15 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
             "--diag" => {
                 options.shot_diag = true;
             }
+            "--user-words" => {
+                options.shot_user_words = true;
+            }
+            "--contacts" => {
+                options.shot_contacts = true;
+            }
+            "--themes" => {
+                options.shot_themes = true;
+            }
             "--repair-registry" => return Ok(Some(Mode::RepairRegistry)),
             "--shot-panel" => {
                 let kind = match next_value(&mut args, "--shot-panel")?.as_str() {
@@ -170,10 +179,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
         options.shot_repair,
         options.shot_update,
         options.shot_diag,
+        options.shot_user_words,
+        options.shot_contacts,
+        options.shot_themes,
     ];
     if shots.iter().filter(|on| **on).count() > 1 {
         return Err(
-            "--packs / --manage / --repair / --update / --diag 子视图入口互斥，一次最多一个"
+            "--packs / --manage / --repair / --update / --diag / --user-words / --contacts / --themes 子视图入口互斥，一次最多一个"
                 .to_owned(),
         );
     }

@@ -102,6 +102,23 @@ pub fn load_online_update(path: &Path) -> (bool, Option<String>) {
     (config.online_update, diagnostic)
 }
 
+/// 读取通讯录 vCard 路径列表；缺失或损坏回退空（附件为会话期收集，不作为默认配置）。
+#[must_use]
+pub fn load_contact_vcards(path: &Path) -> (Vec<PathBuf>, Option<String>) {
+    let (config, diagnostic) = load_config(path);
+    (config.contact_vcards.clone(), diagnostic)
+}
+
+/// 只更新通讯录 vCard 路径列表并原子保存（T-088 / FR-048，S-8 同口径）。
+///
+/// 界面化导入把 .vcf 复制进数据目录后调用本函数「追加路径」：保存前重读配置，
+/// 避免覆盖更新器写入的 `last_check`；同路径不重复追加（调用方负责去重）。
+pub fn save_contact_vcards(path: &Path, vcards: &[PathBuf]) -> Result<(), String> {
+    let (mut config, _) = load_config(path);
+    config.contact_vcards = vcards.to_vec();
+    save_config(path, &config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{load_theme, save_theme};
@@ -355,5 +372,66 @@ mod tests {
             Some(1_759_420_800),
             "提交前重读，更新器写入的 last_check 必须保留（S-8）"
         );
+    }
+
+    #[test]
+    fn 只改通讯录路径集合不动其他字段() {
+        let dir = temp_dir("vcards-preserve");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "enabled_packs": ["it"],
+                "theme": "dark",
+                "default_mode": "english",
+                "last_check": 1759420800
+            }"#,
+        )
+        .unwrap();
+
+        super::save_contact_vcards(
+            &path,
+            &[
+                PathBuf::from("C:/data/contacts/a.vcf"),
+                PathBuf::from("b.vcf"),
+            ],
+        )
+        .unwrap();
+
+        let (config, diagnostic) = super::load(&path);
+        assert_eq!(diagnostic, None);
+        assert_eq!(
+            config.contact_vcards,
+            vec![
+                PathBuf::from("C:/data/contacts/a.vcf"),
+                PathBuf::from("b.vcf")
+            ],
+            "通讯录路径应被写入"
+        );
+        assert_eq!(config.enabled_packs, vec!["it"], "领域包勾选不得丢失");
+        assert_eq!(
+            config.theme,
+            zhu_ye_core::ThemeChoice::Dark,
+            "主题不得被重置"
+        );
+        assert_eq!(
+            config.last_check,
+            Some(1_759_420_800),
+            "提交前重读，更新器写入的 last_check 必须保留（S-8）"
+        );
+        // 覆盖整集合：第二次保存后读取以新集合为准。
+        super::save_contact_vcards(&path, &[PathBuf::from("c.vcf")]).unwrap();
+        assert_eq!(
+            super::load_contact_vcards(&path).0,
+            vec![PathBuf::from("c.vcf")]
+        );
+    }
+
+    #[test]
+    fn 缺失配置通讯录为空列表() {
+        let path = temp_dir("vcards-missing").join("config.json");
+        let (vcards, diagnostic) = super::load_contact_vcards(&path);
+        assert!(vcards.is_empty());
+        assert_eq!(diagnostic, None);
     }
 }

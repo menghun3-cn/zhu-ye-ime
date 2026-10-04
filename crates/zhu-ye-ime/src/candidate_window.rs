@@ -40,8 +40,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::candidate_ui::{
-    display_main_text, index_marker, theme, theme_from_system_colors, CandidateMetrics,
-    CandidateUiTheme, CandidateUiView, SystemColors, UiColor, UiRect, UiThemeKind, BASE_DPI,
+    display_main_text, index_marker, theme, theme_from_system_colors, theme_with_candidate,
+    CandidateMetrics, CandidateUiTheme, CandidateUiView, SystemColors, UiColor, UiRect,
+    UiThemeKind, BASE_DPI,
 };
 
 /// 窗口主题偏好；`Auto` 跟随系统深浅色与高对比度。
@@ -63,6 +64,8 @@ pub struct CandidateWindowOptions {
     pub dpi: Option<u32>,
     pub seconds: Option<u64>,
     pub shot_path: Option<PathBuf>,
+    /// 自定义主题文件（T-088 / FR-048）；`Some` 时叠加 `candidate` 节配色。
+    pub custom_theme: Option<zhu_ye_core::ThemeFile>,
 }
 
 /// 候选窗放置点：`anchor` 为组成区屏幕坐标左边界/底部，窗口显示在其下方。
@@ -80,6 +83,8 @@ pub struct CandidateWindow {
     state_ptr: *mut CandidateWindowState,
     /// 主题偏好；TSF 侧由 `config.json` 的 `theme` 决定（FR-041），演示工具默认 `Auto`。
     theme_pref: ThemePreference,
+    /// 自定义主题文件（T-088 / FR-048）；`Some` 时解析配色叠加 `candidate` 节。
+    custom_theme: Option<zhu_ye_core::ThemeFile>,
 }
 
 impl CandidateWindow {
@@ -99,6 +104,21 @@ impl CandidateWindow {
             hwnd: HWND::default(),
             state_ptr: std::ptr::null_mut(),
             theme_pref,
+            custom_theme: None,
+        }
+    }
+
+    /// 按自定义主题文件创建控制器（T-088 / FR-048）。
+    ///
+    /// 基础配色按 `Auto` 语义（同 T-030：默认浅色基底，高对比度仍走系统配色），
+    /// 主题文件的 `candidate` 节在解析时叠加：缺键回退基础预设。
+    #[must_use]
+    pub fn with_custom_theme(file: zhu_ye_core::ThemeFile) -> Self {
+        Self {
+            hwnd: HWND::default(),
+            state_ptr: std::ptr::null_mut(),
+            theme_pref: ThemePreference::Auto,
+            custom_theme: Some(file),
         }
     }
 
@@ -173,6 +193,7 @@ impl CandidateWindow {
                 dpi: None,
                 seconds: None,
                 shot_path: None,
+                custom_theme: self.custom_theme.clone(),
             };
             let state = Box::new(CandidateWindowState::new_with_quit(
                 view.clone(),
@@ -299,7 +320,7 @@ impl CandidateWindowState {
         let (font, font_is_stock) = create_font(metrics.font_height);
         Self {
             view,
-            theme: resolve_theme(options.theme),
+            theme: resolve_with_custom(options.theme, options.custom_theme.as_ref()),
             metrics,
             font,
             font_is_stock,
@@ -998,6 +1019,7 @@ fn build_bmp(width: i32, height: i32, pixels: &[u8]) -> Vec<u8> {
 }
 
 fn resolve_theme(pref: ThemePreference) -> CandidateUiTheme {
+    // 纯偏好解析；自定义主题文件叠加由 `resolve_with_custom` 承担。
     let high_contrast = system_high_contrast_on();
     let kind = match pref {
         ThemePreference::Auto if high_contrast => UiThemeKind::HighContrast,
@@ -1011,6 +1033,24 @@ fn resolve_theme(pref: ThemePreference) -> CandidateUiTheme {
         theme_from_system_colors(system_colors())
     } else {
         theme(kind)
+    }
+}
+
+/// 主题最终配色：先按偏好取基础主题，再叠加自定义主题文件（T-088 / FR-048）。
+///
+/// 高对比度由系统接管（D-31），激活时不叠加主题文件；规则与设置窗口一致
+/// （`SettingsTheme` 侧在高对比度时同样跳过主题文件）。
+fn resolve_with_custom(
+    pref: ThemePreference,
+    custom: Option<&zhu_ye_core::ThemeFile>,
+) -> CandidateUiTheme {
+    let base = resolve_theme(pref);
+    if system_high_contrast_on() {
+        return base; // D-31：高对比度由系统接管，主题文件不覆盖。
+    }
+    match custom {
+        Some(file) => theme_with_candidate(base, &file.candidate),
+        None => base,
     }
 }
 
@@ -1046,7 +1086,10 @@ fn system_colors() -> SystemColors {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_bmp, to_utf16_null, CandidateWindow, ThemePreference};
+    use super::{
+        build_bmp, resolve_theme, resolve_with_custom, system_high_contrast_on, to_utf16_null,
+        CandidateWindow, ThemePreference,
+    };
 
     #[test]
     fn 主题偏好由构造参数决定且默认自动() {
@@ -1062,6 +1105,49 @@ mod tests {
             CandidateWindow::with_theme(ThemePreference::Dark).theme_preference(),
             ThemePreference::Dark
         );
+    }
+
+    #[test]
+    fn 自定义主题控制器以自动为基底且叠加候选节() {
+        use zhu_ye_core::parse_theme_file;
+        let file = parse_theme_file(
+            r##"{
+                "version": 1,
+                "name": "取证主题",
+                "candidate": { "background": "#112233", "foreground": "#FFEE00" }
+            }"##,
+        )
+        .expect("示例主题应解析");
+        let window = CandidateWindow::with_custom_theme(file);
+        assert_eq!(
+            window.theme_preference(),
+            ThemePreference::Auto,
+            "自定义主题以 Auto（浅色基底 + 高对比由系统接管）语义运行"
+        );
+        // 叠加结果：出现主题色即证明文件参与解析；非高对比环境（CI/日常桌面）下
+        // 基底为浅色，背景被覆盖为 0x112233。
+        if !system_high_contrast_on() {
+            let resolved = resolve_with_custom(window.theme_pref, window.custom_theme.as_ref());
+            assert_eq!(
+                resolved.background,
+                crate::candidate_ui::UiColor(0x11_22_33)
+            );
+            assert_eq!(
+                resolved.foreground,
+                crate::candidate_ui::UiColor(0xFF_EE_00)
+            );
+            // 未写键保留浅色基底。
+            assert_eq!(
+                resolved.marker,
+                crate::candidate_ui::theme(crate::candidate_ui::UiThemeKind::Light).marker
+            );
+        }
+        // 无自定义主题时与原路径逐位一致（基础配色不变）。
+        let plain = resolve_theme(ThemePreference::Light);
+        let base = crate::candidate_ui::theme(crate::candidate_ui::UiThemeKind::Light);
+        if !system_high_contrast_on() {
+            assert_eq!(plain, base);
+        }
     }
 
     #[test]
