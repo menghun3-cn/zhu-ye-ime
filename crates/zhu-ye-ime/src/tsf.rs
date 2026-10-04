@@ -67,6 +67,10 @@ pub const CLSID_ZHU_YE_TIP: windows::core::GUID =
 /// 安装/便携包随带的 v2 词典文件名，与 `scripts/ime-identity.ps1` 保持一致。
 pub use zhu_ye_core::identity::DICTIONARY_FILE_NAME;
 
+/// 安装/便携包随带的英文词表文件名（T-085），与
+/// `scripts/ime-identity.ps1` 保持一致。
+pub use zhu_ye_core::identity::EN_WORDBOOK_FILE_NAME;
+
 /// 简体中文（zh-CN，LCID 0x0804）下的语言配置文件 GUID，
 /// 与 `scripts/ime-identity.ps1` 中的 `ProfileGuid` 保持一致。
 pub const PROFILE_GUID_ZHU_YE: windows::core::GUID =
@@ -1244,15 +1248,22 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
         debug_log(&format!("zhu-ye: pack-skipped {diagnostic}"));
     }
 
+    // 英文词表文件（T-085）：缺失/失败回退内嵌静态表，不阻断装配。
+    let en_lexicon = en_lexicon();
+
     if composite.is_empty() {
         debug_log(&format!(
             "zhu-ye: dict-fallback path={:?}",
             plan.base.clone().unwrap_or_default()
         ));
-        return match user_store {
+        let mut engine = match user_store {
             Some(store) => InputEngine::with_user_store(m1_seed_dictionary(), store),
             None => InputEngine::with_m1_seed(),
         };
+        if let Some(lexicon) = en_lexicon {
+            engine = engine.with_en_lexicon(lexicon);
+        }
+        return engine;
     }
 
     for (name, entries) in composite.describe() {
@@ -1274,6 +1285,11 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
     };
     let engine = domain_engine(engine, &plan, config.enable_domain_boost);
     let engine = contact_engine(engine, &config);
+    let engine = if let Some(lexicon) = en_lexicon {
+        engine.with_en_lexicon(lexicon)
+    } else {
+        engine
+    };
     match slang {
         Some(slang) => {
             debug_log("zhu-ye: slang-path enabled");
@@ -1447,6 +1463,16 @@ fn dictionary_module_anchor() {}
 
 /// 返回 DLL 同目录存在的 `dictionary.zyct`；便于安装器做机器级部署。
 fn installed_dictionary_path() -> Option<PathBuf> {
+    installed_module_file(DICTIONARY_FILE_NAME)
+}
+
+/// 返回 DLL 同目录存在的 `en.zyen`（T-085，安装器/便携包随带）。
+fn installed_en_wordbook_path() -> Option<PathBuf> {
+    installed_module_file(EN_WORDBOOK_FILE_NAME)
+}
+
+/// 反查本 DLL 所在目录，返回其中存在的指定文件名（机器级部署）。
+fn installed_module_file(name: &str) -> Option<PathBuf> {
     unsafe {
         let mut module = HMODULE::default();
         let address = (dictionary_module_anchor as fn()) as usize;
@@ -1466,9 +1492,35 @@ fn installed_dictionary_path() -> Option<PathBuf> {
         let module_path = String::from_utf16_lossy(&buffer[..length as usize]);
         let mut directory = PathBuf::from(module_path);
         directory.pop();
-        let candidate = directory.join(DICTIONARY_FILE_NAME);
+        let candidate = directory.join(name);
         candidate.exists().then_some(candidate)
     }
+}
+
+/// 装载英文词表（T-085）：DLL 同目录 `en.zyen` > `%APPDATA%\ai-zhu-ye-ime\en.zyen`。
+///
+/// 任一候选存在但加载/校验失败 → `debug_log` 记录并回退（引擎侧走内嵌静态表）；
+/// 都不存在 → 静默 `None`（与词典包打开失败同策略：绝不阻断输入）。
+fn en_lexicon() -> Option<zhu_ye_core::EnLexicon> {
+    let installed = installed_en_wordbook_path();
+    let appdata = appdata_root().map(|root| root.join(EN_WORDBOOK_FILE_NAME));
+    for candidate in [installed, appdata].into_iter().flatten() {
+        match zhu_ye_core::EnLexicon::open(&candidate) {
+            Ok(lexicon) => {
+                debug_log(&format!(
+                    "zhu-ye: en-wordbook-ok path={:?} entries={}",
+                    candidate,
+                    lexicon.count()
+                ));
+                return Some(lexicon);
+            }
+            Err(error) => debug_log(&format!(
+                "zhu-ye: en-wordbook-failed path={:?} error={}",
+                candidate, error
+            )),
+        }
+    }
+    None
 }
 
 /// 用户词库 JSON 路径：`%APPDATA%\ai-zhu-ye-ime\user_words.json`。

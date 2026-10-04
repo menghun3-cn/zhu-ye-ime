@@ -16,6 +16,10 @@ pub const CLSID_ZHU_YE_TIP: u128 = 0xE54D6682_8650_40E7_A9EE_6FD1137849AE;
 /// 安装/便携包随带的 v2 词典文件名，与 `scripts/ime-identity.ps1` 保持一致。
 pub const DICTIONARY_FILE_NAME: &str = "dictionary.zyct";
 
+/// 安装/便携包随带的英文词表文件名（T-085，ZYEN v1），与
+/// `scripts/ime-identity.ps1` 保持一致。
+pub const EN_WORDBOOK_FILE_NAME: &str = "en.zyen";
+
 /// 简体中文（zh-CN，LCID 0x0804）下的语言配置文件 GUID，
 /// 与 `scripts/ime-identity.ps1` 中的 `ProfileGuid` 保持一致。
 pub const PROFILE_GUID_ZHU_YE: u128 = 0x6315FE74_92C3_439B_8CDF_FDB6E43EDAF1;
@@ -56,8 +60,8 @@ pub fn guid_text(value: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        guid_text, CLSID_ZHU_YE_TIP, DICTIONARY_FILE_NAME, PROFILE_GUID_ZHU_YE,
-        TFCAT_ZHU_YE_KEYBOARD, TSF_INSTALL_DIR_RELATIVE, TSF_LANGUAGE_ID_HEX,
+        guid_text, CLSID_ZHU_YE_TIP, DICTIONARY_FILE_NAME, EN_WORDBOOK_FILE_NAME,
+        PROFILE_GUID_ZHU_YE, TFCAT_ZHU_YE_KEYBOARD, TSF_INSTALL_DIR_RELATIVE, TSF_LANGUAGE_ID_HEX,
     };
 
     #[test]
@@ -87,6 +91,7 @@ mod tests {
     #[test]
     fn 字符串常量与安装脚本值一致() {
         assert_eq!(DICTIONARY_FILE_NAME, "dictionary.zyct");
+        assert_eq!(EN_WORDBOOK_FILE_NAME, "en.zyen");
         assert_eq!(TSF_LANGUAGE_ID_HEX, "0x00000804");
         assert_eq!(TSF_INSTALL_DIR_RELATIVE, "ai-zhu-ye-ime\\tsf");
     }

@@ -322,9 +322,31 @@ pub const INITIAL_COMPLETION_CAP: usize = 32;
 /// 只在调用方确认"整串不可按拼音切分"后调用（与缩写路径同判定，见 `is_abbreviation_input`）；
 /// 候选**不参与默认排序竞争**，由调用方追加到主候选尾部（D-10），`score` 取组内负排名
 /// 仅用于保持 freq_rank 升序展示。`pinyin = None`，不进入用户词学习。
+///
+/// 本函数走第五期内嵌静态表（`en_words.rs`）；发行运行时经 `en_word_candidates_from`
+/// 走 `en.zyen` 文件词表（T-085），静态表仅为无文件回退，行为完全一致。
 #[must_use]
 pub fn en_word_candidates(input: &str, limit: usize) -> Vec<Candidate> {
     crate::en_words::en_words_with_prefix(input, limit)
+        .into_iter()
+        .map(|(word, rank)| {
+            Candidate::new(word, -(rank as i64)).with_source(CandidateSource::EnWord)
+        })
+        .collect()
+}
+
+/// 英文词候选（FR-030，场景6）：查 `en.zyen` 文件词表前缀得到英文原形候选组。
+///
+/// 语义与 `en_word_candidates` 完全一致（D-09/D-10 保持），仅数据源换为
+/// T-085 的 mmap 词表；rank 为文件内记录下标（构建期按词频排序，越小越常用）。
+#[must_use]
+pub fn en_word_candidates_from(
+    lexicon: &crate::en_lexicon::EnLexicon,
+    input: &str,
+    limit: usize,
+) -> Vec<Candidate> {
+    lexicon
+        .words_with_prefix(input, limit)
         .into_iter()
         .map(|(word, rank)| {
             Candidate::new(word, -(rank as i64)).with_source(CandidateSource::EnWord)
