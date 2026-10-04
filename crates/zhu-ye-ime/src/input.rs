@@ -108,6 +108,9 @@ pub struct InputEngine {
     contacts: Option<zhu_ye_core::ContactIndex>,
     /// 联系人提权候选条数上限（组容量，防长前缀刷屏）。
     contact_cap: usize,
+    /// 英文词表文件（T-085，`en.zyen`，mmap）；`None` = 回退第五期内嵌静态表
+    /// （`en_words.rs`，行为一致）。启动装配时由调用方挂载，加载失败不影响输入。
+    en_lexicon: Option<zhu_ye_core::en_lexicon::EnLexicon>,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -179,7 +182,21 @@ impl InputEngine {
             enable_domain_boost: true,
             contacts: None,
             contact_cap: CONTACT_CANDIDATES_CAP,
+            en_lexicon: None,
         }
+    }
+
+    /// 挂载英文词表文件（T-085，`en.zyen`）；`None`（默认）回退第五期内嵌静态表。
+    #[must_use]
+    pub fn with_en_lexicon(mut self, lexicon: zhu_ye_core::en_lexicon::EnLexicon) -> Self {
+        self.en_lexicon = Some(lexicon);
+        self
+    }
+
+    /// 当前是否挂载了文件英文词表。
+    #[must_use]
+    pub fn has_en_lexicon(&self) -> bool {
+        self.en_lexicon.is_some()
     }
 
     /// 挂载已启用领域包（场景8）：`packs` 必须已按 id **字典序**排列（D-16，
@@ -1323,7 +1340,12 @@ impl InputEngine {
             && self.composing.chars().count() >= EN_WORD_MIN_LEN
             && segment_all(&self.table, &self.composing).is_empty()
         {
-            let en = zhu_ye_core::en_word_candidates(&self.composing, EN_WORD_CAP);
+            let en = match &self.en_lexicon {
+                Some(lexicon) => {
+                    zhu_ye_core::en_word_candidates_from(lexicon, &self.composing, EN_WORD_CAP)
+                }
+                None => zhu_ye_core::en_word_candidates(&self.composing, EN_WORD_CAP),
+            };
             if !en.is_empty() {
                 let main = std::mem::take(&mut self.candidates);
                 self.candidates = append_group(main, en);

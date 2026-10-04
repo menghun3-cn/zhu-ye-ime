@@ -13,11 +13,11 @@ use zhu_ye_core::dict_format::DictHeader;
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
-    audit_coverage, build_base, build_manifest, build_pack, build_real_bigrams,
+    audit_coverage, build_base, build_en_wordbook, build_manifest, build_pack, build_real_bigrams,
     build_real_dictionary, build_slang, build_v2, dict_schema_version, generate_word_eval_set,
     load_frequency_map, load_patch_table, load_standard_readings, parse_cedict_line,
     pipeline_status, polyphone_gaps, render_eval_set, seed_bigrams, seed_entries, source_check,
-    split_pinyin_syllables, today, verify_manifest,
+    split_pinyin_syllables, today, verify_manifest, EnWordbookInputs, EnWordbookStats,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -58,6 +58,11 @@ fn run() -> Result<(), String> {
         Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
         Some("sign-manifest") => sign_manifest_command(required_path(&args, 2)?),
         Some("verify-signature") => verify_signature_command(required_path(&args, 2)?),
+        Some("en-build") => en_build_command(&args),
+        Some("en-bench") => {
+            en_bench_command(&required_path(&args, 2)?, args.get(3).map(String::as_str))
+        }
+        Some("en-inspect") => en_inspect_command(&required_path(&args, 2)?),
         _ => {
             print_usage();
             Ok(())
@@ -102,6 +107,175 @@ fn print_usage() {
     println!(
         "  verify-signature <manifest.json>  用内置/指定公钥验签（读 ZHU_YE_RELEASE_PUBLIC_KEY，M6-U）"
     );
+    println!(
+        "  en-build [--freqwords 文件] [--cedict 文件] [--capitals 文件] [--exclude 文件] [输出]  构建英文词表 en.zyen（T-085）"
+    );
+    println!("  en-bench <文件> [查询数]  英文词表加载与前缀查询性能实测（T-085，输出 指标: 行）");
+    println!("  en-inspect <文件>    打印英文词表头部元数据与内容哈希（T-085）");
+}
+
+/// 英文词表默认产物路径（T-085）。
+const DEFAULT_EN_OUTPUT: &str = "data/artifacts/en.zyen";
+/// 英文词表查询样本（覆盖常见前缀/词组/大小写/极端短前缀）。
+const EN_BENCH_PREFIXES: &[&str] = &[
+    "ap", "py", "iph", "the", "go", "mer", "good ", "API", "wor", "abr", "indi", "sci", "eng", "a",
+    "b", "c", "x", "z", "q", "macro", "in", "con",
+];
+
+/// `en-build`：消费 ECDICT 等本地数据文件构建英文词表并打印统计（T-085）。
+fn en_build_command(args: &[String]) -> Result<(), String> {
+    // 解析可选参数（--freqwords/--cedict/--capitals/--exclude 及其值、末尾输出路径）。
+    let mut freqwords: Option<PathBuf> = None;
+    let mut cedict: Option<PathBuf> = None;
+    let mut capitals: Option<PathBuf> = None;
+    let mut exclude: Option<PathBuf> = None;
+    let mut out: PathBuf = PathBuf::from(DEFAULT_EN_OUTPUT);
+    let mut i = 2;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "--freqwords" => {
+                i += 1;
+                freqwords = Some(required_path(args, i)?);
+            }
+            "--cedict" => {
+                i += 1;
+                cedict = Some(required_path(args, i)?);
+            }
+            "--capitals" => {
+                i += 1;
+                capitals = Some(required_path(args, i)?);
+            }
+            "--exclude" => {
+                i += 1;
+                exclude = Some(required_path(args, i)?);
+            }
+            _ if arg.starts_with('-') => return Err(format!("未知参数：{arg}")),
+            _ => out = PathBuf::from(arg),
+        }
+        i += 1;
+    }
+    // 默认输入（缺失时给出清晰提示；en 构建不可无 ECDICT）。
+    let cwd = std::env::current_dir().map_err(|e| format!("取工作目录失败：{e}"))?;
+    let default = |name: &str| cwd.join("data").join(name);
+    let ecdict_csv = default("cache/ecdict-full.csv");
+    let default_freqwords = default("cache/frequencywords-en.txt");
+    let default_cedict = default("cache/cedict_ts.u8");
+    let default_capitals = default("patches/en-capitals.tsv");
+    let default_exclude = default("patches/en-exclude.tsv");
+    let inputs = EnWordbookInputs {
+        ecdict_csv: &ecdict_csv,
+        freqwords: freqwords.as_deref().or_else(|| {
+            default_freqwords
+                .is_file()
+                .then_some(default_freqwords.as_path())
+        }),
+        cedict: cedict
+            .as_deref()
+            .or_else(|| default_cedict.is_file().then_some(default_cedict.as_path())),
+        capitals: capitals.as_deref().or_else(|| {
+            default_capitals
+                .is_file()
+                .then_some(default_capitals.as_path())
+        }),
+        exclude: exclude.as_deref().or_else(|| {
+            default_exclude
+                .is_file()
+                .then_some(default_exclude.as_path())
+        }),
+    };
+    if !ecdict_csv.is_file() {
+        return Err(format!(
+            "缺少 ECDICT 全量 CSV（{}），请先运行 scripts/build-en-wordbook.ps1 下载并校验",
+            ecdict_csv.display()
+        ));
+    }
+    let stats = build_en_wordbook(&inputs, &out)?;
+    print_en_stats(&stats);
+    println!("产物：{}", out.display());
+    Ok(())
+}
+
+fn print_en_stats(stats: &EnWordbookStats) {
+    println!("英文词表构建统计（T-085）：");
+    println!("  ECDICT 原始行     ：{}", stats.ecdict_rows);
+    println!("  ECDICT 清洗通过   ：{}", stats.ecdict_kept);
+    println!("  去重唯一键        ：{}", stats.unique_norms);
+    println!("  FrequencyWords 补入：{}", stats.freqwords_added);
+    println!("  CC-CEDICT 英文补入：{}", stats.cedict_added);
+    println!("  排除剔除          ：{}", stats.excluded);
+    println!("  大写补丁          ：{}", stats.capitals_patched);
+    println!("  最终词条          ：{}", stats.final_count);
+    println!("  含大写原形        ：{}", stats.capitalized_words);
+    println!("  产物字节          ：{}", stats.produced_bytes);
+}
+
+/// `en-bench`：加载全量校验计时 + 固定查询样本批量/单命中计时（T-085）。
+///
+/// 输出 `指标: key=value` 行供 `scripts/bench.ps1` 阈值验收：
+/// - `en_load_ms`：mmap 加载 + 全量校验耗时（验收 ≤50ms）
+/// - `en_query_us`：10 万次查询单命中中位数（验收 ≤0.5ms）
+fn en_bench_command(path: &Path, samples: Option<&str>) -> Result<(), String> {
+    let query_count: usize = samples.and_then(|s| s.parse().ok()).unwrap_or(100_000);
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let lexicon = zhu_ye_core::en_lexicon::EnLexicon::open(path).map_err(|e| e.to_string())?;
+    let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let count = lexicon.count();
+
+    let mut durations: Vec<u128> = Vec::with_capacity(query_count);
+    let mut checksum: u64 = 0;
+    for i in 0..query_count {
+        let prefix = EN_BENCH_PREFIXES[i % EN_BENCH_PREFIXES.len()];
+        let t = Instant::now();
+        let hits = lexicon.words_with_prefix(prefix, 6);
+        durations.push(t.elapsed().as_nanos());
+        checksum = checksum.wrapping_add(hits.len() as u64);
+        checksum = checksum.wrapping_add(hits.first().map(|(w, _)| w.len() as u64).unwrap_or(0));
+    }
+    durations.sort_unstable();
+    let median_us = if durations.is_empty() {
+        0.0
+    } else {
+        durations[durations.len() / 2] as f64 / 1000.0
+    };
+    let p99_us = durations[(durations.len() * 99) / 100] as f64 / 1000.0;
+
+    println!(
+        "英文词表加载：{} 词条，{} 字节，加载+校验 {load_ms:.2} ms",
+        count,
+        lexicon.file_size()
+    );
+    println!(
+        "前缀查询：{query_count} 次（{} 组前缀循环），单命中中位数 {median_us:.3} us，P99 {p99_us:.3} us，校验和 {checksum}",
+        EN_BENCH_PREFIXES.len()
+    );
+    println!("指标: en_load_ms={load_ms:.2}");
+    println!("指标: en_query_us={median_us:.3}");
+    println!("指标: en_query_p99_us={p99_us:.3}");
+    Ok(())
+}
+
+/// `en-inspect`：打印英文词表头部元数据与内容哈希（T-085）。
+fn en_inspect_command(path: &Path) -> Result<(), String> {
+    let lexicon = zhu_ye_core::en_lexicon::EnLexicon::open(path).map_err(|e| e.to_string())?;
+    let header = lexicon.header();
+    println!("en 词表检查（T-085）");
+    println!("  路径        ：{}", path.display());
+    println!("  文件大小    ：{} 字节", lexicon.file_size());
+    println!("  词条总数    ：{}", lexicon.count());
+    println!(
+        "  锚           ：{} 条（stride {}）",
+        header.anchor_count, header.anchor_stride
+    );
+    println!("  文本池       ：{} 字节", header.pool_len);
+    println!("  内容 SHA-256：{}", hex(&header.content_hash));
+    let sample = lexicon.words_with_prefix("th", 10);
+    println!("  样例（前缀 th，top10）：");
+    for (word, rank) in sample {
+        println!("    [{rank:>8}] {word}");
+    }
+    Ok(())
 }
 
 /// `source-check`：source_check 失败返回 Err（含逐源明细），帮助文本仍可读。

@@ -35,6 +35,11 @@ pub use m6::{
 pub mod slang;
 pub use slang::{build_slang, SlangReport};
 
+pub mod en_wordbook;
+pub use en_wordbook::{
+    build_en_wordbook, EnWordbookInputs, EnWordbookStats, ECDICT_MAX_WORD_LEN, FREQ_WORDS_TOP,
+};
+
 pub mod eval;
 pub use eval::{generate_word_eval_set, render_eval_set, EvalSample};
 

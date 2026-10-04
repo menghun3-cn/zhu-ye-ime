@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
 竹叶输入法 TSF 身份常量与安装/卸载共享工具。
@@ -9,7 +9,9 @@
 版本化 DLL 升级所需的 InProcServer32 读写与 MoveFileEx 延迟清理工具。
 
 .NOTES
-常量必须与 crates/zhu-ye-ime/src/tsf.rs 中 CLSID_ZHU_YE_TIP、PROFILE_GUID_ZHU_YE 保持一致。
+常量必须与 crates/zhu-ye-ime/src/tsf.rs 中 CLSID_ZHU_YE_TIP、PROFILE_GUID_ZHU_YE 保持一致；
+DictionaryFileName / EnWordbookFileName 与 crates/zhu-ye-core/src/identity.rs 的
+DICTIONARY_FILE_NAME / EN_WORDBOOK_FILE_NAME 双份维护（D-42 / T-085）。
 本文件只读共享，dot-source 加载本身不含任何副作用。
 #>
 Set-StrictMode -Version Latest
@@ -22,6 +24,7 @@ $script:TsfIdentity = [ordered]@{
     LanguageIdHex          = '0x00000804'
     DllName                = 'zhu-ye-ime.dll'
     DictionaryFileName     = 'dictionary.zyct'
+    EnWordbookFileName     = 'en.zyen'
 }
 
 function Get-TsfInstallDir {
@@ -30,6 +33,10 @@ function Get-TsfInstallDir {
 
 function Get-TsfDictionaryPath {
     return (Join-Path (Get-TsfInstallDir) $script:TsfIdentity['DictionaryFileName'])
+}
+
+function Get-TsfEnWordbookPath {
+    return (Join-Path (Get-TsfInstallDir) $script:TsfIdentity['EnWordbookFileName'])
 }
 
 function Get-TsfTipRegistryPath {
