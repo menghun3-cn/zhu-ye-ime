@@ -45,7 +45,7 @@ disable-model-invocation: true
 | `TAG_MODE` | `local` | `local`：合并后由技能本地打 tag；`ci`：合并后由 CI 打 tag |
 | `DRY_RUN` | `false` | 传 `--dry-run` 时置为 true，只读执行 |
 
-> 本仓库约定：`develop`（集成）→ `release/vX.Y.Z` → `main`（生产）→ tag `vX.Y.Z`；发布后 `main` 同步回 `develop`，详见 AGENTS.md。
+> 本仓库约定：工作分支 `<type>/T-xxx-<描述>` → PR 合入 `develop`（集成）→ `release/vX.Y.Z` → PR 合入 `main`（生产）→ tag `vX.Y.Z`；发布后 `main` 同步回 `develop`，详见 AGENTS.md 5.2 与第 6 节（T-047）。本技能只负责 `develop` 之后的发布段；发布前确认待发布改动均已经工作分支 PR 合入 `develop`。
 
 ## 调用方式
 

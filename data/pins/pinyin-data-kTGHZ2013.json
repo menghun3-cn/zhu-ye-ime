@@ -1,0 +1,14 @@
+{
+  "id": "pinyin-data-kTGHZ2013",
+  "name": "Unihan kTGHZ2013 单字拼音（《通用规范汉字字典》）",
+  "role": "pinyin-annotation",
+  "kind": "url",
+  "url": "https://raw.githubusercontent.com/mozillazg/pinyin-data/master/kTGHZ2013.txt",
+  "cache_file": "kTGHZ2013.txt",
+  "license": "MIT（仓库 mozillazg/pinyin-data）；数据源自 Unicode Unihan kTGHZ2013（Unicode 许可）",
+  "license_note": "每行 `U+XXXX: 拼音1,拼音2  # 字`；覆盖通用规范汉字表 8,105 字，用作领域包/网络语包单字注音底表（M6-P 起）",
+  "sha256": "83BE5ECDFE0B8FCC1202AE45882A2F983C013DB87BA68369D94A4DAD775382BB",
+  "size": 166509,
+  "note": "注音策略：词级优先查 CC-CEDICT，未命中按单字 kTGHZ2013 组合并校验标准音节（M6-P build-pack/build-slang 使用）",
+  "fetched_at": "2026-09-28"
+}

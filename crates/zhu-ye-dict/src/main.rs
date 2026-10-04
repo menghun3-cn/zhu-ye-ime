@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use zhu_ye_core::bigram::BigramModel;
 use zhu_ye_core::dict::Dictionary;
@@ -13,8 +13,12 @@ use zhu_ye_core::dict_format::DictHeader;
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
-    build_real_bigrams, build_real_dictionary, build_v2, dict_schema_version, pipeline_status,
-    seed_bigrams, seed_entries,
+    audit_coverage, build_base, build_en_wordbook, build_manifest, build_pack, build_real_bigrams,
+    build_real_dictionary, build_slang, build_v2, clean_social, dict_schema_version,
+    generate_word_eval_set, load_frequency_map, load_patch_table, load_standard_readings,
+    parse_cedict_line, pipeline_status, polyphone_gaps, render_eval_set, seed_bigrams,
+    seed_entries, source_check, split_pinyin_syllables, today, verify_manifest, EnWordbookInputs,
+    EnWordbookStats,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -42,8 +46,26 @@ fn run() -> Result<(), String> {
     match args.get(1).map(String::as_str) {
         Some("build") => build_command(args.get(2).map(PathBuf::from)),
         Some("import") => import_command(&args),
+        Some("audit-polyphone") => audit_polyphone_command(&args),
+        Some("eval-set") => eval_set_command(&args),
         Some("inspect") => inspect_command(required_path(&args, 2)?),
         Some("verify") => verify_command(required_path(&args, 2)?),
+        Some("source-check") => source_check_command(),
+        Some("build-pack") => build_pack_command(args.get(2).map(String::as_str)),
+        Some("build-base") => build_base_command(&args),
+        Some("audit-coverage") => audit_coverage_command(&args),
+        Some("build-slang") => build_slang_command(),
+        Some("build-manifest") => build_manifest_command(&args),
+        Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
+        Some("sign-manifest") => sign_manifest_command(required_path(&args, 2)?),
+        Some("verify-signature") => verify_signature_command(required_path(&args, 2)?),
+        Some("en-build") => en_build_command(&args),
+        Some("en-bench") => {
+            en_bench_command(&required_path(&args, 2)?, args.get(3).map(String::as_str))
+        }
+        Some("en-inspect") => en_inspect_command(&required_path(&args, 2)?),
+        Some("mixed-bench") => mixed_bench_command(args.get(2).map(String::as_str)),
+        Some("social-clean") => social_clean_command(),
         _ => {
             print_usage();
             Ok(())
@@ -55,10 +77,603 @@ fn print_usage() {
     println!("zhu-ye-dict 命令：");
     println!("  build [输出路径]      构建自建演示种子词典（默认 {DEFAULT_OUTPUT}）");
     println!(
-        "  import <CC-CEDICT> <词频> [输出路径] [上限] [--bigram 语料]  导入真实数据构建词典（默认 {DEFAULT_REAL_OUTPUT}）"
+        "  import <CC-CEDICT> <词频> [输出路径] [上限] [--bigram 语料] [--polyphone 补丁表]  导入真实数据构建词典（默认 {DEFAULT_REAL_OUTPUT}）"
     );
     println!("  inspect <文件>        打印词典头部元数据与内容哈希");
     println!("  verify <文件>         完整加载校验并核对种子词条/bigram/翻译");
+    println!("  source-check          核对 data/pins 全部源的缓存哈希（M6）");
+    println!(
+        "  build-pack <it|med>  构建领域词包（THUOCL + 词级/单字级注音，输出 data/artifacts/<id>.zyct）（M6）"
+    );
+    println!(
+        "  build-base [--min-score N]  构建基础包（xdhyc 骨架 + wordfreq 词频 + jieba 扩充，N 默认 2000）（M6）"
+    );
+    println!(
+        "  audit-coverage [--sample N] [--base 文件]  常用词出候选率与首候选正确率抽检（S-1，N 默认 5000）（M6）"
+    );
+    println!(
+        "  audit-polyphone <CC-CEDICT> <kTGHZ2013> [--freq 文件] [--min-freq N]  多音缺读审计（T-056）"
+    );
+    println!(
+        "  eval-set <CC-CEDICT> <词频> <输出.tsv> [--top N]  生成命中率评测词样本（T-057，N 默认 2000）"
+    );
+    println!(
+        "  build-slang           构建网络语包（种子表 + 把关抽查，输出 slang.zyct 与 slang.gate.json）（M6）"
+    );
+    println!(
+        "  build-manifest [目录] [--version V] [--min-engine V]  扫描 *.zyct 生成 manifest.json（M6）"
+    );
+    println!("  verify-manifest <manifest.json>  逐包复核内容哈希与大小（M6）");
+    println!(
+        "  sign-manifest <manifest.json>  用发布私钥签名（读 ZHU_YE_RELEASE_SECRET_KEY，M6-U）"
+    );
+    println!(
+        "  verify-signature <manifest.json>  用内置/指定公钥验签（读 ZHU_YE_RELEASE_PUBLIC_KEY，M6-U）"
+    );
+    println!(
+        "  en-build [--freqwords 文件] [--cedict 文件] [--capitals 文件] [--exclude 文件] [输出]  构建英文词表 en.zyen（T-085）"
+    );
+    println!("  en-bench <文件> [查询数]  英文词表加载与前缀查询性能实测（T-085，输出 指标: 行）");
+    println!("  en-inspect <文件>    打印英文词表头部元数据与内容哈希（T-085）");
+    println!("  mixed-bench [次数]  中英混合串解码性能实测（T-086，输出 指标: 行，验收 ≤1ms/次）");
+    println!(
+        "  social-clean        网络语扩充清洗：social 高频子集 1 万 → data/slang/social-words.tsv（T-087）"
+    );
+}
+
+/// 英文词表默认产物路径（T-085）。
+const DEFAULT_EN_OUTPUT: &str = "data/artifacts/en.zyen";
+/// 英文词表查询样本（覆盖常见前缀/词组/大小写/极端短前缀）。
+const EN_BENCH_PREFIXES: &[&str] = &[
+    "ap", "py", "iph", "the", "go", "mer", "good ", "API", "wor", "abr", "indi", "sci", "eng", "a",
+    "b", "c", "x", "z", "q", "macro", "in", "con",
+];
+
+/// `en-build`：消费 ECDICT 等本地数据文件构建英文词表并打印统计（T-085）。
+fn en_build_command(args: &[String]) -> Result<(), String> {
+    // 解析可选参数（--freqwords/--cedict/--capitals/--exclude 及其值、末尾输出路径）。
+    let mut freqwords: Option<PathBuf> = None;
+    let mut cedict: Option<PathBuf> = None;
+    let mut capitals: Option<PathBuf> = None;
+    let mut exclude: Option<PathBuf> = None;
+    let mut out: PathBuf = PathBuf::from(DEFAULT_EN_OUTPUT);
+    let mut i = 2;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "--freqwords" => {
+                i += 1;
+                freqwords = Some(required_path(args, i)?);
+            }
+            "--cedict" => {
+                i += 1;
+                cedict = Some(required_path(args, i)?);
+            }
+            "--capitals" => {
+                i += 1;
+                capitals = Some(required_path(args, i)?);
+            }
+            "--exclude" => {
+                i += 1;
+                exclude = Some(required_path(args, i)?);
+            }
+            _ if arg.starts_with('-') => return Err(format!("未知参数：{arg}")),
+            _ => out = PathBuf::from(arg),
+        }
+        i += 1;
+    }
+    // 默认输入（缺失时给出清晰提示；en 构建不可无 ECDICT）。
+    let cwd = std::env::current_dir().map_err(|e| format!("取工作目录失败：{e}"))?;
+    let default = |name: &str| cwd.join("data").join(name);
+    let ecdict_csv = default("cache/ecdict-full.csv");
+    let default_freqwords = default("cache/frequencywords-en.txt");
+    let default_cedict = default("cache/cedict_ts.u8");
+    let default_capitals = default("patches/en-capitals.tsv");
+    let default_exclude = default("patches/en-exclude.tsv");
+    let inputs = EnWordbookInputs {
+        ecdict_csv: &ecdict_csv,
+        freqwords: freqwords.as_deref().or_else(|| {
+            default_freqwords
+                .is_file()
+                .then_some(default_freqwords.as_path())
+        }),
+        cedict: cedict
+            .as_deref()
+            .or_else(|| default_cedict.is_file().then_some(default_cedict.as_path())),
+        capitals: capitals.as_deref().or_else(|| {
+            default_capitals
+                .is_file()
+                .then_some(default_capitals.as_path())
+        }),
+        exclude: exclude.as_deref().or_else(|| {
+            default_exclude
+                .is_file()
+                .then_some(default_exclude.as_path())
+        }),
+    };
+    if !ecdict_csv.is_file() {
+        return Err(format!(
+            "缺少 ECDICT 全量 CSV（{}），请先运行 scripts/build-en-wordbook.ps1 下载并校验",
+            ecdict_csv.display()
+        ));
+    }
+    let stats = build_en_wordbook(&inputs, &out)?;
+    print_en_stats(&stats);
+    println!("产物：{}", out.display());
+    Ok(())
+}
+
+fn print_en_stats(stats: &EnWordbookStats) {
+    println!("英文词表构建统计（T-085）：");
+    println!("  ECDICT 原始行     ：{}", stats.ecdict_rows);
+    println!("  ECDICT 清洗通过   ：{}", stats.ecdict_kept);
+    println!("  去重唯一键        ：{}", stats.unique_norms);
+    println!("  FrequencyWords 补入：{}", stats.freqwords_added);
+    println!("  CC-CEDICT 英文补入：{}", stats.cedict_added);
+    println!("  排除剔除          ：{}", stats.excluded);
+    println!("  大写补丁          ：{}", stats.capitals_patched);
+    println!("  最终词条          ：{}", stats.final_count);
+    println!("  含大写原形        ：{}", stats.capitalized_words);
+    println!("  产物字节          ：{}", stats.produced_bytes);
+}
+
+/// `en-bench`：加载全量校验计时 + 固定查询样本批量/单命中计时（T-085）。
+///
+/// 输出 `指标: key=value` 行供 `scripts/bench.ps1` 阈值验收：
+/// - `en_load_ms`：mmap 加载 + 全量校验耗时（验收 ≤50ms）
+/// - `en_query_us`：10 万次查询单命中中位数（验收 ≤0.5ms）
+fn en_bench_command(path: &Path, samples: Option<&str>) -> Result<(), String> {
+    let query_count: usize = samples.and_then(|s| s.parse().ok()).unwrap_or(100_000);
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let lexicon = zhu_ye_core::en_lexicon::EnLexicon::open(path).map_err(|e| e.to_string())?;
+    let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let count = lexicon.count();
+
+    let mut durations: Vec<u128> = Vec::with_capacity(query_count);
+    let mut checksum: u64 = 0;
+    for i in 0..query_count {
+        let prefix = EN_BENCH_PREFIXES[i % EN_BENCH_PREFIXES.len()];
+        let t = Instant::now();
+        let hits = lexicon.words_with_prefix(prefix, 6);
+        durations.push(t.elapsed().as_nanos());
+        checksum = checksum.wrapping_add(hits.len() as u64);
+        checksum = checksum.wrapping_add(hits.first().map(|(w, _)| w.len() as u64).unwrap_or(0));
+    }
+    durations.sort_unstable();
+    let median_us = if durations.is_empty() {
+        0.0
+    } else {
+        durations[durations.len() / 2] as f64 / 1000.0
+    };
+    let p99_us = durations[(durations.len() * 99) / 100] as f64 / 1000.0;
+
+    println!(
+        "英文词表加载：{} 词条，{} 字节，加载+校验 {load_ms:.2} ms",
+        count,
+        lexicon.file_size()
+    );
+    println!(
+        "前缀查询：{query_count} 次（{} 组前缀循环），单命中中位数 {median_us:.3} us，P99 {p99_us:.3} us，校验和 {checksum}",
+        EN_BENCH_PREFIXES.len()
+    );
+    println!("指标: en_load_ms={load_ms:.2}");
+    println!("指标: en_query_us={median_us:.3}");
+    println!("指标: en_query_p99_us={p99_us:.3}");
+    Ok(())
+}
+
+/// 混合串解码样本（T-086）：覆盖 触发（英文词+拼音后缀/大写缩写/中文段/数字夹层）
+/// 与 不触发（纯拼音/纯缩写/纯英文/无前缀乱串）两类，逐条计入计时。
+const MIXED_BENCH_SAMPLES: &[&str] = &[
+    "pythondaima",
+    "APIjiekou",
+    "iphonejiage",
+    "Webkaifa",
+    "pythondaima123",
+    "nihaoAPI",
+    "pythonku",
+    "diamant", // 非英文词前缀乱串，字面回退
+    "jisuanji",
+    "diannao",
+    "shouji",
+    "zhongwen",
+    "xuexi",
+    "howareyou", // 纯英文：is_mixed 快速为 false
+    "yyds",
+    "nihao",
+    "xie",
+    "qwertyu",
+    "abcdefghijkl",
+    "qqwe",
+    "zzzz",
+    "aaaa",
+];
+
+/// `mixed-bench`：固定样本循环计时（T-086，验收标准 §14.2"混合串解码 ≤1ms"回填）。
+///
+/// 热路径口径：`is_mixed_input` 判定 + 触发时 `mixed_candidates` 完整解码
+/// （静态英文表 + 无词典，与验收环境一致、可复现）。
+fn mixed_bench_command(samples: Option<&str>) -> Result<(), String> {
+    let iterations: usize = samples.and_then(|s| s.parse().ok()).unwrap_or(100_000);
+    use std::time::Instant;
+    let table = zhu_ye_core::pinyin::SyllableTable::standard();
+    // 预热一轮样本（内存分配/静态表常量首次访问不计入计时）。
+    for text in MIXED_BENCH_SAMPLES {
+        if zhu_ye_core::is_mixed_input(&table, text) {
+            let _ = zhu_ye_core::mixed_candidates(&table, None, None, text);
+        }
+    }
+    let mut durations: Vec<u128> = Vec::with_capacity(iterations);
+    let mut checksum: u64 = 0;
+    let mut triggered = 0u64;
+    for i in 0..iterations {
+        let text = MIXED_BENCH_SAMPLES[i % MIXED_BENCH_SAMPLES.len()];
+        let t = Instant::now();
+        if zhu_ye_core::is_mixed_input(&table, text) {
+            triggered += 1;
+            let cands = zhu_ye_core::mixed_candidates(&table, None, None, text);
+            checksum = checksum.wrapping_add(cands.len() as u64);
+        } else {
+            checksum = checksum.wrapping_add(text.len() as u64);
+        }
+        durations.push(t.elapsed().as_nanos());
+    }
+    durations.sort_unstable();
+    let median_us = if durations.is_empty() {
+        0.0
+    } else {
+        durations[durations.len() / 2] as f64 / 1000.0
+    };
+    let p99_us = durations[(durations.len() * 99) / 100] as f64 / 1000.0;
+    let max_us = durations.last().map(|d| *d as f64 / 1000.0).unwrap_or(0.0);
+    println!(
+        "混合串解码：{iterations} 次（{} 组样本循环，触发 {triggered}），单次中位数 {median_us:.3} us，P99 {p99_us:.3} us，最大 {max_us:.3} us，校验和 {checksum}",
+        MIXED_BENCH_SAMPLES.len()
+    );
+    println!("指标: mixed_median_us={median_us:.3}");
+    println!("指标: mixed_p99_us={p99_us:.3}");
+    println!("指标: mixed_max_us={max_us:.3}");
+    Ok(())
+}
+
+/// `social-clean`：网络语扩充清洗（T-087）——先核对数据源 pin，再清洗并把高频
+/// 子集写入 `data/slang/social-words.tsv`（提交进仓库，供 build-slang 合并入包）。
+fn social_clean_command() -> Result<(), String> {
+    source_check(Path::new("."))?;
+    let report = clean_social(Path::new("."))?;
+    println!(
+        "网络语清洗（social-media-chinese-words）：输入 {} 行，形状过滤 {}，把关拦截 {}，种子重复 {}，同形去重 {}，输出 {} 条",
+        report.input_rows,
+        report.shape_rejected,
+        report.gate_blocked,
+        report.seed_duplicates,
+        report.deduplicated,
+        report.output_rows
+    );
+    println!(
+        "产物: data/slang/social-words.tsv（SHA-256 {}）",
+        report.output_sha256
+    );
+    println!("缓存 SHA-256: {}", report.cache_sha256);
+    Ok(())
+}
+
+/// `en-inspect`：打印英文词表头部元数据与内容哈希（T-085）。
+fn en_inspect_command(path: &Path) -> Result<(), String> {
+    let lexicon = zhu_ye_core::en_lexicon::EnLexicon::open(path).map_err(|e| e.to_string())?;
+    let header = lexicon.header();
+    println!("en 词表检查（T-085）");
+    println!("  路径        ：{}", path.display());
+    println!("  文件大小    ：{} 字节", lexicon.file_size());
+    println!("  词条总数    ：{}", lexicon.count());
+    println!(
+        "  锚           ：{} 条（stride {}）",
+        header.anchor_count, header.anchor_stride
+    );
+    println!("  文本池       ：{} 字节", header.pool_len);
+    println!("  内容 SHA-256：{}", hex(&header.content_hash));
+    let sample = lexicon.words_with_prefix("th", 10);
+    println!("  样例（前缀 th，top10）：");
+    for (word, rank) in sample {
+        println!("    [{rank:>8}] {word}");
+    }
+    Ok(())
+}
+
+/// `source-check`：source_check 失败返回 Err（含逐源明细），帮助文本仍可读。
+fn source_check_command() -> Result<(), String> {
+    source_check(Path::new(".")).map(|stats| {
+        println!(
+            "核对完成：{} 个源，锁定一致 {}，未锁定 {}",
+            stats.checked, stats.locked_ok, stats.unlocked
+        );
+    })
+}
+
+/// `build-pack <it|med>`：构建领域词包并打印内容哈希。
+fn build_pack_command(pack_id: Option<&str>) -> Result<(), String> {
+    let pack_id = pack_id.ok_or_else(|| "缺少包 id（支持：it / med）".to_owned())?;
+    let stats = build_pack(pack_id, Path::new("."))?;
+    println!("内容 SHA-256: {}", stats.sha256);
+    Ok(())
+}
+
+/// `build-slang`：把关抽查通过后构建网络语包并打印把关摘要。
+fn build_slang_command() -> Result<(), String> {
+    let report = build_slang(Path::new("."))?;
+    let audit = &report.audit;
+    println!(
+        "把关表 {}：负例 {}/{} 拦截（漏放 0），正例误杀 {}/{}（{:.1}%）",
+        report.blocklist_version,
+        audit.negative_blocked,
+        audit.negative_total,
+        audit.positive_killed.len(),
+        audit.positive_total,
+        audit.false_kill_rate * 100.0
+    );
+    for killed in &audit.positive_killed {
+        println!(
+            "  误杀：{}（{}：{}）",
+            killed.text, killed.category, killed.pattern
+        );
+    }
+    println!(
+        "网络语包（slang.zyct）构建完成：种子 {} 行 + social 扩充 {} 行，纯中文词 {}，缩写 {}，把关拦截 {}，排除 {}，词条 {}，大小 {} 字节",
+        report.seed_rows,
+        report.social_rows,
+        report.word_entries,
+        report.abbreviation_entries,
+        report.gate_blocked.len(),
+        report.excluded.len(),
+        report.entry_count,
+        report.file_size
+    );
+    for item in report.gate_blocked.iter().chain(&report.excluded) {
+        println!("  排除：{} [{}]（{}）", item.word, item.key, item.reason);
+    }
+    println!("内容 SHA-256: {}", report.sha256);
+    Ok(())
+}
+
+/// `build-base [--min-score N]`：构建基础包（骨架 + 词频 + 扩充）。
+fn build_base_command(args: &[String]) -> Result<(), String> {
+    let mut min_score = 2000u32;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--min-score" => {
+                index += 1;
+                min_score = args
+                    .get(index)
+                    .ok_or_else(|| "--min-score 缺少数值".to_owned())?
+                    .parse::<u32>()
+                    .map_err(|error| format!("--min-score 解析失败: {error}"))?;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                return Err(format!("多余参数：{}", args[index]));
+            }
+        }
+        index += 1;
+    }
+    build_base(Path::new("."), min_score).map(|_| ())
+}
+
+/// `audit-coverage [--sample N] [--base 文件]`：常用词覆盖与首候选抽检（S-1）。
+///
+/// 门槛与验收标准 FR-018 一致：出候选率 ≥98%、首候选正确率 ≥90%；
+/// 任一不达标时以退出码 1 结束，使该命令可作为调参迭代的门禁。
+fn audit_coverage_command(args: &[String]) -> Result<(), String> {
+    let mut sample = 5000usize;
+    let mut base = PathBuf::from("data/artifacts/base.zyct");
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--sample" => {
+                index += 1;
+                sample = args
+                    .get(index)
+                    .ok_or_else(|| "--sample 缺少数值".to_owned())?
+                    .parse::<usize>()
+                    .map_err(|error| format!("--sample 解析失败: {error}"))?;
+            }
+            "--base" => {
+                index += 1;
+                base = PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| "--base 缺少路径".to_owned())?,
+                );
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                return Err(format!("多余参数：{}", args[index]));
+            }
+        }
+        index += 1;
+    }
+
+    let report = audit_coverage(Path::new("."), &base, sample)?;
+    println!("抽检样本: {} 词（骨架前 {} 条）", report.sampled, sample);
+    println!(
+        "出候选率: {}/{} = {:.2}%（门槛 ≥98%）",
+        report.with_candidates, report.sampled, report.coverage_pct
+    );
+    println!(
+        "首候选=目标词: {}/{} = {:.2}%（同音冲突下有天花板，参考值）",
+        report.first_hit, report.sampled, report.first_hit_pct
+    );
+    println!(
+        "  样本含 {} 个不同拼音 → 该口径理论上限 {:.2}%",
+        report.distinct_pinyins,
+        report.distinct_pinyins as f64 / report.sampled.max(1) as f64 * 100.0
+    );
+    println!(
+        "首候选=组内最常用词: {}/{} = {:.2}%（门槛 ≥90%，排序质量口径）",
+        report.group_winner_hit, report.sampled, report.group_winner_pct
+    );
+    if !report.misses.is_empty() {
+        println!(
+            "未出候选（前 {} 条）: {}",
+            report.misses.len(),
+            report.misses.join("、")
+        );
+    }
+    if !report.first_misses.is_empty() {
+        println!("首候选非目标（前 {} 条）:", report.first_misses.len());
+        for (target, actual) in &report.first_misses {
+            println!("  {target} -> {actual}");
+        }
+    }
+
+    // 判定：覆盖 ≥98% 且 组内最常用词居首 ≥90%（排除同音冲突的天花板口径）。
+    let coverage_ok = report.coverage_pct >= 98.0;
+    let first_ok = report.group_winner_pct >= 90.0;
+    if coverage_ok && first_ok {
+        println!("S-1 抽检通过。");
+        Ok(())
+    } else {
+        Err(format!(
+            "S-1 抽检未达标：出候选率 {:.2}%（{}），组内最常用词居首率 {:.2}%（{}）",
+            report.coverage_pct,
+            if coverage_ok { "达标" } else { "不达标" },
+            report.group_winner_pct,
+            if first_ok { "达标" } else { "不达标" }
+        ))
+    }
+}
+
+/// `build-manifest [目录] [--version V] [--min-engine V]`：
+/// 扫描目录内 `*.zyct` 生成 `manifest.json`（未签名，签名在 M6-U）。
+fn build_manifest_command(args: &[String]) -> Result<(), String> {
+    let mut dir = PathBuf::from("data/artifacts");
+    let mut version = None;
+    let mut min_engine_version = None;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--version" => {
+                index += 1;
+                version = Some(
+                    args.get(index)
+                        .ok_or_else(|| "--version 缺少版本号".to_owned())?,
+                );
+            }
+            "--min-engine" => {
+                index += 1;
+                min_engine_version = Some(
+                    args.get(index)
+                        .ok_or_else(|| "--min-engine 缺少版本号".to_owned())?,
+                );
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                dir = PathBuf::from(&args[index]);
+            }
+        }
+        index += 1;
+    }
+    let version = version.cloned().unwrap_or_else(today);
+    let min_engine = min_engine_version
+        .cloned()
+        .unwrap_or_else(|| "0.1.0".to_owned());
+    let manifest = build_manifest(&dir, &version, &min_engine)?;
+    let output = dir.join("manifest.json");
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("序列化 manifest 失败: {error}"))?;
+    std::fs::write(&output, json)
+        .map_err(|error| format!("写入 manifest 失败（{}）: {error}", output.display()))?;
+    println!("已写入: {}", output.display());
+    Ok(())
+}
+
+/// `verify-manifest <文件>`：逐包复核内容哈希与大小。
+fn verify_manifest_command(path: PathBuf) -> Result<(), String> {
+    verify_manifest(&path).map(|_| ())
+}
+
+/// `sign-manifest <文件>`（M6-U）：用发布私钥对 manifest 签名并就地写回。
+///
+/// 私钥从环境变量 `ZHU_YE_RELEASE_SECRET_KEY` 读取（32 字节十六进制），
+/// **绝不写入仓库、日志或命令行参数**——参数会留在进程列表与 shell 历史里。
+fn sign_manifest_command(path: PathBuf) -> Result<(), String> {
+    let secret_hex = std::env::var("ZHU_YE_RELEASE_SECRET_KEY").map_err(|_| {
+        "未设置 ZHU_YE_RELEASE_SECRET_KEY（32 字节十六进制私钥）；\
+         私钥只应存在于发布环境，不得写入仓库"
+            .to_owned()
+    })?;
+    let secret_bytes = decode_hex(&secret_hex)?;
+    let secret: [u8; 32] = secret_bytes.as_slice().try_into().map_err(|_| {
+        format!(
+            "私钥长度应为 32 字节（64 个十六进制字符），实际 {} 字节",
+            secret_bytes.len()
+        )
+    })?;
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("读取 manifest 失败（{}）: {error}", path.display()))?;
+    let manifest = zhu_ye_core::parse_manifest(&text).map_err(|error| error.to_string())?;
+    let signed =
+        zhu_ye_core::sign_manifest(&manifest, &secret).map_err(|error| error.to_string())?;
+
+    let json = serde_json::to_string_pretty(&signed)
+        .map_err(|error| format!("序列化签名 manifest 失败: {error}"))?;
+    std::fs::write(&path, json)
+        .map_err(|error| format!("写入 manifest 失败（{}）: {error}", path.display()))?;
+
+    let signature = signed
+        .signature
+        .as_ref()
+        .ok_or_else(|| "签名后 manifest 缺少签名块".to_owned())?;
+    println!("已签名: {}", path.display());
+    println!("  算法: {}", signature.algorithm);
+    println!("  公钥: {}", signature.public_key);
+    println!("  请把该公钥配置到构建环境 ZHU_YE_RELEASE_PUBLIC_KEY，使客户端能验签");
+    Ok(())
+}
+
+/// `verify-signature <文件>`（M6-U）：用指定或内置公钥验签。
+fn verify_signature_command(path: PathBuf) -> Result<(), String> {
+    let key_hex = std::env::var("ZHU_YE_RELEASE_PUBLIC_KEY")
+        .map_err(|_| "未设置 ZHU_YE_RELEASE_PUBLIC_KEY（32 字节十六进制公钥）".to_owned())?;
+    let key = zhu_ye_core::parse_public_key(&key_hex).map_err(|error| error.to_string())?;
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("读取 manifest 失败（{}）: {error}", path.display()))?;
+    let manifest = zhu_ye_core::parse_manifest(&text).map_err(|error| error.to_string())?;
+    zhu_ye_core::verify_signature_with_key(&manifest, &key).map_err(|error| error.to_string())?;
+    println!(
+        "验签通过: {}（{} 个包）",
+        path.display(),
+        manifest.packs.len()
+    );
+    Ok(())
+}
+
+/// 解析十六进制字符串为字节。
+fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
+    let text = text.trim();
+    if !text.len().is_multiple_of(2) {
+        return Err(format!("十六进制长度必须为偶数，实际 {}", text.len()));
+    }
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let bytes = text.as_bytes();
+    for pair in bytes.chunks(2) {
+        let high = (pair[0] as char)
+            .to_digit(16)
+            .ok_or_else(|| "包含非十六进制字符".to_owned())?;
+        let low = (pair[1] as char)
+            .to_digit(16)
+            .ok_or_else(|| "包含非十六进制字符".to_owned())?;
+        out.push(((high << 4) | low) as u8);
+    }
+    Ok(out)
 }
 
 fn required_path(args: &[String], index: usize) -> Result<PathBuf, String> {
@@ -86,6 +701,7 @@ fn import_command(args: &[String]) -> Result<(), String> {
     let mut max_entries = None;
     let mut bigram_path = None;
     let mut output_arg_seen = false;
+    let mut polyphone_path: Option<PathBuf> = None;
     let mut index = 4;
     while index < args.len() {
         match args[index].as_str() {
@@ -95,6 +711,15 @@ fn import_command(args: &[String]) -> Result<(), String> {
                     args.get(index)
                         .map(PathBuf::from)
                         .ok_or_else(|| "--bigram 缺少语料路径".to_owned())?,
+                );
+                index += 1;
+            }
+            "--polyphone" => {
+                index += 1;
+                polyphone_path = Some(
+                    args.get(index)
+                        .map(PathBuf::from)
+                        .ok_or_else(|| "--polyphone 缺少补丁表路径".to_owned())?,
                 );
                 index += 1;
             }
@@ -118,7 +743,26 @@ fn import_command(args: &[String]) -> Result<(), String> {
     let cedict_text = read_text_file(&cedict_path, "CC-CEDICT")?;
     let frequency_text = read_text_file(&frequency_path, "词频文件")?;
 
-    let (entries, stats) = build_real_dictionary(&cedict_text, &frequency_text, max_entries);
+    // T-056 多音缺读补丁：显式指定必须存在且合法；未指定时默认读取仓库补丁表，
+    // 文件不存在则按无补丁处理（保持旧命令行为兼容）。
+    let polyphone_patches = match &polyphone_path {
+        Some(path) => load_patch_table(path)?,
+        None => {
+            let default = Path::new("data/patches/polyphone.tsv");
+            if default.exists() {
+                load_patch_table(default)?
+            } else {
+                Vec::new()
+            }
+        }
+    };
+
+    let (entries, stats) = build_real_dictionary(
+        &cedict_text,
+        &frequency_text,
+        max_entries,
+        &polyphone_patches,
+    );
     let vocabulary: HashSet<&str> = entries.iter().map(|entry| entry.word.as_str()).collect();
     let mut bigram_owned = Vec::new();
     let mut bigram_stats = None;
@@ -168,6 +812,12 @@ fn import_command(args: &[String]) -> Result<(), String> {
     if !stats.unknown_syllables.is_empty() {
         println!("未知音节样本: {}", stats.unknown_syllables.join("、"));
     }
+    println!(
+        "多音补丁: 读取 {} 条，应用 {}，跳过 {}",
+        polyphone_patches.len(),
+        stats.polyphone_applied,
+        stats.polyphone_skipped
+    );
     if let Some(bigram_stats) = &bigram_stats {
         println!(
             "bigram 统计: 语料行 {corpus_lines}，分词 {tokens_total}，命中词表 {tokens_matched}，候选词对 {pairs_formed}，唯一词对 {unique_pairs}",
@@ -176,6 +826,157 @@ fn import_command(args: &[String]) -> Result<(), String> {
             tokens_matched = bigram_stats.tokens_matched,
             pairs_formed = bigram_stats.pairs_formed,
             unique_pairs = bigram_stats.unique_pairs
+        );
+    }
+    Ok(())
+}
+
+/// `eval-set <CC-CEDICT> <词频> <输出.tsv> [--top N]`：
+/// 生成命中率评测词样本（T-057，N 默认 2000）。
+///
+/// 清洗口径与 real dict 导入一致（纯 CJK、音节数==字数、无调归一化、同词保留首读），
+/// 输出 `词<TAB>拼音<TAB>词频` TSV，供 `zhu-ye-cli eval` 判定 Top1/Top3。
+fn eval_set_command(args: &[String]) -> Result<(), String> {
+    let cedict_path = required_path(args, 2)?;
+    let freq_path = required_path(args, 3)?;
+    let out_path = required_path(args, 4)?;
+    let mut top = 2000usize;
+    let mut index = 5;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--top" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--top 缺少数值参数".to_owned())?
+                    .parse::<usize>()
+                    .map_err(|_| "--top 必须是正整数".to_owned())?;
+                if value == 0 {
+                    return Err("--top 必须大于 0".to_owned());
+                }
+                top = value;
+                index += 1;
+            }
+            other => return Err(format!("未知参数: {other}")),
+        }
+    }
+
+    let cedict = std::fs::read_to_string(&cedict_path)
+        .map_err(|error| format!("读取 CEDICT 失败（{}）: {error}", cedict_path.display()))?;
+    let frequency = std::fs::read_to_string(&freq_path)
+        .map_err(|error| format!("读取词频失败（{}）: {error}", freq_path.display()))?;
+    let samples = generate_word_eval_set(&cedict, &frequency, top);
+    let rendered = render_eval_set(&samples);
+    std::fs::write(&out_path, rendered)
+        .map_err(|error| format!("写入评测样本失败（{}）: {error}", out_path.display()))?;
+    println!(
+        "评测词样本: 写入 {}，共 {} 条（--top {}，与 wordfreq 交集后按词频降序截取）",
+        out_path.display(),
+        samples.len(),
+        top
+    );
+    Ok(())
+}
+
+/// `audit-polyphone <CC-CEDICT> <kTGHZ2013> [--freq 文件] [--min-freq N]`：
+/// 规范读音 vs 词库读音的多音缺读审计（T-056）。
+///
+/// 输出「规范读音存在而词库缺失」的（字, 读音）清单，附该字词频与已有读音；
+/// 供人工甄选后写入 `data/patches/polyphone.tsv`（构建期 `import --polyphone` 应用）。
+fn audit_polyphone_command(args: &[String]) -> Result<(), String> {
+    let cedict_path = required_path(args, 2)?;
+    let letters_path = required_path(args, 3)?;
+    let mut freq_path: Option<PathBuf> = None;
+    let mut min_freq: Option<u64> = None;
+    let mut index = 4;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--freq" => {
+                index += 1;
+                freq_path = Some(
+                    args.get(index)
+                        .map(PathBuf::from)
+                        .ok_or_else(|| "--freq 缺少词频文件路径".to_owned())?,
+                );
+                index += 1;
+            }
+            "--min-freq" => {
+                index += 1;
+                min_freq = Some(
+                    args.get(index)
+                        .ok_or_else(|| "--min-freq 缺少数值".to_owned())?
+                        .parse::<u64>()
+                        .map_err(|error| format!("--min-freq 解析失败: {error}"))?,
+                );
+                index += 1;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => return Err(format!("多余参数：{}", args[index])),
+        }
+    }
+
+    let cedict_text = read_text_file(&cedict_path, "CC-CEDICT")?;
+    let letters_text = read_text_file(&letters_path, "kTGHZ2013 读音表")?;
+
+    // 与构建同口径：单字词条 -> 读音集合（split_pinyin_syllables 拒绝非法拼音）。
+    let mut entry_readings: HashMap<String, HashSet<String>> = HashMap::new();
+    for line in cedict_text.lines() {
+        let Some((simplified, marked, _)) = parse_cedict_line(line) else {
+            continue;
+        };
+        if simplified.chars().count() != 1 {
+            continue;
+        }
+        let Some(syllables) = split_pinyin_syllables(&marked) else {
+            continue;
+        };
+        if syllables.len() != 1 {
+            continue;
+        }
+        entry_readings
+            .entry(simplified)
+            .or_default()
+            .insert(syllables[0].clone());
+    }
+
+    let standard = load_standard_readings(&letters_text);
+    let mut gaps = polyphone_gaps(&entry_readings, &standard);
+
+    // 词频过滤仅为人工排序参考，不参与读音判定。
+    let frequencies = match freq_path {
+        Some(path) => {
+            let freq_text = read_text_file(&path, "词频文件")?;
+            Some(load_frequency_map(&freq_text))
+        }
+        None => None,
+    };
+    if let Some(frequencies) = &frequencies {
+        gaps.retain(|gap| {
+            frequencies.get(&gap.character).copied().unwrap_or(0) >= min_freq.unwrap_or(0)
+        });
+    }
+
+    println!(
+        "多音缺读审计: CEDICT 单字 {} 个，规范读音表 {} 字，缺读 {} 条",
+        entry_readings.len(),
+        standard.len(),
+        gaps.len()
+    );
+    for gap in &gaps {
+        let frequency = frequencies
+            .as_ref()
+            .and_then(|map| map.get(&gap.character))
+            .copied()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        println!(
+            "{}\t{}\t已有={}\t词频={}",
+            gap.character,
+            gap.missing,
+            gap.existing.join("/"),
+            frequency
         );
     }
     Ok(())

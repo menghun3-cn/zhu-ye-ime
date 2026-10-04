@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文档 — 竹叶输入法</title>
+<meta name="description" content="竹叶输入法使用文档：安装、启用与切换、键位、译文、用户词、卸载与故障排查。仅支持 Windows 10/11 x64。">
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html">
+      <img class="brand-mark" src="../assets/logo-mark.svg" alt="竹叶输入法标志" width="26" height="26">
+      <span class="brand-zh">竹叶</span><span class="brand-latin">ZHUYE</span>
+    </a>
+    <nav class="site-nav" aria-label="站点导航">
+      <a class="nav-link" href="../index.html">首页</a>
+      <a class="nav-link" href="../docs/index.html" aria-current="page">文档</a>
+      <a class="nav-link" href="../download/index.html">下载</a>
+      <a class="nav-link" href="../privacy/index.html">隐私</a>
+      <a class="nav-link" href="../about/index.html">关于</a>
+    </nav>
+    <a class="nav-gh" href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</header>
+
+<main class="wrap prose">
+
+  <h1>用户文档</h1>
+  <p>本文档是面向用户的安装与使用指南，内容与仓库
+    <a href="https://github.com/menghun3-cn/zhu-ye-ime/blob/develop/docs/安装与使用.md" target="_blank" rel="noopener">docs/安装与使用.md</a>
+    保持一致。</p>
+
+  <nav class="doc-toc" aria-label="本页目录">
+    <ul>
+      <li><a href="#scope">适用范围</a></li>
+      <li><a href="#install">安装</a></li>
+      <li><a href="#enable">启用与切换</a></li>
+      <li><a href="#usage">基本使用与键位</a></li>
+      <li><a href="#translation">译文</a></li>
+      <li><a href="#userwords">用户词</a></li>
+      <li><a href="#upgrade">升级与卸载</a></li>
+      <li><a href="#troubleshoot">故障排查</a></li>
+      <li><a href="#more">更多</a></li>
+    </ul>
+  </nav>
+
+  <h2 id="scope">适用范围</h2>
+  <ul>
+    <li>Windows 10/11 x64</li>
+    <li>现代 TSF 应用：记事本、浏览器、IDE、Office 等</li>
+    <li>提供全拼中文输入、候选区中英译文、译文层切换与本地用户词学习</li>
+    <li>默认完全离线，不收集输入内容</li>
+  </ul>
+
+  <h2 id="install">安装</h2>
+  <p>从 <a href="../download/index.html">下载页</a> 或发布渠道取得发行包
+  <code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>，解压到目标机后以<strong>管理员身份</strong>
+  打开 PowerShell，运行包内脚本：</p>
+  <pre><code>.\scripts\install.ps1</code></pre>
+  <p>发行包模式不依赖源码树与 Rust 工具链：脚本从包内 <code>bin\</code> 取 TSF 输入法 DLL、设置窗口、
+  更新器与基础词典，从 <code>packs\</code> 预置三个领域包（<code>it</code>/<code>med</code>/
+  <code>slang</code>）到 <code>%APPDATA%\ai-zhu-ye-ime\packs\</code>，并创建开始菜单快捷方式。</p>
+  <p>重复安装安全：每次安装先清理旧注册再重建，不会产生重复路径；旧版本 DLL 由系统重启后延迟清理。
+  升级为同名覆盖，保持幂等。</p>
+
+  <h2 id="enable">启用与切换</h2>
+  <p>安装完成后进入系统设置：</p>
+  <pre><code>设置 -&gt; 时间和语言 -&gt; 语言和区域 -&gt; 中文（简体，中国）-&gt; 键盘</code></pre>
+  <p>确认「竹叶输入法」已列出并启用。日常输入使用系统输入法切换键：<kbd>Win</kbd>+<kbd>Space</kbd>
+  或 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>（取决于系统设置）。安装后无需重启系统；正在运行的应用可能
+  需要重启一次才会加载新 DLL。</p>
+
+  <h2 id="usage">基本使用与键位</h2>
+  <p>输入全拼字母串，候选窗显示中文候选；拼音切分支持歧义路径，如 <code>xian</code> 同时支持
+  「西安」与「先」。</p>
+  <table class="docs">
+    <thead><tr><th>按键</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>Shift</kbd></td><td>中英模式切换</td></tr>
+      <tr><td><kbd>Tab</kbd></td><td>中文候选层 ↔ 译文层</td></tr>
+      <tr><td><kbd>Space</kbd></td><td>上屏当前选中候选（默认第一候选）</td></tr>
+      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>候选窗内上移 / 下移选中行</td></tr>
+      <tr><td><kbd>1</kbd> - <kbd>9</kbd></td><td>上屏对应候选项</td></tr>
+      <tr><td><kbd>-</kbd> / <kbd>=</kbd>（<kbd>Shift</kbd>+<kbd>=</kbd> 即 <kbd>+</kbd>）</td><td>上翻页 / 下翻页</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td>上屏拼音原文</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>取消本次输入</td></tr>
+    </tbody>
+  </table>
+  <p>候选窗底部右端显示当前页/总页数（如 <code>1/2</code>），仅多页候选时显示。语言栏图标随模式
+  实时切换：中文模式蓝底白字「中」，英文模式灰底白字「英」。Windows 11 若任务栏不渲染第三方
+  语言栏图标，可在输入法「高级键盘设置」里开启<strong>桌面语言栏</strong>。</p>
+
+  <h2 id="translation">译文</h2>
+  <p>中文候选行右侧以弱化样式显示英文译文。按 <kbd>Tab</kbd> 进入译文层，候选列表切换为英文
+  译文；按 <kbd>1</kbd> 等数字键上屏译文，上屏后自动返回中文候选层。没有译文的词不会强制
+  进入译文层，也不会出现空白页。</p>
+
+  <h2 id="userwords">用户词</h2>
+  <p>选择过的中文词会记录到本地用户词库，并在后续排序中提升权重。用户词库路径：
+  <code>%APPDATA%\ai-zhu-ye-ime\user_words.json</code>。文件损坏时输入法会自动备份为
+  <code>.bak</code> 并重建空库，不影响静态词典。</p>
+
+  <h2 id="upgrade">升级与卸载</h2>
+  <h3>升级</h3>
+  <ol>
+    <li>取得新版本发行包。</li>
+    <li>以管理员身份执行 <code>.\scripts\install.ps1</code>（发行包模式）。</li>
+    <li>重启正在使用输入法的应用，使其加载新 DLL。</li>
+  </ol>
+  <p>安装器会用新版本词典覆盖安装目录中的 <code>dictionary.zyct</code>；升级不删除用户词库与
+  本地配置。</p>
+  <h3>卸载</h3>
+  <p>以管理员身份运行 <code>.\scripts\uninstall.ps1</code>：删除 TSF 与 CLSID 注册表树、安装目录
+  中的 DLL、设置窗口与更新器、开始菜单快捷方式，并校验注册表无残留；重复执行安全。DLL 或 exe
+  被占用时会改为重启后延迟清理，不中止卸载。</p>
+  <p>用户词库、配置与领域包位于 <code>%APPDATA%\ai-zhu-ye-ime</code>，<strong>卸载默认保留</strong>
+  （属用户数据）；确认不再需要时手动删除该目录。</p>
+
+  <h2 id="troubleshoot">故障排查</h2>
+  <table class="docs">
+    <thead><tr><th>现象</th><th>处理</th></tr></thead>
+    <tbody>
+      <tr><td>安装报「需要管理员权限」</td><td>用管理员身份重新打开 PowerShell</td></tr>
+      <tr><td>安装报 DLL 被占用</td><td>关闭输入法相关应用后重试</td></tr>
+      <tr><td>输入法不在系统列表</td><td>检查「键盘」设置是否已启用；重新运行 install.ps1</td></tr>
+      <tr><td>切到竹叶输入法后无候选</td><td>确认已通过系统切换键激活；重启应用后再试</td></tr>
+      <tr><td>候选窗错位/模糊</td><td>确认系统缩放为受支持的 DPI；重启应用</td></tr>
+      <tr><td>用户词异常</td><td>检查 <code>%APPDATA%\ai-zhu-ye-ime</code>，必要时删除或重置用户词库</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="more">更多</h2>
+  <p>面向开发者的完整文档（需求、方案、验收、架构、许可证）都在仓库
+    <a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub 仓库</a>
+    的 <code>docs/</code> 目录与 <code>README.md</code> 中。</p>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div>
+      <div class="footer-brand-zh">竹叶输入法</div>
+      <div class="footer-slogan">输入中文，候选词旁有译文。</div>
+    </div>
+    <nav class="footer-col" aria-label="站点">
+      <h4>站点</h4>
+      <ul>
+        <li><a href="../index.html">首页</a></li>
+        <li><a href="../docs/index.html">文档</a></li>
+        <li><a href="../download/index.html">下载</a></li>
+        <li><a href="../privacy/index.html">隐私</a></li>
+        <li><a href="../about/index.html">关于</a></li>
+      </ul>
+    </nav>
+    <nav class="footer-col" aria-label="社区">
+      <h4>社区</h4>
+      <ul>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub 仓库</a></li>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">Releases</a></li>
+      </ul>
+    </nav>
+    <div class="footer-status">Windows 内测版 · M1–M13 核心能力已实现（自动化验证通过）· 部分真实环境交互验收收尾中</div>
+    <div class="footer-copy">© 2026 竹叶输入法 · 代码 MIT · 词典数据来源与许可证见仓库 docs/licenses.md · <a href="../llms.txt">llms.txt（AI 阅读版）</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

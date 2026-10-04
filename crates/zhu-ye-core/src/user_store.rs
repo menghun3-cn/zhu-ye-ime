@@ -32,6 +32,50 @@ pub fn unix_now() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+/// 只读探测用户词库文件的健康状态（不写盘、不备份）。
+///
+/// `UserDictStore::load` 在损坏时会立即备份并重建，那属于"修复动作"；本探测供
+/// "先报告后动手"的修复入口（设置窗口一级修复，T-076 / FR-043）使用，只回答
+/// "这个文件目前是否损坏"，不产生任何副作用。
+///
+/// - 文件不存在 → `UserWordsProbe::Ok`（首次运行正常，无需修复）
+/// - 可解析且版本受支持 → `Ok`
+/// - JSON 损坏或版本低于当前支持 → `Corrupt`（与 `load` 的恢复语义一致）
+/// - 版本高于当前支持 → `NewerVersion`（应升级读取方，改名重建会丢内容）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserWordsProbe {
+    #[default]
+    Ok,
+    Corrupt,
+    NewerVersion {
+        found: u32,
+    },
+}
+
+/// 只读探测用户词库文件；见 [`UserWordsProbe`]。
+#[must_use]
+pub fn probe_user_words_file(path: &Path) -> UserWordsProbe {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return UserWordsProbe::Ok,
+        Err(_) => return UserWordsProbe::Corrupt,
+    };
+    let format: FileFormat = match serde_json::from_slice(&bytes) {
+        Ok(format) => format,
+        Err(_) => return UserWordsProbe::Corrupt,
+    };
+    if format.version > USER_DICT_FORMAT_VERSION {
+        UserWordsProbe::NewerVersion {
+            found: format.version,
+        }
+    } else if format.version == USER_DICT_FORMAT_VERSION {
+        UserWordsProbe::Ok
+    } else {
+        // 与 `load` 的恢复语义一致：低版本视为损坏，备份重建。
+        UserWordsProbe::Corrupt
+    }
+}
+
 /// 用户词库 JSON 文件访问器。
 ///
 /// `UserDictionary` 只维护内存状态，本类型负责把状态落到指定路径；
@@ -184,7 +228,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{unix_now, UserDictStore};
+    use super::{probe_user_words_file, unix_now, UserDictStore, UserWordsProbe};
     use crate::user_dict::UserDictionary;
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -250,6 +294,40 @@ mod tests {
         assert!(error.to_string().contains("高于当前支持"));
         assert!(store.path().exists());
         assert!(!store.path().with_extension("bak").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 探针区分健康损坏与高一版本() {
+        let (store, dir) = store_in("probe");
+        fs::create_dir_all(&dir).unwrap();
+        let path = store.path();
+
+        // 不存在：首次运行正常，无需修复。
+        assert_eq!(probe_user_words_file(path), UserWordsProbe::Ok);
+
+        // 合法内容（当前版本）：健康。
+        let mut dict = UserDictionary::new();
+        dict.record_selection("竹叶", "zhuye", 1);
+        store.save(&dict).unwrap();
+        assert_eq!(probe_user_words_file(path), UserWordsProbe::Ok);
+
+        // JSON 损坏：破坏内容；探针必须不写盘（不产生 .bak、原文件不动）。
+        fs::write(path, "not json").unwrap();
+        assert_eq!(probe_user_words_file(path), UserWordsProbe::Corrupt);
+        assert!(!path.with_extension("bak").exists(), "探针不得备份或重建");
+        assert!(path.exists());
+
+        // 低于当前版本：与 load 的恢复语义一致视为损坏。
+        fs::write(path, r#"{"version": 0, "entries": []}"#).unwrap();
+        assert_eq!(probe_user_words_file(path), UserWordsProbe::Corrupt);
+
+        // 高于当前版本：应升级读取方，不属于"改名重建"场景。
+        fs::write(path, r#"{"version": 99, "entries": []}"#).unwrap();
+        assert_eq!(
+            probe_user_words_file(path),
+            UserWordsProbe::NewerVersion { found: 99 }
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

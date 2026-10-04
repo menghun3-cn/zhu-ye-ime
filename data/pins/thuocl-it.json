@@ -1,0 +1,14 @@
+{
+  "id": "thuocl-it",
+  "name": "THUOCL_IT（清华开放中文词库 IT 类）",
+  "role": "domain-it",
+  "kind": "url",
+  "url": "https://raw.githubusercontent.com/thunlp/THUOCL/master/data/THUOCL_IT.txt",
+  "cache_file": "THUOCL_IT.txt",
+  "license": "MIT",
+  "license_note": "README 声明免费开放、可用于研究与商业；保留版权声明",
+  "sha256": "E8CD42C9F5559735FA3BFB91515CBE051F991EFD4A803038A1D5C0DA85AF3526",
+  "size": 308187,
+  "note": "README 公布 16,000 词，带 DF 文档频率值；数据 2016-2017 年，IT 新词需 MDN 术语表补充（需求 R4-P07）",
+  "fetched_at": "2026-09-28"
+}

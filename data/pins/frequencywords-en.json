@@ -1,0 +1,13 @@
+{
+  "id": "frequencywords-en",
+  "name": "FrequencyWords 英文词频（英文词表构建基座，T-064）",
+  "role": "en-wordlist-baseline",
+  "kind": "url",
+  "url": "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_full.txt",
+  "cache_file": "frequencywords-en.txt",
+  "license": "内容 CC BY-SA 4.0；代码 MIT",
+  "license_note": "与 D-004 FrequencyWords 中文词频同 repo 同许可；用于派生英文词表（D-018）",
+  "sha256": "7FEA67AB954E2C01DF6C608C9826E594CF36F8823B3243554F88245FB75DC506",
+  "size": 19977552,
+  "fetched_at": "2026-09-30"
+}

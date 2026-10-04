@@ -1,0 +1,6 @@
+# 翻译配对一致性记录（由 verify-translation-pairs.ps1 使用）
+#   git hash-object 2026-09-30-context-suggestion-engine-integration.md
+#   git hash-object 2026-09-30-context-suggestion-engine-integration.zh.md
+2026-09-30-context-suggestion-engine-integration.md: 84602a77f450eee5e03305cd55e2500b602d6b96
+2026-09-30-context-suggestion-engine-integration.zh.md: 587b09108c8592612486351f2471169bfa70affa
+

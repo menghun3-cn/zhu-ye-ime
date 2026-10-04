@@ -80,6 +80,7 @@ fn run() -> Result<(), String> {
         dpi,
         seconds,
         shot_path,
+        custom_theme: None,
     };
     run_candidate_demo(demo_view(translation_mode), &options)
 }
@@ -109,6 +110,7 @@ fn demo_view(translation_mode: bool) -> CandidateUiView {
         pinyin_hint: "ni hao".to_owned(),
         page: 0,
         page_size: DEFAULT_PAGE_SIZE,
+        page_count: 1,
         selected: 0,
         translation_mode,
         items: vec![

@@ -1,0 +1,8 @@
+# Bilingual-pair consistency record: the git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record with the project's
+# translation-pairing verifier:
+#   git hash-object 2026-09-30-polyphone-gap-patch.md
+#   git hash-object 2026-09-30-polyphone-gap-patch.zh.md
+2026-09-30-polyphone-gap-patch.md: 846463b5a9b688922a8c99fa7d9ec88ce02a734e
+2026-09-30-polyphone-gap-patch.zh.md: 2a8777ef2a1b62f89fc28f050ca6743346464137

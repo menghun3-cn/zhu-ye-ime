@@ -8,10 +8,10 @@ Status: implemented
 
 FR-009 requires a visible candidate window for the IME: rendered candidates,
 translation text, selection state, and page indicators. FR-011 additionally
-requires the window to follow system light/dark theme, high-contrast mode, and
-per-monitor DPI. Before this task the repository had no UI code at all, so
-there was no way to verify the layout model or the rendering path until TSF
-integration.
+requires the window to support light/dark palettes and high-contrast mode (the
+default palette is fixed light since T-030), plus per-monitor DPI. Before this
+task the repository had no UI code at all, so there was no way to verify the
+layout model or the rendering path until TSF integration.
 
 ## Decision
 
@@ -31,10 +31,22 @@ buffering. The window is `WS_POPUP` with `WS_EX_NOACTIVATE`, `WS_EX_TOOLWINDOW`,
 and `WS_EX_TOPMOST` so it does not steal focus from the composition target.
 `WM_PAINT` renders into a memory DC and `BitBlt`s the frame; background erase
 returns immediately to avoid flicker. Theme resolution reads
-`AppsUseLightTheme` and `SPI_GETHIGHCONTRAST`; `WM_THEMECHANGED` and
-`WM_SETTINGCHANGE` refresh the palette, and `WM_DPICHANGED` rebuilds metrics
-and the font. Fonts, bitmaps, DCs, and the boxed state are released on every
-path, including window destruction.
+`SPI_GETHIGHCONTRAST`; since T-030 the default palette is fixed light and no
+longer follows `AppsUseLightTheme` (dark is only reachable through an explicit
+`ThemePreference::Dark`; see
+2026-09-25-candidate-window-light-default-and-empty-panel.md), `WM_THEMECHANGED` and `WM_SETTINGCHANGE` refresh the
+palette, and `WM_DPICHANGED` rebuilds metrics and the font. The candidate
+font face is SimSun since T-034 (see
+2026-09-25-candidate-window-font-simsun.md). Since T-037 the row layout is
+content-driven through `CandidateMetrics::row_split` (compact 26 dp marker
+column, translation hugging the candidate and running to the row end; see
+2026-09-25-candidate-window-row-layout-dynamic.md), and
+`paint_background` fills the client rectangle with the background brush
+before drawing the `RoundRect`, so the rounded corners show background
+color instead of uninitialized pixels (see
+2026-09-25-candidate-window-corner-black-pixels.md). Fonts, bitmaps,
+DCs, and the boxed state are released on every path, including window
+destruction.
 
 The demo binary `candidate-demo` renders a fixed nine-item snapshot and
 supports `--theme`, `--dpi`, `--seconds`, `--shot`, and `--translation-mode`.

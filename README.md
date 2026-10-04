@@ -46,13 +46,18 @@ TSF 安装/卸载脚本（需要管理员 PowerShell）：
 .\scripts\uninstall.ps1
 ```
 
+> 发行包安装（T-078）：`install.ps1` 从包内 `bin\`/`packs\` 取文件，不再从源码树构建；设置窗口
+> （`zhu-ye-settings.exe`）与更新器（`zhu-ye-updater.exe`）随安装部署到 `Program Files\ai-zhu-ye-ime\bin\`，
+> 三个领域包预置到 `%APPDATA%\ai-zhu-ye-ime\packs\`，并创建开始菜单快捷方式。
+
 无需管理员即可校验 DLL 导出：
 
 ```powershell
 .\scripts\verify-tsf-dll.ps1 -DllPath .\target\release\zhu_ye_ime.dll
 ```
 
-生成便携测试包（复制到其他 Windows 机器测试，无需安装 Rust）：
+生成发行包（含 TSF 服务、设置窗口、更新器、基础词典与三个领域包；复制到其他 Windows
+机器测试，无需安装 Rust）：
 
 ```powershell
 .\scripts\package-portable.ps1
@@ -87,6 +92,8 @@ cargo run -p zhu-ye-cli -- bench
 - M3：候选窗 + 完整交互 + 用户词
 - M4：双语翻译层 + 译文切换
 - M5：性能、安装、文档、AI 接口
+- M6：词典体系与自动更新（多包组合、网络语缩写、更新链路）
+- M7：输入体验优化（简拼/首字母、模糊音纠错、整句 Beam Search）
 
 ## 许可证
 

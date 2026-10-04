@@ -5,6 +5,37 @@
 
 ## [Unreleased]
 
+## [0.1.1-alpha] - 2026-10-04
+
+### 新增
+
+- 英文词典全量扩容（M13，FR-046）：英文词表从 1.5 万词扩展为 ECDICT 全量离线词表——ZYEN v1 独立 mmap 词表 `en.zyen`（760,987 词条 / 18.56 MiB，加载+校验 28ms、前缀查询中位 43µs，均低于预算），拼写/大小写原形补全覆盖大幅提升；TSF 装配优先从 DLL 同目录加载、失败静态回退（T-085）
+- 中英混合整句解码（M13，FR-050）：输入 `python代码` 这类无分隔中英混合串按整句出候选（整句置首 + 分段候选）；纯拼音、缩写与邮箱/网址格式路径不受影响（T-086）
+- 网络语词典扩充（M13，FR-047）：social-media-chinese-words 高频子集 1 万清洗并入 slang 领域包（9,900 词条，含人工种子表扩充 19 条；来源与许可证见 `docs/licenses.md` D-020/D-021）（T-087）
+- 设置窗口五项增强（M13，FR-048）：用户词表导入导出、符号集扩充至 230 字符、自定义主题文件（深浅色 + 候选窗同源装配）、启动时检查更新（默认关闭、零网络请求）、通讯录 vcf 界面化导入（T-088）
+- 竹叶输入法官网上线（第十期，FR-051~FR-058）：`site/` 零构建静态官网（首页/文档/下载/隐私/关于 + 404），手写 SVG 品牌资产与候选窗示例插图，AI 入口四件套（llms.txt 按 llmstxt.org v2、agents.txt、robots.txt、sitemap.xml），GitHub Pages 工作流与内链自检就绪；下载页以安装包为主、全部指向 GitHub Releases（T-083、T-084）
+- 简拼/首字母输入：`nh`→你好、`wsm`→为什么；静态 22 字母简拼音节表 + 前序笛卡尔积展开，上限 32 条，仅主候选为空且不可切分时介入（T-053，FR-023）
+- 模糊音与纠错：zh↔z 等 7 组映射、单处替换；`zongguo`→中国（模糊替换）、`niha`→你好（少字母补全），独立 Corrected 组追加主候选之后（T-054，FR-024）
+- 整句/长句 Beam Search：`woxiangmingtianqubeijing`→我想明天去北京；跨音节整词匹配 + 词间转移评分（unigram 上限、bigram 缺失惩罚），整句组置主候选最前（T-055，FR-025）
+- host-e2e 新增 `--m7` 输入体验优化断言组（真实词典 22 项，含确定性）与 `scripts/e2e.ps1` 集成（T-055）
+- `zhu-ye-cli bench` 新增 M7 三路径延迟场景（简拼/纠错/整句，回填验收标准 8.5）（T-055）
+- 多音缺读补丁管线：`shui`→谁、`shou`→熟；构建期只增不改补读音词条（kTGHZ2013 规范读音对照 + 人工把关补丁表 + `import --polyphone` + `audit-polyphone` 审计命令）；修复 `dict -r` 中文键反查越界 panic（T-056）
+- host-e2e `--m7` 增 4 项多音/反查断言（26/26）（T-056）
+- 命中率评测基础设施：`zhu-ye-dict eval-set` 生成词样本（CEDICT∩wordfreq，2000 条）+ `zhu-ye-cli eval` 判定 Top1/Top3/整句并按词频分档、MISS 清单；评测集入库 `data/eval/`，real.zyct 首轮基准 Top1 84.7% / Top3 97.2% / 整句首候选 21.0%（两次运行一致）（T-057）
+- 上下文联想检索层：`BigramModel::successors` 前词后继检索（bigram 表按前词连续、下界二分+区段扫描，零格式改动）+ `suggestion_candidates` 联想候选（Top5 整词 + 至多 3 条"前词+后继"两词短语）；`zhu-ye-cli suggest` 抓手（T-058）
+- 上下文联想引擎承接：上屏后空闲候选窗展示 bigram 后继联想（连续联想）；联想态数字键直接上屏、空格选词、Esc 关闭、输入字母即退出回主输入路径；联想候选标注 Suggestion 来源；host-e2e `--m8` 真实词典断言组 7/7（T-059）
+- 场景7 格式候选：任意连续数字启发式识别（空闲态数字键直插上屏、空格/数字选择、文档侧替换链换入格式文本；8 位日期 4 式/6 位年月/4 位年份/金额千分位+中文读数/11 位电话分段/≥5 位千分位）＋ v 模式符号组（空闲态 `v` 冷启动、v1 序号/vx 数学/vh 标点各一页 9 项、`vi` 回退拼音组合）＋ 拼音整串命中 emoji 别名队尾追加（不参与排序）；候选源优先级 联想 > 数字 > v；host-e2e `--m9` 真实词典断言组 15/15，T-057 命中率基准不回退（T-061）
+- emoji 别名表纯数据扩展：首批 109 条扩至 381 条（动物/食物/物品/天气/交通/运动/手势/符号等常用类别，字母序二分保持，规模断言 ≥300；顺带修正 `biye` 别名 emoji（👋→🎓）并新增 `soup`/`glasses` 等独立别名）（T-062）
+- core 英文词候选表 EN_WORDS（FR-030 底座，场景 6）：FrequencyWords 英文词频（D-018，CC BY-SA 4.0）前 10000 词 + 人工大小写补丁表（D-019，`data/patches/en-capitals.tsv`，专名/缩写原形如 `iPhone`/`API`/`QQ`，命令两可词保留小写）+ 人工排除清单（`data/patches/en-exclude.tsv`，中文人名音译噪声词，防 `zh` 等拼音声母前缀被英文组污染）+ CC-CEDICT 英文侧纯单词补充（D-001），共 15534 条；小写 ASCII 查键有序二分 + 前缀区段扫描 `en_words_with_prefix`，按 freq_rank 组内排序、上限截断；生成脚本 `scripts/build-en-words.ps1` 可复现并 rustfmt（T-064）
+- 中英混输引擎（场景 6，FR-030/FR-031）：整串不可按拼音切分时才查英文表，命中以 `EnWord` 来源组追加主候选之后（D-10：可切分串 `nihao`/`wo` 不介入、`pytho`→python、`iphon`→iPhone 保留原形、`api`→API；未命中回落缩写路径 `yyds` 不回退；候选 `pinyin=None` 不进用户词学习）；邮箱/网址格式态（core `email_url` 模块）：组合串含 `@`（前有字符）→ `.com/.cn/.net` 补全至多 3 条，`www.`/`http(s)://` 前缀（大小写不敏感）→ `.com/.cn/.org` 补全至多 3 条，已含 `.` 完整串直通；`handle_format_char` 组合态收 `@ . / :`、空闲态放行宿主（TSF 键路归 T-066）（T-065）
+- 中英混输 TSF 键路与 host-e2e `--m10`（场景 6，FR-030/031/032）：TSF `KeyAction::FormatChar` 统一格式字符动作（Shift+2=`@`、Shift+`;`=`:`、VK_OEM_2=`/`、`.` 复用 VK_OEM_PERIOD），按引擎 `is_format_key` 吃键——组合态邮箱/网址上下文进组合串、`www`/`http`/`https` 网址意图演进（含 `http:`/`http:/` 中间态）吃 `:`/`/`、普通拼音组合与空闲态/英文模式放行宿主（`nihao.` 标点直出不回归）；`me@`（`@` 尾空）补全候选（组合态按 `@` 后第一帧出 `.com/.cn/.net`）；host-e2e `--m10` 断言组：拼写补全 `pytho`→python、大小写原形 `iphon`→iPhone、拼音不介入、缩写不回退、邮箱/网址补全与直通、选中上屏、Esc/退格退出、噪声串（12/12 PASS，与 seed/real-smoke/m7/m8/m9 全量不回退）（T-066）
+- 设置窗口常用设置页（第八期 M12-3，FR-041/FR-042）：英文输入法默认中英模式**装配项**（D-32 改判：设置窗口跨进程读不到宿主 IME"当前模式"，条目改为二选一 chip、点击即存 `config.json` 的 `default_mode`（chinese|english 宽松解析）、TSF DLL 下次装配读取为新会话起始模式，提示"重启输入法后新会话生效"；运行中 Shift 切换仍是会话状态、不进窗口）+ 添加词库子视图（整内容区）：领域包列表（六字段 + 启用开关，基础包标注不可停用，勾选即存 `enabled_packs` 下次装配生效）+ 本地 `.zyct` 导入（`GetOpenFileNameW` 系统对话框 → `DictionaryFile::open` 全量校验任一失败拒绝且不动盘 → 复制入 `packs/` → `installed.json` upsert（source: Import、无版本、同 id 覆盖）→ 刷新列表；界面注明"本地导入 · 未签名、不参与在线更新签名信任链"（D-38））（T-075）
+
+### 变更
+
+- 候选窗与设置窗口共享 UI 原语抽为独立 crate `zhu-ye-ui`（颜色/主题/矩形/DPI/文本测量），设置窗口不再连带链接 TSF 侧代码；渲染行为不变（2026-10-04 候选窗三配置逐帧像素比对零回退，T-081）
+- proptest 属性测试门禁：切分合法性与拼接守恒/候选排序全序确定性/bigram 后继/beam 边界四组属性测试纳入 `cargo test`（仅测试期依赖，运行时依赖图零变化，T-089，FR-049）
+
 ## [0.1.0] - 2026-09-23
 
 ### 新增

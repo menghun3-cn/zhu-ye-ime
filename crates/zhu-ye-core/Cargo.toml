@@ -7,7 +7,13 @@ license.workspace = true
 description = "竹叶输入法核心算法库：拼音、词典、排序、翻译、用户词与 AI 接口"
 
 [dependencies]
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+
+# T-089（FR-049）：属性测试仅测试期使用（tests/properties.rs），
+# 不进入运行时依赖图（方案 §14.6）。
+[dev-dependencies]
+proptest = "1"

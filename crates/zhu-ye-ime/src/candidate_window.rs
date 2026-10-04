@@ -9,9 +9,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{
-    COLORREF, ERROR_SUCCESS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
-};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetDIBits,
@@ -19,15 +17,12 @@ use windows::Win32::Graphics::Gdi::{
     RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
     COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET, DEFAULT_GUI_FONT,
-    DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, LOGFONTW, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY,
+    TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
-    REG_VALUE_TYPE,
-};
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -45,8 +40,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::candidate_ui::{
-    index_marker, theme, theme_from_system_colors, CandidateMetrics, CandidateUiTheme,
-    CandidateUiView, SystemColors, UiColor, UiRect, UiThemeKind, BASE_DPI,
+    display_main_text, index_marker, theme, theme_from_system_colors, theme_with_candidate,
+    CandidateMetrics, CandidateUiTheme, CandidateUiView, SystemColors, UiColor, UiRect,
+    UiThemeKind, BASE_DPI,
 };
 
 /// 窗口主题偏好；`Auto` 跟随系统深浅色与高对比度。
@@ -68,6 +64,8 @@ pub struct CandidateWindowOptions {
     pub dpi: Option<u32>,
     pub seconds: Option<u64>,
     pub shot_path: Option<PathBuf>,
+    /// 自定义主题文件（T-088 / FR-048）；`Some` 时叠加 `candidate` 节配色。
+    pub custom_theme: Option<zhu_ye_core::ThemeFile>,
 }
 
 /// 候选窗放置点：`anchor` 为组成区屏幕坐标左边界/底部，窗口显示在其下方。
@@ -83,21 +81,58 @@ pub struct CandidateWindowPlacement {
 pub struct CandidateWindow {
     hwnd: HWND,
     state_ptr: *mut CandidateWindowState,
+    /// 主题偏好；TSF 侧由 `config.json` 的 `theme` 决定（FR-041），演示工具默认 `Auto`。
+    theme_pref: ThemePreference,
+    /// 自定义主题文件（T-088 / FR-048）；`Some` 时解析配色叠加 `candidate` 节。
+    custom_theme: Option<zhu_ye_core::ThemeFile>,
 }
 
 impl CandidateWindow {
     /// 创建候选窗控制器；视图在首次 `update` 时落盘，此处只预留空状态。
     #[must_use]
     pub fn new() -> Self {
+        Self::with_theme(ThemePreference::Auto)
+    }
+
+    /// 按指定主题偏好创建控制器。
+    ///
+    /// 偏好只在窗口首次创建时解析为配色；主题属装配项，改动需输入法重新装配才生效
+    /// （P-12，设置窗口的"主题"条目即通过重写 `config.json` 达成）。
+    #[must_use]
+    pub fn with_theme(theme_pref: ThemePreference) -> Self {
         Self {
             hwnd: HWND::default(),
             state_ptr: std::ptr::null_mut(),
+            theme_pref,
+            custom_theme: None,
         }
     }
 
-    /// 更新候选视图；无候选时隐藏窗口，有候选且窗口未创建时创建并显示。
+    /// 按自定义主题文件创建控制器（T-088 / FR-048）。
+    ///
+    /// 基础配色按 `Auto` 语义（同 T-030：默认浅色基底，高对比度仍走系统配色），
+    /// 主题文件的 `candidate` 节在解析时叠加：缺键回退基础预设。
+    #[must_use]
+    pub fn with_custom_theme(file: zhu_ye_core::ThemeFile) -> Self {
+        Self {
+            hwnd: HWND::default(),
+            state_ptr: std::ptr::null_mut(),
+            theme_pref: ThemePreference::Auto,
+            custom_theme: Some(file),
+        }
+    }
+
+    /// 当前主题偏好。
+    #[must_use]
+    pub fn theme_preference(&self) -> ThemePreference {
+        self.theme_pref
+    }
+
+    /// 更新候选视图；组合串为空且无任何候选项（含上屏联想，T-059）时隐藏窗口，
+    /// 否则创建（如未创建）并显示。无候选词时也显示——只画页眉条
+    /// （组合串与拼音提示），见 T-031。
     pub fn update(&mut self, view: CandidateUiView, placement: Option<CandidateWindowPlacement>) {
-        if view.visible_items().is_empty() {
+        if view.composition.is_empty() && view.items.is_empty() {
             self.hide();
             return;
         }
@@ -154,10 +189,11 @@ impl CandidateWindow {
             }
             let initial_dpi = GetDpiForSystem().max(BASE_DPI);
             let options = CandidateWindowOptions {
-                theme: ThemePreference::Auto,
+                theme: self.theme_pref,
                 dpi: None,
                 seconds: None,
                 shot_path: None,
+                custom_theme: self.custom_theme.clone(),
             };
             let state = Box::new(CandidateWindowState::new_with_quit(
                 view.clone(),
@@ -165,7 +201,7 @@ impl CandidateWindow {
                 initial_dpi,
                 false,
             ));
-            if state.view.visible_items().is_empty() {
+            if state.view.composition.is_empty() {
                 return;
             }
             let (width, height) = state.metrics.panel_size(state.view.panel_rows());
@@ -284,7 +320,7 @@ impl CandidateWindowState {
         let (font, font_is_stock) = create_font(metrics.font_height);
         Self {
             view,
-            theme: resolve_theme(options.theme),
+            theme: resolve_with_custom(options.theme, options.custom_theme.as_ref()),
             metrics,
             font,
             font_is_stock,
@@ -318,6 +354,10 @@ impl CandidateWindowState {
 
     /// 把一帧快照画到指定 DC；`width`/`height` 为窗口客户区尺寸。
     fn paint(&mut self, hdc: HDC, width: i32, height: i32) {
+        // 关键修复（T-034）：此前创建了 `create_font` 的 HFONT 却从未
+        // `SelectObject` 进绘制 DC，所有 DrawTextW 都用了 DC 默认字体
+        // （现代中文 Windows 上为微软雅黑），字体名改动因此不生效。
+        let old_font = unsafe { SelectObject(hdc, self.font.into()) };
         let selected = self.view.selected_on_page();
         let page_rows = self.view.panel_rows();
         let visible = self.view.visible_items();
@@ -332,10 +372,17 @@ impl CandidateWindowState {
         );
 
         for index in 0..page_rows {
-            let row = to_win_rect(self.metrics.row_rect(index));
             let is_selected = selected == Some(index);
             if is_selected {
-                fill_rect(hdc, row, self.theme.highlight_background);
+                // 搜狗风选中块：圆角浅蓝块（与窗口圆角一致的半径）。
+                // T-043：改用贴面板左右边框的整行高亮矩形，序号仍按内容行
+                // 布局，摆脱"序号贴高亮块左缘"的局促观感。
+                fill_round_rect(
+                    hdc,
+                    to_win_rect(self.metrics.highlight_rect(index)),
+                    self.theme.highlight_background,
+                    self.metrics.corner_radius,
+                );
             }
             let Some(item) = visible.get(index) else {
                 continue;
@@ -354,9 +401,12 @@ impl CandidateWindowState {
                 marker_color,
             );
 
+            // M6-R：网络语缩写候选在主文本后追加 `[网络]` 标注；
+            // 标注并入主文本，宽度估算（row_split）自然把它计入。
+            let main_owned = display_main_text(item, self.view.translation_mode);
             let (main, secondary) = if self.view.translation_mode && !item.translation.is_empty() {
                 (
-                    item.translation.as_str(),
+                    main_owned.as_str(),
                     if item.text == item.translation {
                         ""
                     } else {
@@ -364,20 +414,18 @@ impl CandidateWindowState {
                     },
                 )
             } else {
-                (item.text.as_str(), item.translation.as_str())
+                (main_owned.as_str(), item.translation.as_str())
             };
             let text_color = if is_selected {
                 self.theme.highlight_foreground
             } else {
                 self.theme.foreground
             };
-            draw_text(hdc, main, self.metrics.text_rect(row_ui), text_color);
-            draw_text(
-                hdc,
-                secondary,
-                self.metrics.translation_rect(row_ui),
-                self.theme.secondary,
-            );
+            // T-037：动态分栏——译文紧跟主文本（不再固定右侧 1/3 列），
+            // 英文译文更靠左、可用宽度更大。
+            let (main_rect, translation_rect) = self.metrics.row_split(row_ui, main, secondary);
+            draw_text(hdc, main, main_rect, text_color);
+            draw_text(hdc, secondary, translation_rect, self.theme.secondary);
         }
 
         let header_text = if !self.view.composition.is_empty() {
@@ -385,6 +433,17 @@ impl CandidateWindowState {
         } else {
             self.view.pinyin_hint.as_str()
         };
+        // T-040：页脚 m/n 翻页指示（总页数 >1 时在面板底部右端显示）。
+        if page_rows > 0 {
+            if let Some(label) = self.view.footer_label() {
+                draw_text_right(
+                    hdc,
+                    &label,
+                    self.metrics.footer_rect(page_rows),
+                    self.theme.secondary,
+                );
+            }
+        }
         draw_text(
             hdc,
             header_text,
@@ -398,6 +457,10 @@ impl CandidateWindowState {
                 self.metrics.header_hint_rect(),
                 self.theme.secondary,
             );
+        }
+        // 恢复旧字体；`paint_window` 每帧用全新兼容 DC，恢复是防御性的。
+        unsafe {
+            SelectObject(hdc, old_font);
         }
     }
 }
@@ -709,6 +772,15 @@ fn paint_background(
         }
         let old_brush = SelectObject(hdc, brush.into());
         let old_pen = SelectObject(hdc, pen.into());
+        // T-037：先以背景色填满整个客户区，再画圆角矩形。此前只画圆角矩形，
+        // 圆角外侧四角从未填充——内存 DC 初始（黑/杂色）像素直接透出，
+        // 表现为四个角的黑点。垫底后四角为背景色。
+        let rect = RECT {
+            right: width,
+            bottom: height,
+            ..Default::default()
+        };
+        FillRect(hdc, &rect, brush);
         let diameter = radius.saturating_mul(2);
         let _ = RoundRect(hdc, 0, 0, width, height, diameter, diameter);
         SelectObject(hdc, old_brush);
@@ -718,14 +790,36 @@ fn paint_background(
     }
 }
 
-fn fill_rect(hdc: HDC, rect: RECT, color: UiColor) {
+/// 圆角填充矩形（选中块用）；无边框，圆角半径与窗口一致。
+fn fill_round_rect(hdc: HDC, rect: RECT, color: UiColor, radius: i32) {
     unsafe {
         let brush = CreateSolidBrush(COLORREF(color.to_colorref()));
-        if brush.is_invalid() {
+        let pen = CreatePen(PS_NULL, 0, COLORREF(color.to_colorref()));
+        if brush.is_invalid() || pen.is_invalid() {
+            if !brush.is_invalid() {
+                let _ = DeleteObject(brush.into());
+            }
+            if !pen.is_invalid() {
+                let _ = DeleteObject(pen.into());
+            }
             return;
         }
-        FillRect(hdc, &rect, brush);
+        let old_brush = SelectObject(hdc, brush.into());
+        let old_pen = SelectObject(hdc, pen.into());
+        let diameter = radius.saturating_mul(2);
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            diameter,
+            diameter,
+        );
+        SelectObject(hdc, old_brush);
+        SelectObject(hdc, old_pen);
         let _ = DeleteObject(brush.into());
+        let _ = DeleteObject(pen.into());
     }
 }
 
@@ -747,13 +841,31 @@ fn draw_text(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
     }
 }
 
+/// 右对齐绘制一行文本（T-040 页脚页码用；不做省略截断）。
+fn draw_text_right(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
+    if text.is_empty() || rect.width() <= 0 || rect.height() <= 0 {
+        return;
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = to_win_rect(rect);
+    unsafe {
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(color.to_colorref()));
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut rect,
+            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT,
+        );
+    }
+}
+
 fn create_font(height: i32) -> (HFONT, bool) {
     unsafe {
         let mut face = [0u16; 32];
-        for (slot, unit) in face
-            .iter_mut()
-            .zip("Microsoft YaHei UI".encode_utf16().chain(Some(0)))
-        {
+        // T-034：候选框字体为宋体（SimSun）。此前字体名虽设为雅黑却从未
+        // SelectObject，实际渲染的一直是 DC 默认字体；paint() 已修复选择。
+        for (slot, unit) in face.iter_mut().zip("SimSun".encode_utf16().chain(Some(0))) {
             *slot = unit;
         }
         let metrics = LOGFONTW {
@@ -907,16 +1019,12 @@ fn build_bmp(width: i32, height: i32, pixels: &[u8]) -> Vec<u8> {
 }
 
 fn resolve_theme(pref: ThemePreference) -> CandidateUiTheme {
+    // 纯偏好解析；自定义主题文件叠加由 `resolve_with_custom` 承担。
     let high_contrast = system_high_contrast_on();
     let kind = match pref {
         ThemePreference::Auto if high_contrast => UiThemeKind::HighContrast,
-        ThemePreference::Auto => {
-            if apps_use_light_theme() {
-                UiThemeKind::Light
-            } else {
-                UiThemeKind::Dark
-            }
-        }
+        // T-030：默认固定浅色，不再跟随系统深浅色（深色仅经显式设置使用）。
+        ThemePreference::Auto => UiThemeKind::Light,
         ThemePreference::Light => UiThemeKind::Light,
         ThemePreference::Dark => UiThemeKind::Dark,
         ThemePreference::HighContrast => UiThemeKind::HighContrast,
@@ -925,6 +1033,24 @@ fn resolve_theme(pref: ThemePreference) -> CandidateUiTheme {
         theme_from_system_colors(system_colors())
     } else {
         theme(kind)
+    }
+}
+
+/// 主题最终配色：先按偏好取基础主题，再叠加自定义主题文件（T-088 / FR-048）。
+///
+/// 高对比度由系统接管（D-31），激活时不叠加主题文件；规则与设置窗口一致
+/// （`SettingsTheme` 侧在高对比度时同样跳过主题文件）。
+fn resolve_with_custom(
+    pref: ThemePreference,
+    custom: Option<&zhu_ye_core::ThemeFile>,
+) -> CandidateUiTheme {
+    let base = resolve_theme(pref);
+    if system_high_contrast_on() {
+        return base; // D-31：高对比度由系统接管，主题文件不覆盖。
+    }
+    match custom {
+        Some(file) => theme_with_candidate(base, &file.candidate),
+        None => base,
     }
 }
 
@@ -958,41 +1084,71 @@ fn system_colors() -> SystemColors {
     }
 }
 
-fn apps_use_light_theme() -> bool {
-    unsafe {
-        let path =
-            to_utf16_null("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
-        let value = to_utf16_null("AppsUseLightTheme");
-        let mut key = HKEY::default();
-        let status = RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(path.as_ptr()),
-            None,
-            KEY_READ,
-            &mut key,
-        );
-        if status != ERROR_SUCCESS {
-            return true;
-        }
-        let mut value_type = REG_VALUE_TYPE::default();
-        let mut data = 0u32;
-        let mut size = std::mem::size_of::<u32>() as u32;
-        let status = RegQueryValueExW(
-            key,
-            PCWSTR(value.as_ptr()),
-            None,
-            Some(&mut value_type),
-            Some(std::ptr::addr_of_mut!(data).cast()),
-            Some(&mut size),
-        );
-        let _ = RegCloseKey(key);
-        status == ERROR_SUCCESS && value_type == REG_DWORD && size == 4 && data != 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{build_bmp, to_utf16_null};
+    use super::{
+        build_bmp, resolve_theme, resolve_with_custom, system_high_contrast_on, to_utf16_null,
+        CandidateWindow, ThemePreference,
+    };
+
+    #[test]
+    fn 主题偏好由构造参数决定且默认自动() {
+        assert_eq!(
+            CandidateWindow::new().theme_preference(),
+            ThemePreference::Auto
+        );
+        assert_eq!(
+            CandidateWindow::default().theme_preference(),
+            ThemePreference::Auto
+        );
+        assert_eq!(
+            CandidateWindow::with_theme(ThemePreference::Dark).theme_preference(),
+            ThemePreference::Dark
+        );
+    }
+
+    #[test]
+    fn 自定义主题控制器以自动为基底且叠加候选节() {
+        use zhu_ye_core::parse_theme_file;
+        let file = parse_theme_file(
+            r##"{
+                "version": 1,
+                "name": "取证主题",
+                "candidate": { "background": "#112233", "foreground": "#FFEE00" }
+            }"##,
+        )
+        .expect("示例主题应解析");
+        let window = CandidateWindow::with_custom_theme(file);
+        assert_eq!(
+            window.theme_preference(),
+            ThemePreference::Auto,
+            "自定义主题以 Auto（浅色基底 + 高对比由系统接管）语义运行"
+        );
+        // 叠加结果：出现主题色即证明文件参与解析；非高对比环境（CI/日常桌面）下
+        // 基底为浅色，背景被覆盖为 0x112233。
+        if !system_high_contrast_on() {
+            let resolved = resolve_with_custom(window.theme_pref, window.custom_theme.as_ref());
+            assert_eq!(
+                resolved.background,
+                crate::candidate_ui::UiColor(0x11_22_33)
+            );
+            assert_eq!(
+                resolved.foreground,
+                crate::candidate_ui::UiColor(0xFF_EE_00)
+            );
+            // 未写键保留浅色基底。
+            assert_eq!(
+                resolved.marker,
+                crate::candidate_ui::theme(crate::candidate_ui::UiThemeKind::Light).marker
+            );
+        }
+        // 无自定义主题时与原路径逐位一致（基础配色不变）。
+        let plain = resolve_theme(ThemePreference::Light);
+        let base = crate::candidate_ui::theme(crate::candidate_ui::UiThemeKind::Light);
+        if !system_high_contrast_on() {
+            assert_eq!(plain, base);
+        }
+    }
 
     #[test]
     fn utf16转换以空字符结尾() {

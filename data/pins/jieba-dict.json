@@ -1,0 +1,14 @@
+{
+  "id": "jieba-dict",
+  "name": "jieba dict.txt（常用词骨架扩充 + 第二词频源）",
+  "role": "base-expansion",
+  "kind": "url",
+  "url": "https://raw.githubusercontent.com/fxsjy/jieba/master/jieba/dict.txt",
+  "cache_file": "jieba-dict.txt",
+  "license": "MIT",
+  "license_note": "数据随代码以 MIT 授权，保留版权声明",
+  "sha256": "7197C3211DDD98962B036CDF40324D1EA2BFAA12BD028E68FAA70111A88E12A8",
+  "size": 5071852,
+  "note": "约 34.9 万行（调研实测），格式「词 词频 词性」；词频源为 1998 年人民日报语料等，年代偏老，仅作第二词频源与覆盖面扩充（需求 R4-P10）",
+  "fetched_at": "2026-09-28"
+}

@@ -1,0 +1,8 @@
+# Bilingual-pair consistency record: the git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record with the project's
+# translation-pairing verifier:
+#   git hash-object 2026-10-02-tsf-identity-scripts-missing-utf8-bom.md
+#   git hash-object 2026-10-02-tsf-identity-scripts-missing-utf8-bom.zh.md
+2026-10-02-tsf-identity-scripts-missing-utf8-bom.md: 32f227fea06ca43858494c3b4184cd2d12df050c
+2026-10-02-tsf-identity-scripts-missing-utf8-bom.zh.md: 3bd98c0de1a05298e8096f51ca757c1180353bc9

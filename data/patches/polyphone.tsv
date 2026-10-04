@@ -1,0 +1,6 @@
+# 多音缺读补丁表（T-056）：为"规范读音有、CC-CEDICT 词库缺"的汉字补充日常读音。
+# 每行：汉字<TAB>补充读音（无调全拼）<TAB>备注；# 开头为注释。
+# 依据：《通用规范汉字表》读音对照（data/cache/kTGHZ2013.txt，8105 字）审计出的
+# 高频日常读音缺口；补丁在构建期应用（import --polyphone），并复经标准音节校验。
+谁	shui	shuí 口语音（用户主诉：输入 shui 候选无「谁」；CC-CEDICT 仅标 shei）
+熟	shou	shóu 口语音（输入 shou 候选无「熟」；CC-CEDICT 仅标 shu）

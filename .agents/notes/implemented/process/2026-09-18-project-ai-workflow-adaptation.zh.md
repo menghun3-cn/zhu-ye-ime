@@ -28,4 +28,4 @@ dsh 技能中的每一项 pnpm、Vitest、`./invariant`、ACP/Loader、HMR 或 d
 
 开发、提交与推送环节现在共享 `AGENTS.md` 这一份中文、面向 Rust 的唯一权威规则，消除了互相矛盾的指令。Agent Notes 可以随代码一起评审，并按标准生命周期归档。
 
-新增的 `scripts/verify-agent-notes.ps1` 与 `scripts/verify-translation-pairs.ps1` 已自动化笔记结构、归档封存与双语配对门禁；supersession 等语义判断仍需人工评审。git-publish 分支模型已固定为 `develop`（集成）→ `release/vX.Y.Z` → `main`（生产）→ tag `vX.Y.Z`，并写入 `AGENTS.md` 与技能配置（T-019）；发布按该模型执行。
+新增的 `scripts/verify-agent-notes.ps1` 与 `scripts/verify-translation-pairs.ps1` 已自动化笔记结构、归档封存与双语配对门禁；supersession 等语义判断仍需人工评审。git-publish 分支模型已固定为 `develop`（集成）→ `release/vX.Y.Z` → `main`（生产）→ tag `vX.Y.Z`，并写入 `AGENTS.md` 与技能配置（T-019）；发布按该模型执行。日常改动只能经工作分支 PR 进入 `develop`（T-047，见 [工作分支 PR 合入 develop 流程](2026-09-29-work-branch-pr-flow.zh.md)）。

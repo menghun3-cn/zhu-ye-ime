@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 use zhu_ye_core::dict::DictionaryEntry;
 use zhu_ye_core::pinyin::SyllableTable;
 
+use crate::polyphone::PatchEntry;
+
 /// 导入统计，供 CLI 输出与测试断言。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ImportStats {
@@ -35,6 +37,10 @@ pub struct ImportStats {
     pub invalid_syllables: usize,
     /// 未知音节去重排序后的样本（最多 20 个）。
     pub unknown_syllables: Vec<String>,
+    /// 多音缺读补丁实际写入词表的条数（T-056）。
+    pub polyphone_applied: usize,
+    /// 多音缺读补丁被跳过的条数（字不存在、读音已存在或音节非法）。
+    pub polyphone_skipped: usize,
 }
 
 /// 解析 CC-CEDICT 一行，返回简体词、带声调标记的拼音与首条可读译文。
@@ -122,7 +128,7 @@ pub fn normalize_pinyin(marked: &str) -> Option<String> {
 
 /// 按 CC-CEDICT 的空白/撇号分界拆分音节，并逐个归一化。
 /// 返回每个音节的无调连续全拼；任一分界片段含非法字符时返回 `None`。
-fn split_pinyin_syllables(marked: &str) -> Option<Vec<String>> {
+pub fn split_pinyin_syllables(marked: &str) -> Option<Vec<String>> {
     let mut syllables = Vec::new();
     for part in marked.split([' ', '\'']) {
         let part = part.trim();
@@ -139,7 +145,7 @@ fn split_pinyin_syllables(marked: &str) -> Option<Vec<String>> {
 }
 
 /// 检查简体词是否只由 CJK 统一表意文字组成。
-fn is_cjk_word(word: &str) -> bool {
+pub(crate) fn is_cjk_word(word: &str) -> bool {
     !word.is_empty()
         && word
             .chars()
@@ -185,10 +191,16 @@ fn segment_dictionary_words<'a>(
 ///
 /// 清洗规则：简体词须为纯 CJK 词形；无调拼音全部音节必须在标准全拼表中；
 /// 音节数必须与汉字数一致；同词同拼音只保留首个词条。词频未命中时按 1。
+///
+/// `polyphone_patches` 为多音缺读补丁（见 [`crate::polyphone`]）：对每条补丁，
+/// 读音必须通过标准音节校验，该字必须已存在于词表（不引入规范表外汉字），
+/// 且（字,读音）组合未出现过；满足条件时以该字现有最高词频写入一条新词条，
+/// 与原读音条目共存，不修改任何既有词条（补弱不污染）。
 pub fn build_real_dictionary(
     cedict_text: &str,
     frequency_text: &str,
     max_entries: Option<usize>,
+    polyphone_patches: &[PatchEntry],
 ) -> (Vec<DictionaryEntry>, ImportStats) {
     let table = SyllableTable::standard();
     let frequencies = load_frequency_map(frequency_text);
@@ -247,6 +259,57 @@ pub fn build_real_dictionary(
 
     if let Some(max) = max_entries {
         entries.truncate(max);
+    }
+    // T-056 多音缺读补丁：补丁只增不改，词频继承该字现有最高值。
+    let mut char_max_frequency: HashMap<String, u64> = HashMap::new();
+    for entry in &entries {
+        if entry.word.chars().count() == 1 {
+            let slot = char_max_frequency.entry(entry.word.clone()).or_insert(0);
+            *slot = (*slot).max(entry.frequency);
+        }
+    }
+    // 第一遍：只读校验，收集待应用补丁（避免借用冲突）。
+    let mut to_apply: Vec<&PatchEntry> = Vec::new();
+    let mut collected: HashSet<(String, String)> = HashSet::new();
+    for patch in polyphone_patches {
+        let character = patch.character.as_str();
+        if !char_max_frequency.contains_key(character) {
+            // 字不在词表：拒绝引入规范表外的生僻字形
+            stats.polyphone_skipped += 1;
+            continue;
+        }
+        let pinyin = patch.pinyin.as_str();
+        if !table.is_complete_syllable(pinyin) {
+            stats.polyphone_skipped += 1;
+            continue;
+        }
+        if entries
+            .iter()
+            .any(|entry| entry.word == patch.character && entry.pinyin == patch.pinyin)
+        {
+            // 组合已存在（可能是数据源自带该读音）
+            stats.polyphone_skipped += 1;
+            continue;
+        }
+        if !collected.insert((patch.character.clone(), patch.pinyin.clone())) {
+            // 补丁表内重复
+            stats.polyphone_skipped += 1;
+            continue;
+        }
+        to_apply.push(patch);
+    }
+    // 第二遍：写入词表，词频继承该字现有最高值。
+    for patch in &to_apply {
+        let frequency = char_max_frequency
+            .get(patch.character.as_str())
+            .copied()
+            .unwrap_or(1);
+        entries.push(DictionaryEntry::new(
+            patch.character.clone(),
+            patch.pinyin.clone(),
+            frequency,
+        ));
+        stats.polyphone_applied += 1;
     }
     stats.entry_count = entries.len();
     stats.unknown_syllables.sort();
@@ -324,6 +387,7 @@ mod tests {
         build_real_bigrams, build_real_dictionary, load_frequency_map, normalize_pinyin,
         parse_cedict_line,
     };
+    use crate::polyphone::PatchEntry;
 
     #[test]
     fn 解析ccdect数据行() {
@@ -374,7 +438,7 @@ mod tests {
     fn 真实样例构建并映射词频() {
         let cedict = "你好\t你好\t[ni3 hao3]\t/hello/\n世界\t世界\t[shi4 jie4]\t/world/";
         let frequencies = "你好 42\n";
-        let (entries, stats) = build_real_dictionary(cedict, frequencies, None);
+        let (entries, stats) = build_real_dictionary(cedict, frequencies, None, &[]);
         assert_eq!(entries.len(), 2);
         assert_eq!(stats.frequency_hits, 1);
         let hello = entries.iter().find(|entry| entry.word == "你好").unwrap();
@@ -393,7 +457,7 @@ mod tests {
             "AIDS\tAIDS\t[ai4 zi4]\t/AIDS/\n",
             "卡\t卡\t[ka3]\t/to check/\n"
         );
-        let (entries, stats) = build_real_dictionary(cedict, "", None);
+        let (entries, stats) = build_real_dictionary(cedict, "", None, &[]);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].word, "好");
         assert_eq!(entries[1].word, "卡");
@@ -406,7 +470,7 @@ mod tests {
     #[test]
     fn 音节数与字数不符被丢弃() {
         let cedict = "设计师\t设计师\t[she4 ji4]\t/designer/";
-        let (entries, stats) = build_real_dictionary(cedict, "", None);
+        let (entries, stats) = build_real_dictionary(cedict, "", None, &[]);
         assert!(entries.is_empty());
         assert_eq!(stats.dropped_syllable_count_mismatch, 1);
     }
@@ -414,7 +478,7 @@ mod tests {
     #[test]
     fn 重复词拼音去重并支持截断() {
         let cedict = "好\t好\t[hao3]\t/good/\n好\t好\t[hao4]\t/to like/\n";
-        let (entries, stats) = build_real_dictionary(cedict, "", Some(1));
+        let (entries, stats) = build_real_dictionary(cedict, "", Some(1), &[]);
         assert_eq!(stats.accepted_entries, 1);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].pinyin, "hao");
@@ -465,5 +529,71 @@ mod tests {
                 .map(|(_, _, frequency)| *frequency),
             Some(2)
         );
+    }
+
+    #[test]
+    fn 多音补丁谁shui与原读音共存且继承最高词频() {
+        let cedict = "誰\t谁\t[shei2]\t/who/\n水\t水\t[shui3]\t/water/";
+        let frequencies = "谁 42\n水 7\n";
+        let patches = [PatchEntry {
+            character: "谁".into(),
+            pinyin: "shui".into(),
+        }];
+        let (entries, stats) = build_real_dictionary(cedict, frequencies, None, &patches);
+        assert_eq!(stats.polyphone_applied, 1);
+        assert_eq!(stats.polyphone_skipped, 0);
+        // 原读音保留，新读音追加，且频率继承该字最高值（谁=42）
+        let shei = entries
+            .iter()
+            .find(|e| e.word == "谁" && e.pinyin == "shei")
+            .unwrap();
+        let shui = entries
+            .iter()
+            .find(|e| e.word == "谁" && e.pinyin == "shui")
+            .unwrap();
+        assert_eq!(shei.frequency, 42);
+        assert_eq!(shui.frequency, 42);
+    }
+
+    #[test]
+    fn 多音补丁跳过字不存在与重复组合() {
+        let cedict = "谁\t谁\t[shei2]\t/who/";
+        let patches = [
+            PatchEntry {
+                character: "谁".into(),
+                pinyin: "shui".into(),
+            },
+            PatchEntry {
+                character: "谁".into(),
+                pinyin: "shui".into(),
+            }, // 重复
+            PatchEntry {
+                character: "魑".into(),
+                pinyin: "chi".into(),
+            }, // 字在词表不存在
+        ];
+        let (entries, stats) = build_real_dictionary(cedict, "", None, &patches);
+        assert_eq!(stats.polyphone_applied, 1);
+        assert_eq!(stats.polyphone_skipped, 2);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn 多音补丁拒绝非法音节并跳过() {
+        let cedict = "谁\t谁\t[shei2]\t/who/";
+        let patches = [
+            PatchEntry {
+                character: "谁".into(),
+                pinyin: "ng".into(),
+            },
+            PatchEntry {
+                character: "谁".into(),
+                pinyin: "shui".into(),
+            },
+        ];
+        let (entries, stats) = build_real_dictionary(cedict, "", None, &patches);
+        assert_eq!(stats.polyphone_applied, 1);
+        assert_eq!(stats.polyphone_skipped, 1);
+        assert!(entries.iter().all(|e| e.pinyin != "ng"));
     }
 }

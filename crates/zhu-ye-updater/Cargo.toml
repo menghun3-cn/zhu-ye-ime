@@ -1,0 +1,11 @@
+[package]
+name = "zhu-ye-updater"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "竹叶输入法词典更新器：唯一联网组件，检查/下载/验签/应用词典包"
+
+[dependencies]
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
+zhu-ye-core = { path = "../zhu-ye-core" }

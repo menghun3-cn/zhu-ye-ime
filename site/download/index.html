@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>下载 — 竹叶输入法</title>
+<meta name="description" content="竹叶输入法下载：Windows 10/11 x64。发行包（便携 zip；exe 安装包规划中）将最先出现在 GitHub Releases；内测阶段也可从源码构建。">
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/site.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../index.html">
+      <img class="brand-mark" src="../assets/logo-mark.svg" alt="竹叶输入法标志" width="26" height="26">
+      <span class="brand-zh">竹叶</span><span class="brand-latin">ZHUYE</span>
+    </a>
+    <nav class="site-nav" aria-label="站点导航">
+      <a class="nav-link" href="../index.html">首页</a>
+      <a class="nav-link" href="../docs/index.html">文档</a>
+      <a class="nav-link" href="../download/index.html" aria-current="page">下载</a>
+      <a class="nav-link" href="../privacy/index.html">隐私</a>
+      <a class="nav-link" href="../about/index.html">关于</a>
+    </nav>
+    <a class="nav-gh" href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</header>
+
+<main class="wrap prose">
+
+  <h1>下载</h1>
+
+  <div class="note">
+    <h3>发布状态：内测阶段</h3>
+    <p>竹叶输入法目前是 <strong>Windows 内测版（v0.1.1-alpha）</strong>，正式对外发布与自动更新源正在
+    收尾。<strong>所有安装包都通过
+    <a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases</a>
+    提供，本站不托管安装包</strong>，下载以 Releases 页实际发布为准；正式版发布前，也可按仓库
+    <a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">README</a>
+    从源码自行构建。在线自动更新源尚未开通，升级方式为重新安装新发行包。</p>
+  </div>
+
+  <h2>发行包</h2>
+  <table class="docs">
+    <thead><tr><th>形态</th><th>状态</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>便携 zip（<code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>）</td>
+        <td>内测期产物</td>
+        <td>含安装脚本、设置窗口、更新器与基础/领域词典；免安装 Rust，解压后以管理员运行
+        <code>install.ps1</code> 即可安装</td>
+      </tr>
+      <tr>
+        <td>Windows exe 安装包</td>
+        <td><span class="tag">规划中</span></td>
+        <td>图形化安装包随正式发布流程制作，就绪后同样作为 Releases 资产提供，本站届时放上直链</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>系统要求</h2>
+  <table class="docs">
+    <thead><tr><th>项目</th><th>要求</th></tr></thead>
+    <tbody>
+      <tr><td>操作系统</td><td>Windows 10 / 11（x64）</td></tr>
+      <tr><td>使用场景</td><td>现代 TSF 应用：记事本、浏览器、IDE、Office 等</td></tr>
+      <tr><td>网络</td><td>不需要（默认完全离线；可选在线词典更新默认关闭）</td></tr>
+    </tbody>
+  </table>
+
+  <h2>安装</h2>
+  <ol>
+    <li>从 <a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases</a>
+      取得当前发行包（内测期为 <code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>），解压到目标机
+      （无需安装 Rust）。</li>
+    <li>右键「以管理员身份运行」PowerShell，执行包内脚本：<code>.\scripts\install.ps1</code>。</li>
+    <li>进入系统设置
+      <code>设置 → 时间和语言 → 语言和区域 → 中文（简体，中国）→ 键盘</code>，
+      确认「竹叶输入法」已启用。</li>
+    <li>用 <kbd>Win</kbd>+<kbd>Space</kbd> 或 <kbd>Ctrl</kbd>+<kbd>Shift</kbd> 切换输入法，开始输入。</li>
+  </ol>
+  <p>建议先在虚拟机或系统还原点保护下测试安装/卸载闭环。包内
+  <code>scripts\verify-tsf-identity.ps1</code> 可在目标机复核 TSF 标识（6 项）。</p>
+
+  <h2>卸载</h2>
+  <p>以管理员身份运行包内 <code>.\scripts\uninstall.ps1</code>，即可完整移除注册表项、DLL、设置窗口、
+  更新器与开始菜单快捷方式。用户词库与配置位于
+  <code>%APPDATA%\ai-zhu-ye-ime</code>，<strong>卸载默认保留</strong>；确认不再需要时手动删除该目录。</p>
+
+  <h2>从源码构建（开发者）</h2>
+  <p>需要 Windows 10/11 x64、Rust 1.98.1+（<code>x86_64-pc-windows-msvc</code> 目标）与 Git。
+  构建与发行包打包步骤见仓库
+  <a href="https://github.com/menghun3-cn/zhu-ye-ime/blob/develop/docs/安装与使用.md" target="_blank" rel="noopener">docs/安装与使用.md</a>
+  与 <code>scripts/package-portable.ps1</code>。</p>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div>
+      <div class="footer-brand-zh">竹叶输入法</div>
+      <div class="footer-slogan">输入中文，候选词旁有译文。</div>
+    </div>
+    <nav class="footer-col" aria-label="站点">
+      <h4>站点</h4>
+      <ul>
+        <li><a href="../index.html">首页</a></li>
+        <li><a href="../docs/index.html">文档</a></li>
+        <li><a href="../download/index.html">下载</a></li>
+        <li><a href="../privacy/index.html">隐私</a></li>
+        <li><a href="../about/index.html">关于</a></li>
+      </ul>
+    </nav>
+    <nav class="footer-col" aria-label="社区">
+      <h4>社区</h4>
+      <ul>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">GitHub 仓库</a></li>
+        <li><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">Releases</a></li>
+      </ul>
+    </nav>
+    <div class="footer-status">Windows 内测版 · M1–M13 核心能力已实现（自动化验证通过）· 部分真实环境交互验收收尾中</div>
+    <div class="footer-copy">© 2026 竹叶输入法 · 代码 MIT · 词典数据来源与许可证见仓库 docs/licenses.md · <a href="../llms.txt">llms.txt（AI 阅读版）</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

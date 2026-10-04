@@ -2,13 +2,16 @@
 resolver = "2"
 members = [
     "crates/zhu-ye-core",
+    "crates/zhu-ye-ui",
     "crates/zhu-ye-ime",
+    "crates/zhu-ye-settings",
     "crates/zhu-ye-dict",
     "crates/zhu-ye-cli",
+    "crates/zhu-ye-updater",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1-alpha"
 edition = "2021"
 rust-version = "1.98.1"
 license = "MIT OR Apache-2.0"

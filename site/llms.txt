@@ -1,0 +1,31 @@
+# 竹叶输入法 (zhu-ye)
+
+> 竹叶输入法是一款 Windows 10/11（x64）轻量拼音输入法，Rust 编写、TSF 架构：输入中文时，候选行内直接附英文译文，按 Tab 即可上屏英文。当前为内测版（v0.1.1-alpha），正式发布与在线更新源收尾中。代码 MIT。
+
+补充说明（帮助 AI 理解本文件与站点）：
+
+- 站点（含本文件与其他页面）只宣称**已实现并通过测试/验收**的能力；规划中的能力只在首页「路线图」区块出现并带「规划中」标注
+- 仅支持 Windows 10/11 x64；无其他平台版本；英文站为规划中的后续任务
+- 译文方向固定为「中 → 英」；不含词汇记忆练习；本文件与各页面不宣称任何云端智能能力，未经验证的智能类能力一律以「规划中」标注
+- 所有安装包一律通过 GitHub Releases 提供，本站不托管安装包；在线自动更新源尚未开通
+
+## 概况
+
+- [首页](index.html): 定位、产品特性、候选窗示例、路线图
+- [关于](about/index.html): 项目简介、技术栈、许可与数据来源、链接
+- [隐私](privacy/index.html): 默认零网络、输入只在本机处理、数据位置说明
+
+## 获取与使用
+
+- [下载](download/index.html): 发布状态、发行包形态（便携 zip；exe 安装包规划中）、安装与卸载步骤
+- [文档](docs/index.html): 安装、启用与切换、键位表、译文用法、用户词、故障排查
+
+## 开发与许可
+
+- [GitHub 仓库](https://github.com/menghun3-cn/zhu-ye-ime): 源码、issues、PR
+- [GitHub Releases](https://github.com/menghun3-cn/zhu-ye-ime/releases): 发行包（以实际发布为准）
+- [词典数据来源与许可证](https://github.com/menghun3-cn/zhu-ye-ime/blob/develop/docs/licenses.md)
+
+## Optional
+
+- [候选窗示例插图](assets/cand-window.svg): 产品候选窗真实配色快照（S-15）

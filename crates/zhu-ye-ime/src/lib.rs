@@ -9,6 +9,7 @@
 pub mod candidate_ui;
 pub mod candidate_window;
 pub mod input;
+pub mod lang_bar;
 pub mod tsf;
 
 pub use input::{m1_seed_dictionary, InputEngine, InputMode};

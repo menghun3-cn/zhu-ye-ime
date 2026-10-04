@@ -1,12 +1,15 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
 校验竹叶输入法 DLL 是否可加载且包含 TSF 所需导出函数。
 
 .DESCRIPTION
 以最小副作用方式加载 DLL（不解析依赖、不执行 DllMain），
-检查 DllGetClassObject、DllCanUnloadNow、dll_probe、paired_core_version 四个导出符号。
+检查 DllGetClassObject、DllCanUnloadNow、dll_probe 三个导出符号。
 不修改注册表或文件系统。
+
+注意：`paired_core_version` 是 crate 内的普通 pub fn（无 #[no_mangle]），
+不是 DLL 导出，不在此校验范围内。
 
 .EXAMPLE
 .\scripts\verify-tsf-dll.ps1 -DllPath .\target\release\zhu_ye_ime.dll
@@ -22,6 +25,21 @@ if ($null -eq $resolved) {
     throw "DLL 不存在: $DllPath"
 }
 $fullPath = [string]$resolved
+
+# 先做 PE 头静态校验：防止把非 PE 文件（文本/损坏文件）当作 DLL 注册。
+# 实测 LoadLibraryEx(DONT_RESOLVE_DLL_REFERENCES) 对部分无效文件不报错，
+# 因此不能只依赖加载结果。
+$bytes = [System.IO.File]::ReadAllBytes($fullPath)
+if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+    throw "不是有效的 PE 文件（缺少 MZ 头）: $fullPath"
+}
+$peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+if ($peOffset -lt 0 -or $peOffset + 4 -gt $bytes.Length -or
+    $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
+    $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
+    throw "不是有效的 PE 文件（缺少 PE 签名）: $fullPath"
+}
+Write-Host "PE 头校验通过: $fullPath"
 
 Add-Type -TypeDefinition @'
 using System;

@@ -79,6 +79,36 @@ impl UserDictionary {
         self.entries.clear();
     }
 
+    /// 合并一条外部词频条目（导入口径，T-088 / FR-048"同拼音同词频取 max"）：
+    /// 键已存在时词频取本地与外部较大值（保留本地 `last_used`），否则新增
+    /// （`last_used` 记 0）。非法条目（空词/空拼音/零词频）忽略。
+    ///
+    /// 返回 `true` 表示键为新增。调用方（设置窗口导入）校验通过后才落盘。
+    pub fn merge_external(&mut self, word: &str, pinyin: &str, frequency: u64) -> bool {
+        if word.is_empty() || pinyin.is_empty() || frequency == 0 {
+            return false;
+        }
+        let key = (word.to_owned(), pinyin.to_owned());
+        match self.entries.get_mut(&key) {
+            Some(entry) => {
+                entry.frequency = entry.frequency.max(frequency);
+                false
+            }
+            None => {
+                self.entries.insert(
+                    key,
+                    UserWord {
+                        word: word.to_owned(),
+                        pinyin: pinyin.to_owned(),
+                        frequency,
+                        last_used: 0,
+                    },
+                );
+                true
+            }
+        }
+    }
+
     /// 查询用户词频；未记录返回 0。
     #[must_use]
     pub fn frequency(&self, word: &str, pinyin: &str) -> u64 {
@@ -203,5 +233,30 @@ mod tests {
         assert_eq!(first[0].word, "叶子");
         assert_eq!(first[1].word, "竹");
         assert_eq!(first[2].word, "竹叶");
+    }
+
+    #[test]
+    fn 外部合并同键取最大词频并保留本地学习时间() {
+        let mut u = UserDictionary::new();
+        u.record_selection("竹叶", "zhuye", 1_700_000_000);
+        // 外部词频更低 → 保持本地 1。
+        assert!(!u.merge_external("竹叶", "zhuye", 0));
+        assert!(!u.merge_external("竹叶", "zhuye", 0), "零词频忽略");
+        assert_eq!(u.frequency("竹叶", "zhuye"), 1);
+        assert_eq!(
+            u.words_sorted()[0].last_used,
+            1_700_000_000,
+            "既有条目的学习时间不被外部合并覆盖"
+        );
+        // 外部词频更高 → 取外部值。
+        assert!(!u.merge_external("竹叶", "zhuye", 9));
+        assert_eq!(u.frequency("竹叶", "zhuye"), 9);
+        // 新键 → 新增。
+        assert!(u.merge_external("新词", "xinci", 2));
+        assert_eq!(u.frequency("新词", "xinci"), 2);
+        // 非法条目丢弃。
+        assert!(!u.merge_external("", "kong", 1));
+        assert!(!u.merge_external("无拼音", "", 1));
+        assert_eq!(u.len(), 2);
     }
 }

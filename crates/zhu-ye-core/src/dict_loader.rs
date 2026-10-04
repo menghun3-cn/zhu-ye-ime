@@ -25,6 +25,8 @@ use crate::{Error, Result};
 pub struct DictionaryFile {
     map: Arc<Mmap>,
     header: crate::dict_format::DictHeader,
+    /// 来源路径；仅用于日志与自检，不参与查询。内存构造时为 `None`。
+    path: Option<Arc<std::path::PathBuf>>,
 }
 
 impl fmt::Debug for DictionaryFile {
@@ -53,7 +55,9 @@ impl DictionaryFile {
             .map_err(|error| Error::Dictionary(format!("打开词典文件失败: {error}")))?;
         let map = unsafe { MmapOptions::new().map(&file) }
             .map_err(|error| Error::Dictionary(format!("内存映射失败: {error}")))?;
-        Self::from_map(map)
+        let mut mapped = Self::from_map(map)?;
+        mapped.path = Some(Arc::new(path.to_path_buf()));
+        Ok(mapped)
     }
 
     fn from_map(map: Mmap) -> Result<Self> {
@@ -67,9 +71,22 @@ impl DictionaryFile {
         let file = Self {
             map: Arc::new(map),
             header,
+            path: None,
         };
         file.validate_layout()?;
         Ok(file)
+    }
+
+    /// 返回来源路径；内存构造的实例返回 `None`。
+    #[must_use]
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref().map(std::path::PathBuf::as_path)
+    }
+
+    /// 返回词条总数，供自检与多包装配日志使用。
+    #[must_use]
+    pub fn entry_count(&self) -> u64 {
+        u64::from(self.header.entry_count)
     }
 
     /// 返回解析后的头部元数据，供检查与日志使用。
@@ -443,6 +460,10 @@ impl DictionaryFile {
                 high = mid;
             }
         }
+        if low >= self.header.reverse_translation_count as usize {
+            // 键大于全部反查键：二分停在末尾，直接判定未命中，避免越界。
+            return None;
+        }
         let record = ReverseTranslationRecord::new(
             &self.reverse_translation_records()[low * REVERSE_TRANSLATION_RECORD_SIZE
                 ..(low + 1) * REVERSE_TRANSLATION_RECORD_SIZE],
@@ -493,11 +514,120 @@ impl Dictionary for DictionaryFile {
         found.sort_by_key(|entry| std::cmp::Reverse(entry.frequency));
         found
     }
+
+    fn lookup_prefix(&self, pinyin_prefix: &str) -> Vec<DictionaryEntry> {
+        if pinyin_prefix.is_empty() {
+            return Vec::new();
+        }
+        // 拼音索引按拼音串升序排列：先二分到首个 >= 前缀的位置，再线性扫描
+        // 仍以前缀开头的记录，把各拼音下的词条汇总后按词频降序返回。
+        let mut low = 0usize;
+        let mut high = self.header.pinyin_index_count as usize;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let record = PinyinIndexRecord::new(
+                &self.index_records()
+                    [mid * PINYIN_INDEX_RECORD_SIZE..(mid + 1) * PINYIN_INDEX_RECORD_SIZE],
+            );
+            let key = self.text_unchecked(
+                u32::try_from(record.pinyin_offset()).expect("拼音索引偏移在 u32 内"),
+                record.pinyin_len(),
+            );
+            if key.as_bytes() < pinyin_prefix.as_bytes() {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let mut found = Vec::new();
+        for index in low..self.header.pinyin_index_count as usize {
+            let record = PinyinIndexRecord::new(
+                &self.index_records()
+                    [index * PINYIN_INDEX_RECORD_SIZE..(index + 1) * PINYIN_INDEX_RECORD_SIZE],
+            );
+            let key = self.text_unchecked(
+                u32::try_from(record.pinyin_offset()).expect("拼音索引偏移在 u32 内"),
+                record.pinyin_len(),
+            );
+            if !key.starts_with(pinyin_prefix) {
+                break;
+            }
+            for entry_index in record.entry_start()..record.entry_start() + record.entry_count() {
+                let entry = EntryRecord::new(
+                    &self.entry_records()[entry_index as usize * ENTRY_RECORD_SIZE
+                        ..(entry_index as usize + 1) * ENTRY_RECORD_SIZE],
+                );
+                let entry_pinyin = self.text_unchecked(entry.pinyin_offset(), entry.pinyin_len());
+                let translation = if entry.translation_len() == 0 {
+                    None
+                } else {
+                    Some(
+                        self.text_unchecked(entry.translation_offset(), entry.translation_len())
+                            .to_owned(),
+                    )
+                };
+                found.push(DictionaryEntry {
+                    word: self
+                        .text_unchecked(entry.word_offset(), entry.word_len())
+                        .to_owned(),
+                    pinyin: entry_pinyin.to_owned(),
+                    translation,
+                    frequency: u64::from(entry.frequency()),
+                });
+            }
+        }
+        found.sort_by_key(|entry| std::cmp::Reverse(entry.frequency));
+        found
+    }
 }
 
 impl BigramModel for DictionaryFile {
     fn frequency(&self, previous: &str, word: &str) -> u64 {
         self.find_bigram(previous, word).unwrap_or(0)
+    }
+
+    fn successors(&self, previous: &str, limit: usize) -> Vec<(String, u64)> {
+        // bigram 表按 (previous, word, frequency) 排序（见 dict_builder），
+        // 相同前词的记录连续：二分定位 (previous, "") 的下界后顺序扫描区段。
+        let count = self.header.bigram_count as usize;
+        if count == 0 || previous.is_empty() {
+            return Vec::new();
+        }
+        let mut low = 0usize;
+        let mut high = count;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let record = BigramRecord::new(
+                &self.bigram_records()[mid * BIGRAM_RECORD_SIZE..(mid + 1) * BIGRAM_RECORD_SIZE],
+            );
+            let key = (
+                self.text_unchecked(record.previous_offset(), record.previous_len()),
+                self.text_unchecked(record.word_offset(), record.word_len()),
+            );
+            if key < (previous, "") {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let mut items: Vec<(String, u64)> = Vec::new();
+        for index in low..count {
+            let record = BigramRecord::new(
+                &self.bigram_records()
+                    [index * BIGRAM_RECORD_SIZE..(index + 1) * BIGRAM_RECORD_SIZE],
+            );
+            let prev = self.text_unchecked(record.previous_offset(), record.previous_len());
+            if prev != previous {
+                break;
+            }
+            let word = self
+                .text_unchecked(record.word_offset(), record.word_len())
+                .to_owned();
+            items.push((word, u64::from(record.frequency())));
+        }
+        items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        items.truncate(limit);
+        items
     }
 }
 
@@ -699,6 +829,15 @@ mod tests {
         assert_eq!(file.frequency("你好", "中国"), 0);
         assert_eq!(file.frequency("我们", "的"), 0);
 
+        // T-058 后继检索：bigram 表按前词连续，下界二分 + 区段扫描取高频后继。
+        assert_eq!(
+            file.successors("世界", 5),
+            vec![("你好".to_owned(), 90), ("中国".to_owned(), 60),]
+        );
+        assert_eq!(file.successors("你好", 1), vec![("世界".to_owned(), 120)]);
+        assert!(file.successors("未收录", 5).is_empty());
+        assert!(file.successors("", 5).is_empty());
+
         assert_eq!(file.zh_to_en("你好").as_deref(), Some("hello"));
         assert_eq!(file.zh_to_en("中国").as_deref(), Some("China"));
         assert_eq!(file.zh_to_en("尼好"), None);
@@ -728,6 +867,23 @@ mod tests {
         assert_eq!(file.lookup("ceshi").len(), 1);
         assert_eq!(file.zh_to_en("测试"), None);
         assert_eq!(file.en_to_zh("test"), None);
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 反查键大于全部记录时不越界() {
+        // 回归（T-056）：en_to_zh 二分落在序列末尾时（如实参为中文键，UTF-8 字节
+        // 大于全部英文反查键）曾在取记录处发生下标越界 panic（dict_loader:464）。
+        let dir = temp_dir("reverse-boundary");
+        let path = dir.join("boundary.zyct");
+        let bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let file = DictionaryFile::open(&path).unwrap();
+        assert_eq!(file.en_to_zh("谁"), None);
+        assert_eq!(file.en_to_zh("zzzzzz"), None);
+        assert_eq!(file.en_to_zh(""), None);
+        assert_eq!(file.en_to_zh("hello"), Some("你好".to_owned()));
         drop(file);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -765,6 +921,32 @@ mod tests {
         let first = file.lookup("de");
         let texts: Vec<&str> = first.iter().map(|entry| entry.word.as_str()).collect();
         assert_eq!(texts, vec!["的", "得", "地"]);
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 拼音前缀查询按词频降序返回() {
+        let dir = temp_dir("prefix");
+        let path = dir.join("prefix.zyct");
+        let bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let file = DictionaryFile::open(&path).unwrap();
+
+        // `nih` 前缀：nihao 下的 你好(100)/尼好(1)，按词频降序。
+        let nih = file.lookup_prefix("nih");
+        let words: Vec<&str> = nih.iter().map(|e| e.word.as_str()).collect();
+        assert_eq!(words, vec!["你好", "尼好"]);
+        assert!(nih.iter().all(|e| e.pinyin.starts_with("nih")));
+        // 短前缀跨多个拼音仍按词频降序；`ni` 应包含 ni 与 nihao 两组。
+        let ni = file.lookup_prefix("ni");
+        assert!(ni.iter().any(|e| e.word == "你"));
+        assert!(ni.iter().any(|e| e.word == "你好"));
+        for entry in &ni {
+            assert!(entry.pinyin.starts_with("ni"));
+        }
+        assert!(file.lookup_prefix("zzzzz").is_empty());
+        assert!(file.lookup_prefix("").is_empty());
         drop(file);
         std::fs::remove_dir_all(dir).unwrap();
     }

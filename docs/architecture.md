@@ -2,9 +2,9 @@
 
 ## 文档信息
 
-- 版本：v0.1.0
-- 状态：已评审
-- 日期：2026-09-18
+- 版本：v0.2.0
+- 状态：已评审（第八期设置窗口为**规划中、尚未交付**，相关条目已标注）
+- 日期：2026-09-18（首版）；2026-10-02（补记第八期规划）
 - 依据：需求规格说明书、方案设计
 
 ## 1. 架构目标
@@ -39,6 +39,16 @@
 +---------------------------+
 ```
 
+第八期规划（**尚未交付**）新增两个独立进程，均不在宿主进程内运行：
+
+```text
+zhu-ye-settings.exe  设置窗口：ui / pages / config / inventory / registry / repair
+zhu-ye-updater.exe   词典更新器：唯一联网组件（T-051 已交付）
+```
+
+设置窗口经 `CreateProcess` 唤起更新器，自身不联网；TSF DLL 与设置窗口无进程内耦合。
+详见 [设置窗口设计.md](./设置窗口设计.md) 与需求规格说明书 §17。
+
 ## 3. 模块架构
 
 ```text
@@ -55,6 +65,13 @@ zhu-ye-ime
   ├── tsf       TSF COM 输入处理器、生命周期
   ├── ui        候选窗 Win32 自绘、主题、DPI
   └── bridge    TSF 事件 <-> zhu-ye-core 调用映射
+
+zhu-ye-settings（第八期规划，尚未交付）
+  ├── ui       设置窗口 Win32 自绘与消息循环
+  ├── pages    三页视图模型（纯逻辑）
+  ├── registry TSF 注册状态判据与两棵 HKLM 树读写
+  ├── repair   两级修复决策与提权子命令
+  └── inventory packs 扫描 + installed.json + 内置包静态表
 ```
 
 依赖规则（禁止反向）：
@@ -63,6 +80,7 @@ zhu-ye-ime
 - `zhu-ye-ime` 只做适配，不承载算法
 - `zhu-ye-dict` 只构建数据，不依赖运行时平台
 - `zhu-ye-cli` 可依赖全部 crate，仅用于开发调试
+- `zhu-ye-settings` 的配置读写、包清单扫描与修复决策不得依赖 Win32，以保持可单测
 
 ## 4. 关键数据流
 
@@ -88,6 +106,10 @@ Tab 切换模式 -> Candidate.translation 集合
 - TIP CLSID 固定为 `{E54D6682-8650-40E7-A9EE-6FD1137849AE}`；zh-CN Profile 固定为 `{6315FE74-92C3-439B-8CDF-FDB6E43EDAF1}`
 - DLL 只导出 `DllGetClassObject`、`DllCanUnloadNow` 与开发探针 `dll_probe`
 - 注册表只由 `scripts/install.ps1` / `scripts/uninstall.ps1` 管理；使用 `InProcServer32` + `ThreadingModel=Apartment`
+- **第八期规划（尚未交付）**：设置窗口的"修复输入法"需要在进程内重注册 TSF，本条"只由脚本管理"
+  的口径将被**部分取代**（脚本仍负责安装/卸载，设置窗口只负责修复性重注册）。代价是标识常量
+  双份维护，由 `scripts/verify-tsf-identity.ps1` 交叉比对兜底；理由与备选见
+  [Agent Note](../.agents/notes/proposed/architecture/2026-10-01-settings-window-process-and-registration-ownership.md)
 - `DllCanUnloadNow` 以活动对象数与 `LockServer` 计数双为零为卸载条件；不实现聚合
 - 完整注册契约、备选方案与后果见 [Agent Note](../.agents/notes/implemented/architecture/2026-09-18-tsf-registration-and-lifetime.md)（T-010）
 
@@ -194,6 +216,12 @@ score = static_score(word) × unigram_weight
 - 未来 AI/联网调用必须转入后台任务，完成后再派发回 UI 线程
 - 卸载：停止回调、撤销事件接收器、释放引用计数，最后释放注册
 
+第八期规划（**尚未交付**）：
+
+- 设置窗口是独立进程，单实例；关窗即退出，不驻留托盘（后台驻留进程数保持 0）
+- 设置窗口不发起网络请求；联网动作一律经 `CreateProcess` 交给唯一联网组件 `zhu-ye-updater.exe`
+- 二级修复经 `ShellExecuteW` 的 `runas` 拉起自身的受限子命令，主窗口不提权
+
 ## 9. 数据管线
 
 ```text
@@ -216,11 +244,13 @@ raw 数据（CC-CEDICT/FrequencyWords/GlobalVoices 等）
 ```text
 /
 ├── AGENTS.md                  # 项目级 AI 协作与维护指令
+├── CONTEXT.md                 # 领域词表（术语与"避免使用"的别名）
 ├── README.md
 ├── Cargo.toml                 # workspace
 ├── docs/
 │   ├── 需求规格说明书.md
 │   ├── 方案设计.md
+│   ├── 设置窗口设计.md         # 第八期设计（T-072）
 │   ├── 验收标准.md
 │   ├── architecture.md
 │   ├── todos-list.md
@@ -230,9 +260,10 @@ raw 数据（CC-CEDICT/FrequencyWords/GlobalVoices 等）
 ├── crates/
 │   ├── zhu-ye-core/
 │   ├── zhu-ye-ime/
+│   ├── zhu-ye-settings/       # 第八期规划，尚未交付
 │   ├── zhu-ye-dict/
 │   └── zhu-ye-cli/
-├── scripts/                   # 安装/卸载/数据抓取脚本
+├── scripts/                   # 安装/卸载/数据抓取/文档门禁脚本
 └── data/                      # 数据清单与构建产物（大文件忽略）
 ```
 
@@ -257,3 +288,4 @@ cargo build -p zhu-ye-cli --release
 | 主题 | 自绘渲染参数数据化 |
 | 云同步 | 明确不在 v1 范围，架构不为其妥协 |
 | 在线翻译 | 本地 `Translator` 与 AI 服务并列，由配置选择 |
+| 设置窗口（第八期规划） | 独立进程 + 复用候选窗渲染口径；`config.json` 增量可选字段；`installed.json` 独立版本号 |

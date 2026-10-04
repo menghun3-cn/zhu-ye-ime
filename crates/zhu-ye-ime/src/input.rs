@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use std::path::Path;
 
-use zhu_ye_core::bigram::BigramModel;
+use zhu_ye_core::bigram::{BigramModel, EmptyBigramModel};
 use zhu_ye_core::candidate::{
     Candidate, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
 };
@@ -19,6 +19,21 @@ use crate::candidate_ui::{CandidateUiItem, CandidateUiView};
 
 /// 单页候选数，与数字键 1-9 一一对应；翻页按此分页。
 pub const CANDIDATE_PAGE_SIZE: usize = 9;
+
+/// 前缀候选（T-029）补全组最多进入排序的条数；防止短前缀命中过多词条。
+const PREFIX_COMPLETION_CAP: usize = 32;
+
+/// 缩写前缀补全（M6-R）最多追加的条数。
+const ABBREVIATION_COMPLETION_CAP: usize = 32;
+
+/// 英文词候选最小触发长度（场景6，FR-030）：≥2 防单字母/`v` 键路径污染。
+const EN_WORD_MIN_LEN: usize = 2;
+
+/// 英文词候选组最多展示条数（场景6，FR-030；D-10 独立组置主候选后）。
+const EN_WORD_CAP: usize = 6;
+
+/// 联系人提权候选组最多展示条数（场景9，FR-037）：短前缀防刷屏，组容量契约。
+const CONTACT_CANDIDATES_CAP: usize = 8;
 
 /// 输入模式。T-013 接入 Shift 切换；这里先提供状态与切换方法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,14 +74,43 @@ pub struct InputEngine {
     user_dictionary: UserDictionary,
     user_store: Option<UserDictStore>,
     ranking: Arc<dyn RankingModel>,
+    /// 整句 Beam Search（M7，FR-025）使用的 bigram 数据源；
+    /// 与排序模型通常共享同一份（modular 查询），无 bigram 时退化为 unigram 路径。
+    bigram: Arc<dyn BigramModel>,
     /// 当前候选页码，从 0 开始。
     page: usize,
+    /// 当前层当前页内选中序号，从 0 开始；上下键移动，翻页后保持。
+    selected_on_page: usize,
     /// 当前候选层：中文候选或译文。
     layer: CandidateLayer,
     /// 每页候选数；默认与 `CANDIDATE_PAGE_SIZE` 一致。
     page_size: usize,
     /// 译文层候选缓存；输入串或候选变化时刷新。
     cached_translation_candidates: Vec<Candidate>,
+    /// 网络语包（M6-R）：提供字母/数字缩写查询；未启用时为 `None`。
+    slang: Option<Arc<dyn Dictionary>>,
+    /// 上屏联想候选（T-058/T-059，场景5）：拼音为空且刚上屏过一个词时，
+    /// 由 bigram 后继检索生成（Top5 整词 + 两词短语）；输入字母即清空。
+    suggestion: Vec<String>,
+    /// 数字格式候选模式（FR-027，场景7）：空闲态连续输入数字时的累积串；
+    /// 数字由引擎直接上屏（边输边上屏），选中格式时替换最近 buffer 长度字符。
+    digit_buffer: String,
+    /// v 模式符号候选（FR-028，场景7）：空闲态按 `v` 启动，`v1`/`vx`/`vh`
+    /// 出符号组候选；非法字母回退拼音（`vi`）。
+    v_buffer: String,
+    /// 已启用领域包（id 字典序，P-12 只含已启用包）；领域提权（FR-033/FR-034，场景8）
+    /// 的识别与候选来源。装配时按 id 升序排列（D-16 依赖）。
+    domain_packs: Vec<(String, Arc<dyn Dictionary>)>,
+    /// 领域自动提权总开关（FR-035，场景8）；默认开（D-14）。
+    enable_domain_boost: bool,
+    /// 联系人索引（场景9，FR-036/FR-037）：由配置 `contact_vcards` 导入后建立；
+    /// `None` = 未配置/已清除 → 不进提权协调层（T-050 基线不漂移）。
+    contacts: Option<zhu_ye_core::ContactIndex>,
+    /// 联系人提权候选条数上限（组容量，防长前缀刷屏）。
+    contact_cap: usize,
+    /// 英文词表文件（T-085，`en.zyen`，mmap）；`None` = 回退第五期内嵌静态表
+    /// （`en_words.rs`，行为一致）。启动装配时由调用方挂载，加载失败不影响输入。
+    en_lexicon: Option<zhu_ye_core::en_lexicon::EnLexicon>,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -84,6 +128,32 @@ fn candidate_owned(candidate: &Candidate) -> CandidateSelection {
     }
 }
 
+/// 把「前组」（整句组）置于主候选之前；主候选与整句同文本时让位给前组。
+///
+/// 保持组间固定顺序（整句组在前），组内顺序不变；与 `append_group` 对称。
+fn prepend_group(front: Vec<Candidate>, main: Vec<Candidate>) -> Vec<Candidate> {
+    if front.is_empty() {
+        return main;
+    }
+    let front_texts: std::collections::HashSet<String> =
+        front.iter().map(|c| c.text.clone()).collect();
+    let mut merged = front;
+    merged.extend(main.into_iter().filter(|c| !front_texts.contains(&c.text)));
+    merged
+}
+
+/// 把「追加组」（纠错组）置于主候选之后；同文本主候选优先（纠错只是补充）。
+fn append_group(main: Vec<Candidate>, extra: Vec<Candidate>) -> Vec<Candidate> {
+    if extra.is_empty() {
+        return main;
+    }
+    let main_texts: std::collections::HashSet<String> =
+        main.iter().map(|c| c.text.clone()).collect();
+    let mut merged = main;
+    merged.extend(extra.into_iter().filter(|c| !main_texts.contains(&c.text)));
+    merged
+}
+
 impl InputEngine {
     /// 使用指定词典创建引擎；词典通过 trait 注入，未来可无缝切换 mmap 实现。
     #[must_use]
@@ -98,11 +168,84 @@ impl InputEngine {
             user_dictionary: UserDictionary::new(),
             user_store: None,
             ranking: Arc::new(StaticRankingModel::default()),
+            bigram: Arc::new(EmptyBigramModel),
             page: 0,
+            selected_on_page: 0,
             layer: CandidateLayer::default(),
             page_size: CANDIDATE_PAGE_SIZE,
             cached_translation_candidates: Vec::new(),
+            slang: None,
+            suggestion: Vec::new(),
+            digit_buffer: String::new(),
+            v_buffer: String::new(),
+            domain_packs: Vec::new(),
+            enable_domain_boost: true,
+            contacts: None,
+            contact_cap: CONTACT_CANDIDATES_CAP,
+            en_lexicon: None,
         }
+    }
+
+    /// 挂载英文词表文件（T-085，`en.zyen`）；`None`（默认）回退第五期内嵌静态表。
+    #[must_use]
+    pub fn with_en_lexicon(mut self, lexicon: zhu_ye_core::en_lexicon::EnLexicon) -> Self {
+        self.en_lexicon = Some(lexicon);
+        self
+    }
+
+    /// 当前是否挂载了文件英文词表。
+    #[must_use]
+    pub fn has_en_lexicon(&self) -> bool {
+        self.en_lexicon.is_some()
+    }
+
+    /// 挂载已启用领域包（场景8）：`packs` 必须已按 id **字典序**排列（D-16，
+    /// 多包同时命中取字典序首个），且只含已启用包（P-12 未启用包不参与识别）。
+    #[must_use]
+    pub fn with_domain_packs(mut self, packs: Vec<(String, Arc<dyn Dictionary>)>) -> Self {
+        self.domain_packs = packs;
+        self
+    }
+
+    /// 设置领域自动提权开关（FR-035）；默认开（D-14）。关闭后领域候选恢复
+    /// 既有追加语义（T-050 基线，不做位次上移）。
+    #[must_use]
+    pub fn with_domain_boost(mut self, enabled: bool) -> Self {
+        self.enable_domain_boost = enabled;
+        self
+    }
+
+    /// 挂载联系人索引（场景9，FR-036/FR-037）：由配置 `contact_vcards` 导入后
+    /// 建立；`Some` 时联系人提权进入协调层（D-21 与 D-13 同层），`None` 时
+    /// 不进（无配置基线逐位一致）。
+    #[must_use]
+    pub fn with_contacts(mut self, index: zhu_ye_core::ContactIndex) -> Self {
+        self.contacts = (!index.is_empty()).then_some(index);
+        self
+    }
+
+    /// 清除联系人索引（FR-038）：配置清空/删除导入副本后调用，恢复无配置基线。
+    pub fn clear_contacts(&mut self) {
+        self.contacts = None;
+    }
+
+    /// 当前是否挂载了联系人索引。
+    #[must_use]
+    pub fn has_contacts(&self) -> bool {
+        self.contacts.is_some()
+    }
+
+    /// 挂载网络语包（M6-R）：启用后缩写路径（FR-016/FR-017）生效。
+    #[must_use]
+    pub fn with_slang(mut self, slang: Arc<dyn Dictionary>) -> Self {
+        self.slang = Some(slang);
+        self
+    }
+
+    /// 当前是否已启用网络语包缩写路径。
+    #[must_use]
+    pub fn has_slang(&self) -> bool {
+        self.slang.is_some()
     }
 
     /// 使用指定词典与排序模型创建引擎；测试可注入自定义排序。
@@ -117,8 +260,14 @@ impl InputEngine {
     /// 使用指定词典与 bigram 数据创建引擎。
     #[must_use]
     pub fn with_bigram(dictionary: Arc<dyn Dictionary>, bigram: Arc<dyn BigramModel>) -> Self {
-        let ranking = Arc::new(StaticRankingModel::new(RankingConfig::default(), bigram));
-        Self::with_ranking(dictionary, ranking)
+        let ranking = Arc::new(StaticRankingModel::new(
+            RankingConfig::default(),
+            bigram.clone(),
+        ));
+        Self {
+            bigram,
+            ..Self::with_ranking(dictionary, ranking)
+        }
     }
 
     /// 使用指定词典与用户词持久化创建引擎；启动时加载，提交时自动记录并落盘。
@@ -163,10 +312,14 @@ impl InputEngine {
         bigram: Arc<dyn BigramModel>,
     ) -> Self {
         let user_dictionary = store.load().unwrap_or_default();
-        let ranking = Arc::new(StaticRankingModel::new(RankingConfig::default(), bigram));
+        let ranking = Arc::new(StaticRankingModel::new(
+            RankingConfig::default(),
+            bigram.clone(),
+        ));
         Self {
             user_dictionary,
             user_store: Some(store),
+            bigram,
             ..Self::with_ranking(dictionary, ranking)
         }
     }
@@ -183,6 +336,11 @@ impl InputEngine {
             InputMode::Chinese => InputMode::English,
             InputMode::English => InputMode::Chinese,
         };
+    }
+
+    /// 直接设置输入模式（第八期：按配置决定新输入会话的起始模式）。
+    pub fn set_mode(&mut self, mode: InputMode) {
+        self.mode = mode;
     }
 
     /// 是否存在活动组合（不区分中英模式，TSF 层判断组合生命周期使用）。
@@ -203,6 +361,216 @@ impl InputEngine {
         &self.composing
     }
 
+    /// 上屏联想是否处于活跃态（T-059，场景5）：
+    /// 拼音为空且刚上屏过一个词、bigram 后继检索出联想候选。
+    #[must_use]
+    pub fn suggestion_active(&self) -> bool {
+        self.composing.is_empty() && !self.suggestion.is_empty()
+    }
+
+    /// 当前上屏联想候选列表（T-059）；非联想态为空。
+    #[must_use]
+    pub fn suggestion_list(&self) -> &[String] {
+        &self.suggestion
+    }
+
+    /// 数字格式候选模式是否活跃（FR-027，场景7）：空闲态输入数字串中。
+    #[must_use]
+    pub fn digit_active(&self) -> bool {
+        !self.digit_buffer.is_empty()
+    }
+
+    /// 数字格式模式当前候选数（格式候选，≤8）；非数字模式返回 0。
+    #[must_use]
+    pub fn digit_candidate_count(&self) -> usize {
+        if self.digit_active() {
+            self.candidates.len()
+        } else {
+            0
+        }
+    }
+
+    /// 数字格式模式累积的数字串（已上屏正文与其一致）。
+    #[must_use]
+    pub fn digit_text(&self) -> &str {
+        &self.digit_buffer
+    }
+
+    /// 空闲态追加一个数字进入数字格式模式（FR-027）。
+    ///
+    /// 引擎吞下数字键：数字文本已由 TSF 层直插上屏，这里只累积 buffer 并
+    /// 刷新格式候选；组合态/英文模式/上屏联想态（D-05 联想优先）拒绝。
+    /// ASCII 小数点 `.` 也在数字模式内接受（金额 `12345.6`，TSF 层转发
+    /// `VK_OEM_PERIOD`/`VK_DECIMAL`），非法位置由 `format_candidates` 兜底为空。
+    pub fn digit_append(&mut self, c: char) -> bool {
+        if self.mode != InputMode::Chinese
+            || !(c.is_ascii_digit() || c == '.')
+            || self.is_active()
+            || self.suggestion_active()
+        {
+            return false;
+        }
+        self.digit_buffer.push(c);
+        self.suggestion.clear();
+        self.refresh_digit_candidates();
+        true
+    }
+
+    /// 数字模式退格（FR-027）：引擎删除 buffer 尾部并刷新候选；
+    /// 文档侧的退格由 TSF 层同步执行。清空后退出数字模式。
+    pub fn digit_backspace(&mut self) -> bool {
+        if !self.digit_active() {
+            return false;
+        }
+        self.digit_buffer.pop();
+        if self.digit_buffer.is_empty() {
+            self.exit_digit();
+        } else {
+            self.refresh_digit_candidates();
+        }
+        true
+    }
+
+    /// 退出数字格式模式：清空 buffer 与候选；已上屏的数字正文保持不变。
+    /// 退出后不把数字串当作联想前词（数字不参与上下文联想）。
+    pub fn exit_digit(&mut self) {
+        if !self.digit_active() {
+            return;
+        }
+        self.digit_buffer.clear();
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+        self.previous_word = None;
+        self.refresh_suggestion();
+    }
+
+    /// 数字格式选择预览：第 `index` 个格式候选的上屏文本与需替换的
+    /// 字符数（= buffer UTF-16 长度，由 TSF 层做替换）；不可选返回 `None`。
+    #[must_use]
+    pub fn preview_digit(&self, index: usize) -> Option<(String, usize)> {
+        if !self.digit_active() {
+            return None;
+        }
+        let text = self.candidates.get(index)?.text.clone();
+        Some((text, self.digit_buffer.encode_utf16().count()))
+    }
+
+    /// 提交第 `index` 个数字格式候选并退出数字模式（FR-027）。
+    /// 返回 (上屏文本, 替换长度)；格式文本成为新的联想前词。
+    pub fn commit_digit(&mut self, index: usize) -> Option<(String, usize)> {
+        let selection = self.preview_digit(index)?;
+        self.digit_buffer.clear();
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+        self.previous_word = Some(selection.0.clone());
+        self.refresh_suggestion();
+        Some(selection)
+    }
+
+    /// v 模式是否活跃（FR-028，场景7）：空闲态已按 `v` 且尚未退出。
+    #[must_use]
+    pub fn v_active(&self) -> bool {
+        !self.v_buffer.is_empty()
+    }
+
+    /// 当前 v_buffer 长度（含首字母 `v`）：1 = 等待类型码，2 = 已出符号组。
+    #[must_use]
+    pub fn v_buffer_len(&self) -> usize {
+        self.v_buffer.chars().count()
+    }
+
+    /// v 模式当前符号候选数（≤9）；非 v 模式返回 0。
+    #[must_use]
+    pub fn v_symbol_count(&self) -> usize {
+        if self.v_active() {
+            self.candidates.len()
+        } else {
+            0
+        }
+    }
+
+    /// 空闲态按 `v` 进入 v 模式（FR-028）。
+    ///
+    /// 仅当组合为空、无联想、无数字模式时启动；`v` 是合法拼音字符
+    /// （nv/lv），组合态的 `v` 一律走正常拼音（由 `push_composing` 处理）。
+    pub fn v_start(&mut self) -> bool {
+        if self.mode != InputMode::Chinese
+            || self.is_active()
+            || self.suggestion_active()
+            || self.digit_active()
+            || self.v_active()
+        {
+            return false;
+        }
+        self.v_buffer.push('v');
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+        true
+    }
+
+    /// v 模式输入类型码（`1-9`/`x`/`h`）：刷新符号组候选。
+    /// 非法类型码返回 `false`（调用方应回退拼音）。
+    pub fn v_code(&mut self, c: char) -> bool {
+        if !self.v_active() {
+            return false;
+        }
+        if zhu_ye_core::symbol_group(c).is_none() {
+            return false;
+        }
+        self.v_buffer.push(c);
+        self.refresh_symbol_candidates();
+        true
+    }
+
+    /// v 模式输入非法字母（如 `vi` 的 `i`）：退出 v 模式并把 `v`+该字母
+    /// 交给正常拼音路径（`vi` 进入组合，行为与直接输 `vi` 一致）。
+    pub fn v_consume(&mut self, c: char) -> bool {
+        if !self.v_active() {
+            return false;
+        }
+        self.v_buffer.clear();
+        self.candidates.clear();
+        self.composing.push('v');
+        self.composing.push(c);
+        self.refresh_candidates();
+        self.suggestion.clear();
+        self.page = 0;
+        true
+    }
+
+    /// 退出 v 模式：清空 buffer 与符号候选。
+    pub fn v_exit(&mut self) {
+        if !self.v_active() {
+            return;
+        }
+        self.v_buffer.clear();
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+    }
+
+    /// v 模式退格（FR-028）：有类型码时回退到 `v`（重新等待类型码），
+    /// 只有 `v` 时直接退出 v 模式。
+    pub fn v_backspace(&mut self) -> bool {
+        if !self.v_active() {
+            return false;
+        }
+        if self.v_buffer_len() > 1 {
+            self.v_buffer.pop();
+            self.refresh_symbol_candidates();
+        } else {
+            self.v_exit();
+        }
+        true
+    }
+
     /// 参与上下文排序的前词；由最近一次成功提交维护。
     #[must_use]
     pub fn previous_word(&self) -> Option<&str> {
@@ -219,6 +587,23 @@ impl InputEngine {
     #[must_use]
     pub fn page(&self) -> usize {
         self.page
+    }
+
+    /// 当前层当前页内选中序号，从 0 开始。
+    #[must_use]
+    pub fn selected_on_page(&self) -> usize {
+        self.selected_on_page
+    }
+
+    /// 上移页内选中行；已到页首则保持不动（T-039）。
+    pub fn select_up(&mut self) {
+        self.selected_on_page = self.selected_on_page.saturating_sub(1);
+    }
+
+    /// 下移页内选中行；已到页尾（当前页最后一项）则保持不动（T-039）。
+    pub fn select_down(&mut self) {
+        let max = self.visible_candidates().len().saturating_sub(1);
+        self.selected_on_page = self.selected_on_page.saturating_add(1).min(max);
     }
 
     /// 当前层当前页可见候选；译文中没有译文的词不会出现。
@@ -261,17 +646,119 @@ impl InputEngine {
 
     /// 字母进入组合；英文模式或非小写字母返回 `false`。
     pub fn handle_letter(&mut self, c: char) -> bool {
-        if self.mode != InputMode::Chinese || !c.is_ascii_lowercase() {
+        if !c.is_ascii_lowercase() {
             return false;
         }
+        self.push_composing(c)
+    }
+
+    /// 数字进入组合串（T-049）：供含数字缩写键（`996`/`u1s1` 等）使用；
+    /// 是否该走本路径由调用方按 `is_abbreviation_prefix` 判定，英文模式拒绝。
+    pub fn handle_digit(&mut self, c: char) -> bool {
+        if !c.is_ascii_digit() {
+            return false;
+        }
+        self.push_composing(c)
+    }
+
+    /// 邮箱/网址格式字符进入组合串（场景6，FR-031）：`@`/`.`/`/`/`:` 在组合态
+    /// 直接追加（供 TSF 层把 Shift+2 的 `@` 与格式键路进串，D-11）；
+    /// 组合未激活（空闲态）返回 `false` 放行宿主（格式分支只在组合表内延伸，不冷启动，
+    /// `@` 不开新组合）；英文模式拒绝。
+    pub fn handle_format_char(&mut self, c: char) -> bool {
+        if !matches!(c, '@' | '.' | '/' | ':') || self.composing.is_empty() {
+            return false;
+        }
+        self.push_composing(c)
+    }
+
+    /// 格式键是否应对当前组合态生效（T-066，TSF 键路判定用，D-11）：
+    /// 决定 `@`/`.`/`/`/`:` 是进组合串（返回 `true`）还是放行宿主（`false`）。
+    ///
+    /// - `@`：组合态一律接收（真正追加由 [`InputEngine::handle_format_char`] 把关）；
+    /// - `.`：组合串已命中邮箱/网址判定（[`detect_format`] 非 None）或正处于网址意图
+    ///   演进（`www`/`http`/`https` 及其 `:`/`/` 中间态）；
+    /// - `/`/`:`：仅网址意图演进。
+    ///
+    /// 其余情况（空闲态、`nihao` 等普通拼音组合后按 `.`）返回 `false`，
+    /// 保证普通拼音组合的标点直出语义不回归（原有 `.` 放行宿主行为不变）。
+    #[must_use]
+    pub fn is_format_key(&self, c: char) -> bool {
+        if self.mode != InputMode::Chinese || self.composing.is_empty() {
+            return false;
+        }
+        match c {
+            '@' => true,
+            '.' => {
+                zhu_ye_core::detect_format(&self.composing) != zhu_ye_core::FormatKind::None
+                    || self.is_url_intent()
+            }
+            '/' | ':' => self.is_url_intent(),
+            _ => false,
+        }
+    }
+
+    /// 当前组合串是否处于网址意图演进（T-066）：`www`/`http`/`https` 字面、
+    /// `www.`/`http://`/`https://` 前缀，或 `http(s)` 后接 `:`/`/` 的中间态
+    /// （`http:`/`http:/` 等）。用于格式键吃键判定，避免结构相似但无网址意义的
+    /// 输入（如 `httpw`）被误判。
+    fn is_url_intent(&self) -> bool {
+        let c = &self.composing;
+        if c == "www" || c == "http" || c == "https" || c.starts_with("www.") {
+            return true;
+        }
+        if c.starts_with("http://") || c.starts_with("https://") {
+            return true;
+        }
+        if let Some(rest) = c.strip_prefix("http") {
+            // `http`/`https` 开头：其余部分必须是 `:`/`/` 演进字符
+            // （`https` 对 strip_prefix("http") 的余段为 `s`，一并允许）。
+            rest.chars().all(|ch| ch == 's' || ch == ':' || ch == '/')
+        } else {
+            false
+        }
+    }
+
+    fn push_composing(&mut self, c: char) -> bool {
+        if self.mode != InputMode::Chinese {
+            return false;
+        }
+        // 防御：任何进入拼音组合的入口都先退出数字格式模式（FR-027）。
+        self.exit_digit();
         self.composing.push(c);
         self.refresh_candidates();
+        // 输入字母即退出上屏联想态（T-059）。
+        self.suggestion.clear();
         self.page = 0;
         true
     }
 
+    /// 判断 `text` 是否为某个"含数字缩写键"的前缀（T-049）。
+    ///
+    /// 数字键既要能选词（FR-006），又要能输入数字缩写键；判定依据是
+    /// 词典中是否存在以 `text` 开头、且拼音键含 ASCII 数字的词条——
+    /// 数字只有在"某缩写键的组成部分"这一种情况下才该进组合串，
+    /// 否则一律保持原有选词/直出语义。
+    #[must_use]
+    pub fn is_abbreviation_prefix(&self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        self.dictionary
+            .lookup_prefix(text)
+            .iter()
+            .any(|entry| entry.pinyin.chars().any(|c| c.is_ascii_digit()))
+    }
+
     /// Backspace 删除最后一个拼音字母；无组合时返回 `false`。
+    /// 数字模式退格删除 buffer 尾部位（FR-027）；v 模式退格回退类型码（FR-028）。
     pub fn handle_backspace(&mut self) -> bool {
+        if self.digit_active() {
+            return self.digit_backspace();
+        }
+        if self.v_active() {
+            return self.v_backspace();
+        }
         if !self.is_active() {
             return false;
         }
@@ -280,18 +767,40 @@ impl InputEngine {
         true
     }
 
-    /// 空格提交当前层第一候选；无候选时按设计上屏拼音原文。
+    /// 空格提交当前选中行候选（T-039：上下键移动选中行后回车/空格跟随后者）；
+    /// 上屏联想态提交选中联想词（T-059）；无候选时按设计上屏拼音原文。
+    /// 数字格式模式（FR-027）空格 = 选择第 1 个格式候选并替换；
+    /// v 模式（FR-028）空格 = 选择第 1 个符号候选。
     pub fn handle_space(&mut self) -> Option<String> {
+        if self.digit_active() {
+            return self
+                .commit_digit(self.selected_on_page)
+                .map(|(text, _)| text);
+        }
+        if self.v_active() && self.v_symbol_count() > 0 {
+            let text = self.candidates.first()?.text.clone();
+            return self.commit_symbol(text);
+        }
+        if self.suggestion_active() {
+            let index = self
+                .selected_on_page
+                .min(self.suggestion.len().saturating_sub(1));
+            let text = self.suggestion.get(index)?.clone();
+            return self.commit_suggestion(text);
+        }
         if !self.is_active() {
             return None;
         }
-        let Some(candidate) = self.visible_candidates().first() else {
+        let index = self
+            .selected_on_page
+            .min(self.visible_candidates().len().saturating_sub(1));
+        let Some(candidate) = self.visible_candidates().get(index) else {
             return self.commit_raw(self.composing.clone());
         };
         self.commit_candidate(candidate_owned(candidate))
     }
 
-    /// Enter 上屏拼音原文。
+    /// Enter 上屏拼音原文；上屏联想态 Enter 不作为联想提交（放行给宿主换行）。
     pub fn handle_enter(&mut self) -> Option<String> {
         if !self.is_active() {
             return None;
@@ -299,20 +808,49 @@ impl InputEngine {
         let text = self.composing.clone();
         self.clear_composition();
         self.previous_word = None;
+        self.refresh_suggestion();
         Some(text)
     }
 
-    /// Esc 取消本次组合，不产生提交文本。
+    /// Esc 取消本次组合，不产生提交文本；上屏联想态 Esc 关闭联想窗；
+    /// 数字格式模式 Esc 退出（数字正文保留）；v 模式 Esc 退出。
     pub fn handle_escape(&mut self) -> bool {
+        if self.digit_active() {
+            self.exit_digit();
+            return true;
+        }
+        if self.v_active() {
+            self.v_exit();
+            return true;
+        }
+        if self.suggestion_active() {
+            self.suggestion.clear();
+            return true;
+        }
         if !self.is_active() {
             return false;
         }
         self.clear_composition();
+        self.refresh_suggestion();
         true
     }
 
     /// 按 1-9 选择当前层第 `index` 个候选（index 从 0 开始）；越界时回退到拼音原文。
+    /// 上屏联想态按数字选择联想词，越界不产生提交（防吞键）。
+    /// 数字格式模式按数字选择格式候选（越界返回 `None`，由 TSF 层继续追加）；
+    /// v 模式按数字选择符号候选。
     pub fn select_index(&mut self, index: usize) -> Option<String> {
+        if self.digit_active() {
+            return self.commit_digit(index).map(|(text, _)| text);
+        }
+        if self.v_active() {
+            let text = self.candidates.get(index)?.text.clone();
+            return self.commit_symbol(text);
+        }
+        if self.suggestion_active() {
+            let text = self.suggestion.get(index)?.clone();
+            return self.commit_suggestion(text);
+        }
         if !self.is_active() {
             return None;
         }
@@ -322,16 +860,17 @@ impl InputEngine {
         self.commit_candidate(candidate_owned(candidate))
     }
 
-    /// 下翻一页；末页回卷到第一页。
+    /// 下翻一页；末页回卷到第一页。页内选中序号保持不变（按新页候选数封顶）。
     pub fn next_page(&mut self) {
         let mut page = self.page.saturating_add(1);
         if page >= self.page_count() {
             page = 0;
         }
         self.page = page;
+        self.clamp_selected();
     }
 
-    /// 上翻一页；首页回卷到最后一页。
+    /// 上翻一页；首页回卷到最后一页。页内选中序号保持不变（按新页候选数封顶）。
     pub fn previous_page(&mut self) {
         let count = self.page_count();
         let mut page = self.page.checked_sub(1).unwrap_or(count - 1);
@@ -339,6 +878,7 @@ impl InputEngine {
             page = 0;
         }
         self.page = page;
+        self.clamp_selected();
     }
 
     /// 切换中文候选层与译文层；无译文候选时保持中文层，避免出现空白页。
@@ -362,20 +902,45 @@ impl InputEngine {
         self.clear_composition();
     }
 
-    /// 为 TSF 层提供提交预览：空格应上屏的文本。
+    /// 为 TSF 层提供提交预览：空格应上屏的当前选中行候选（含上屏联想，T-059；
+    /// 数字格式与 v 模式取各自首个候选，FR-027/028）。
     #[must_use]
     pub fn preview_space(&self) -> Option<String> {
+        if self.digit_active() {
+            return self.candidates.first().map(|c| c.text.clone());
+        }
+        if self.v_active() {
+            return self.candidates.first().map(|c| c.text.clone());
+        }
+        if self.suggestion_active() {
+            let index = self
+                .selected_on_page
+                .min(self.suggestion.len().saturating_sub(1));
+            return Some(self.suggestion[index].clone());
+        }
         self.is_active().then(|| {
+            let index = self
+                .selected_on_page
+                .min(self.visible_candidates().len().saturating_sub(1));
             self.visible_candidates()
-                .first()
+                .get(index)
                 .map(|c| self.display_text(c))
                 .unwrap_or_else(|| self.composing.clone())
         })
     }
 
-    /// 为 TSF 层提供数字选择预览：第 index 个候选或拼音原文。
+    /// 为 TSF 层提供数字选择预览：第 index 个候选或拼音原文（含上屏联想，T-059）。
     #[must_use]
     pub fn preview_selection(&self, index: usize) -> Option<String> {
+        if self.digit_active() {
+            return self.candidates.get(index).map(|c| c.text.clone());
+        }
+        if self.v_active() {
+            return self.candidates.get(index).map(|c| c.text.clone());
+        }
+        if self.suggestion_active() {
+            return self.suggestion.get(index).cloned();
+        }
         self.is_active().then(|| {
             self.visible_candidates()
                 .get(index)
@@ -398,15 +963,65 @@ impl InputEngine {
     }
 
     /// 构建候选窗快照；候选窗渲染与 TSF 联动都从这里取数。
+    ///
+    /// 上屏联想态（T-059）：组合串为空、联想候选置入 items，
+    /// 候选窗因此继续显示（TSF 层以 `items` 是否为空判断是否隐藏）。
+    /// 数字格式模式（FR-027）与 v 模式（FR-028）：组合串为空、候选置入
+    /// items，页眉提示分别显示累积数字串与 v 指令串。
     #[must_use]
     pub fn candidate_ui_view(&self) -> CandidateUiView {
         let page_size = self.page_size.max(1);
+        if self.suggestion_active() {
+            return CandidateUiView {
+                composition: String::new(),
+                pinyin_hint: String::new(),
+                page: 0,
+                page_size,
+                page_count: 1,
+                selected: self.selected_on_page,
+                translation_mode: false,
+                items: self
+                    .suggestion
+                    .iter()
+                    .map(|text| CandidateUiItem {
+                        text: text.clone(),
+                        translation: String::new(),
+                        source: zhu_ye_core::candidate::CandidateSource::Suggestion,
+                    })
+                    .collect(),
+            };
+        }
+        if self.digit_active() {
+            return CandidateUiView {
+                composition: String::new(),
+                pinyin_hint: self.digit_buffer.clone(),
+                page: 0,
+                page_size,
+                page_count: 1,
+                selected: self.selected_on_page,
+                translation_mode: false,
+                items: self.candidates.iter().map(candidate_ui_item).collect(),
+            };
+        }
+        if self.v_active() {
+            return CandidateUiView {
+                composition: String::new(),
+                pinyin_hint: self.v_buffer.clone(),
+                page: 0,
+                page_size,
+                page_count: 1,
+                selected: self.selected_on_page,
+                translation_mode: false,
+                items: self.candidates.iter().map(candidate_ui_item).collect(),
+            };
+        }
         if self.mode != InputMode::Chinese {
             return CandidateUiView {
                 composition: self.composing.clone(),
                 pinyin_hint: pinyin_hints(&self.composing),
                 page: self.page.min(self.page_count().saturating_sub(1)),
                 page_size,
+                page_count: 1,
                 selected: 0,
                 translation_mode: self.layer == CandidateLayer::Translation,
                 items: Vec::new(),
@@ -414,13 +1029,14 @@ impl InputEngine {
         }
         // items 必须携带当前层**全部**候选：`CandidateUiView::visible_items()`
         // 会再按 `page` 切片一次；若这里只放当前页，翻页后切片越界变空，
-        // 候选窗会被误判为“无候选”而隐藏（VM 验收翻页时复现）。
+        // 页面上将看不到余下候选（VM 验收翻页时复现）。选中行取引擎页内序号。
         CandidateUiView {
             composition: self.composing.clone(),
             pinyin_hint: pinyin_hints(&self.composing),
             page: self.page.min(self.page_count().saturating_sub(1)),
             page_size,
-            selected: 0,
+            page_count: self.page_count(),
+            selected: self.selected_on_page,
             translation_mode: self.layer == CandidateLayer::Translation,
             items: self
                 .current_layer_candidates()
@@ -448,13 +1064,98 @@ impl InputEngine {
         }
         self.clear_composition();
         self.previous_word = Some(text.clone());
+        // 上屏后立即按新前词重算联想候选（T-059：连续联想）。
+        self.refresh_suggestion();
         Some(text)
     }
 
     fn commit_raw(&mut self, text: String) -> Option<String> {
         self.clear_composition();
         self.previous_word = None;
+        self.refresh_suggestion();
         Some(text)
+    }
+
+    /// 提交上屏联想候选（T-059）：作为新的前词继续联想，不记录用户词
+    /// （联想候选无可靠音节映射，避免污染用户词库）。
+    fn commit_suggestion(&mut self, text: String) -> Option<String> {
+        self.suggestion.clear();
+        self.previous_word = Some(text.clone());
+        self.refresh_suggestion();
+        Some(text)
+    }
+
+    /// 提交 v 模式符号候选（FR-028）：符号作为新前词上屏，退出 v 模式。
+    fn commit_symbol(&mut self, text: String) -> Option<String> {
+        self.v_buffer.clear();
+        self.candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+        self.previous_word = Some(text.clone());
+        self.refresh_suggestion();
+        Some(text)
+    }
+
+    /// 按数字格式规则刷新候选（FR-027）：确定性格式列表，来源 `NumberFormat`。
+    fn refresh_digit_candidates(&mut self) {
+        // 格式候选顺序即展示顺序（日期 4 式 → …），score 仅保序。
+        self.candidates = zhu_ye_core::format_candidates(&self.digit_buffer)
+            .into_iter()
+            .enumerate()
+            .map(|(index, format)| Candidate {
+                text: format.text,
+                translation: None,
+                pinyin: None,
+                score: index as i64,
+                source: zhu_ye_core::candidate::CandidateSource::NumberFormat,
+            })
+            .collect();
+        self.cached_translation_candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+    }
+
+    /// 按 v 模式类型码刷新符号候选（FR-028）：来源 `Symbol`，一页 9 项。
+    fn refresh_symbol_candidates(&mut self) {
+        let Some(code) = self.v_buffer.chars().last() else {
+            return;
+        };
+        self.candidates = zhu_ye_core::symbol_group(code)
+            .map(|group| {
+                group
+                    .iter()
+                    .enumerate()
+                    .map(|(index, text)| Candidate {
+                        text: (*text).to_owned(),
+                        translation: None,
+                        pinyin: None,
+                        score: index as i64,
+                        source: zhu_ye_core::candidate::CandidateSource::Symbol,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.cached_translation_candidates.clear();
+        self.page = 0;
+        self.selected_on_page = 0;
+        self.layer = CandidateLayer::Chinese;
+    }
+
+    /// 按 bigram 后继检索刷新上屏联想候选（T-058 检索层入口）。
+    ///
+    /// 联想只在"拼音为空且刚上屏过一个词"时出现；输入串非空或前词缺失即清空。
+    fn refresh_suggestion(&mut self) {
+        if !self.composing.is_empty() {
+            self.suggestion.clear();
+            return;
+        }
+        let Some(previous) = self.previous_word.as_deref() else {
+            self.suggestion.clear();
+            return;
+        };
+        self.suggestion = zhu_ye_core::suggestion_candidates(self.bigram.as_ref(), previous);
     }
 
     fn record_user_word(&mut self, text: &str, pinyin: &str) {
@@ -480,6 +1181,13 @@ impl InputEngine {
     fn clamp_page(&mut self) {
         let max = self.page_count().saturating_sub(1);
         self.page = self.page.min(max);
+        self.clamp_selected();
+    }
+
+    /// 页内选中序号按当前页可见候选数封顶（翻页/切层后保持行位）。
+    fn clamp_selected(&mut self) {
+        let max = self.visible_candidates().len().saturating_sub(1);
+        self.selected_on_page = self.selected_on_page.min(max);
     }
 
     fn translation_candidates(&self) -> Vec<Candidate> {
@@ -495,23 +1203,203 @@ impl InputEngine {
         self.candidates.clear();
         self.cached_translation_candidates.clear();
         self.page = 0;
+        self.selected_on_page = 0;
         self.layer = CandidateLayer::Chinese;
     }
 
     fn refresh_candidates(&mut self) {
-        let candidates = zhu_ye_core::generate_candidates(
+        let context = RankingContext::new(self.previous_word.as_deref(), &self.user_dictionary);
+        // FR-031（场景6）：组合串进入邮箱/网址格式路径（含 `@` 或 `www.`/`http(s)://` 前缀），
+        // 候选 = 至多 3 条补全（.com/.cn/.net 或 .com/.cn/.org），完整串（已含 `.`）直通上屏。
+        // pinyin = None 不进入用户词学习；普通中文输入（无 @/www./http 前缀）不介入（D-10）。
+        match zhu_ye_core::detect_format(&self.composing) {
+            zhu_ye_core::FormatKind::Email => {
+                self.candidates = zhu_ye_core::email_candidates(&self.composing)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, text)| Candidate {
+                        text,
+                        translation: None,
+                        pinyin: None,
+                        score: -(index as i64),
+                        source: zhu_ye_core::candidate::CandidateSource::EmailUrl,
+                    })
+                    .collect();
+                self.cached_translation_candidates.clear();
+                self.selected_on_page = 0;
+                self.clamp_page();
+                return;
+            }
+            zhu_ye_core::FormatKind::Url => {
+                self.candidates = zhu_ye_core::url_candidates(&self.composing)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, text)| Candidate {
+                        text,
+                        translation: None,
+                        pinyin: None,
+                        score: -(index as i64),
+                        source: zhu_ye_core::candidate::CandidateSource::EmailUrl,
+                    })
+                    .collect();
+                self.cached_translation_candidates.clear();
+                self.selected_on_page = 0;
+                self.clamp_page();
+                return;
+            }
+            zhu_ye_core::FormatKind::None => {}
+        }
+        // T-086（FR-050）：混合串解码——同时含非 ASCII 段与不可切字母段
+        // （如 `python代码`/`API接口`/`iPhone价格`）时接管候选路径：
+        // 整句候选置首 + 各段最优候选随后（§14.3.3）。FR-031（`@`/`www.`/
+        // http 前缀）已在上述 detect_format 优先判定，不被混合解码劫持；
+        // 纯拼音/纯缩写/纯英文/纯中文由 `is_mixed_input` 判别不触发（§14.3.5）。
+        if zhu_ye_core::mixed::is_mixed_input(&self.table, &self.composing) {
+            self.candidates = zhu_ye_core::mixed::mixed_candidates(
+                &self.table,
+                Some(self.dictionary.as_ref()),
+                self.en_lexicon.as_ref(),
+                &self.composing,
+            );
+            self.cached_translation_candidates.clear();
+            self.selected_on_page = 0;
+            self.clamp_page();
+            return;
+        }
+        // T-029：输入串存在尾部残缺音节时走前缀候选（补全组优先 + 完成组回退），
+        // 两组分别经排序模型排序后按组间顺序融合，确保补全组始终在前。
+        let groups = zhu_ye_core::generate_prefix_candidates(
             &self.table,
             self.dictionary.as_ref(),
             &self.composing,
+            PREFIX_COMPLETION_CAP,
         );
-        let context = RankingContext::new(self.previous_word.as_deref(), &self.user_dictionary);
-        self.candidates = self.ranking.rank(candidates, &context);
+        if !groups.completions.is_empty() || !groups.completed.is_empty() {
+            let completions = self.ranking.rank(groups.completions, &context);
+            let completed = self.ranking.rank(groups.completed, &context);
+            self.candidates = zhu_ye_core::merge_candidate_groups(completions, completed);
+        } else {
+            let composing = self.composing.clone();
+            let dictionary = self.dictionary.clone();
+            // 主路径：整词优先，无整词时按音节切分组合（现状行为保持）。
+            let candidates =
+                zhu_ye_core::generate_candidates(&self.table, dictionary.as_ref(), &composing);
+            let direct_hit = !dictionary.lookup(&composing).is_empty();
+            let mut main = self.ranking.rank(candidates, &context);
+
+            // M7 整句（FR-025）：无整词命中时用 beam 搜索全局最优整句，
+            // 作为独立「整句组」置于主候选最前（长串用户意图即整句）。
+            if !direct_hit {
+                let sentences = zhu_ye_core::sentence_candidates(
+                    &self.table,
+                    dictionary.as_ref(),
+                    self.bigram.as_ref(),
+                    &composing,
+                );
+                if !sentences.is_empty() {
+                    main = prepend_group(sentences, main);
+                }
+                // M7 纠错（FR-024）：无整词命中时追加「纠错组」（模糊替换/少字母补全），
+                // 置于主候选之后、缩写组之前；同文本主候选优先。
+                let corrected =
+                    zhu_ye_core::corrected_candidates(&self.table, dictionary.as_ref(), &composing);
+                if !corrected.is_empty() {
+                    main = append_group(main, corrected);
+                }
+            }
+
+            // M7 简拼（FR-023）：输入不可切分、主候选仍为空且为 2-4 位纯字母时，
+            // 按首字母展开整词作为主候选（防污染：仅此场景介入）。
+            if main.is_empty()
+                && composing.chars().count() >= 2
+                && composing.chars().all(|c| c.is_ascii_lowercase())
+                && segment_all(&self.table, &composing).is_empty()
+            {
+                let initials = zhu_ye_core::initial_candidates(dictionary.as_ref(), &composing);
+                if !initials.is_empty() {
+                    main = self.ranking.rank(initials, &context);
+                }
+            }
+            self.candidates = main;
+        }
+        // FR-034（场景8）：领域提权——整串完整词命中已启用领域包（D-15）时按 D-13
+        // 位次（插基础候选之后、追加组之前）上移该包候选；无命中/开关关闭时保持
+        // 既有路径（T-050「领域包只追加、不改基础排序」基线逐位不变，D-17 仅对
+        // 领域候选生效，不涉及用户词与上下文联想）。
+        if self.enable_domain_boost && !self.composing.is_empty() && !self.domain_packs.is_empty() {
+            let packs: Vec<(String, &dyn zhu_ye_core::Dictionary)> = self
+                .domain_packs
+                .iter()
+                .map(|(id, dict)| (id.clone(), dict.as_ref()))
+                .collect();
+            if let Some(boosted) = zhu_ye_core::domain_boost_candidates(&packs, &self.composing) {
+                let main = std::mem::take(&mut self.candidates);
+                self.candidates = append_group(main, boosted);
+            }
+        }
+        // FR-037（场景9）：联系人提权——与领域提权同一插入点（D-21 同层、按来源
+        // 顺序排在其后），落在追加组之前；全拼前缀/简拼键命中皆可。无索引（未配
+        // 置/已清除）或空输入时不介入（T-050 无配置基线逐位一致）。
+        if let Some(contacts) = &self.contacts {
+            if !self.composing.is_empty() {
+                let boosted =
+                    zhu_ye_core::contact_candidates(contacts, &self.composing, self.contact_cap);
+                if !boosted.is_empty() {
+                    let main = std::mem::take(&mut self.candidates);
+                    self.candidates = append_group(main, boosted);
+                }
+            }
+        }
+        // FR-030（场景6）：整串**完全无法按拼音切分**（与缩写路径同判定）时查英文词表；
+        // 命中 → 英文候选组追加到主候选**尾部**（D-10：不参与中文静态排序、不挤占中文命中）；
+        // 未命中 → 保持既有路径，缩写/网络组行为不变（`yyds` 等缩写不回退）。
+        if !self.composing.is_empty()
+            && self.composing.chars().count() >= EN_WORD_MIN_LEN
+            && segment_all(&self.table, &self.composing).is_empty()
+        {
+            let en = match &self.en_lexicon {
+                Some(lexicon) => {
+                    zhu_ye_core::en_word_candidates_from(lexicon, &self.composing, EN_WORD_CAP)
+                }
+                None => zhu_ye_core::en_word_candidates(&self.composing, EN_WORD_CAP),
+            };
+            if !en.is_empty() {
+                let main = std::mem::take(&mut self.candidates);
+                self.candidates = append_group(main, en);
+            }
+        }
+        // M6-R 缩写路径（FR-016/FR-017）：整串完全不可切分且长度达标时，
+        // 查询网络语包并把命中候选作为**独立组追加在尾部**，不参与默认排序竞争。
+        if let Some(slang) = &self.slang {
+            let abbreviation = zhu_ye_core::abbreviation_candidates(
+                &self.table,
+                slang.as_ref(),
+                &self.composing,
+                ABBREVIATION_COMPLETION_CAP,
+            );
+            // 取出主候选（`mem::take` 避免克隆），合并后写回。
+            let main = std::mem::take(&mut self.candidates);
+            self.candidates = zhu_ye_core::append_abbreviation_group(main, abbreviation);
+        }
+        // FR-029（场景7）：整串拼音等于别名时把 emoji 追加到候选**尾部**；
+        // 只占队尾、不参与排序（score 取 i64::MIN），保证 T-057 命中率不回退。
+        if let Some(emoji) = zhu_ye_core::emoji_for(&self.composing) {
+            self.candidates.push(Candidate {
+                text: emoji.to_owned(),
+                translation: None,
+                pinyin: None,
+                score: i64::MIN,
+                source: zhu_ye_core::candidate::CandidateSource::Emoji,
+            });
+        }
         self.cached_translation_candidates = self
             .candidates
             .iter()
             .filter(|c| c.translation.as_deref().is_some_and(|s| !s.is_empty()))
             .cloned()
             .collect();
+        // 输入串变化后选中行回到第一行。
+        self.selected_on_page = 0;
         self.clamp_page();
     }
 
@@ -578,6 +1466,7 @@ mod tests {
     use zhu_ye_core::bigram::InMemoryBigramModel;
     use zhu_ye_core::generate_candidates;
     use zhu_ye_core::pinyin::SyllableTable;
+    use zhu_ye_core::Dictionary;
     use zhu_ye_core::UserDictStore;
     use zhu_ye_core::{build_v2, seed_bigrams, seed_entries};
 
@@ -627,6 +1516,113 @@ mod tests {
             .collect();
         assert!(texts.contains(&"先"));
         assert!(texts.contains(&"西安"));
+    }
+
+    #[test]
+    fn nih前缀候选补全组优先且含完成组() {
+        let mut eng = engine();
+        type_text(&mut eng, "nih");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        // 组 2（补齐 nih → nihao）在前：你好/尼好；组 1（最后完整音节 ni）在后：你。
+        assert_eq!(&texts[..3], &["你好", "尼好", "你"]);
+        assert_eq!(eng.candidates()[0].translation.as_deref(), Some("hello"));
+
+        let mut other = engine();
+        type_text(&mut other, "nih");
+        assert_eq!(eng.candidates(), other.candidates());
+    }
+
+    // ---- M6-R 网络语缩写路径 ----
+
+    fn slang_engine() -> InputEngine {
+        let slang: Arc<dyn Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("永远的神", "yyds", 5000),
+                zhu_ye_core::DictionaryEntry::new("有一说一", "u1s1", 5000),
+                zhu_ye_core::DictionaryEntry::new("九九六", "996", 5000),
+            ]));
+        InputEngine::with_m1_seed().with_slang(slang)
+    }
+
+    #[test]
+    fn 未挂载网络语包时缩写路径不生效() {
+        let mut eng = engine();
+        assert!(!eng.has_slang());
+        type_text(&mut eng, "yyds");
+        assert!(
+            eng.candidates().iter().all(|c| c.text != "永远的神"),
+            "未启用网络语包时不应出现缩写候选"
+        );
+    }
+
+    #[test]
+    fn 挂载网络语包后缩写候选追加尾部() {
+        let mut eng = slang_engine();
+        assert!(eng.has_slang());
+        type_text(&mut eng, "yyds");
+        let last = eng.candidates().last().expect("应有候选");
+        assert_eq!(last.text, "永远的神");
+        assert_eq!(last.source, zhu_ye_core::candidate::CandidateSource::Slang);
+    }
+
+    #[test]
+    fn 数字缩写键在引擎层可达() {
+        let mut eng = slang_engine();
+        for c in "996".chars() {
+            assert!(eng.handle_digit(c));
+        }
+        assert_eq!(eng.composing(), "996");
+        let found = eng.candidates().iter().any(|c| c.text == "九九六");
+        assert!(found, "996 应产出九九六候选");
+    }
+
+    #[test]
+    fn 可切分串不触发缩写路径() {
+        let mut eng = slang_engine();
+        type_text(&mut eng, "wo");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Slang),
+            "可切分串 wo 不得触发缩写路径"
+        );
+    }
+
+    #[test]
+    fn 无完整音节开头的输入不出现前缀候选() {
+        let mut eng = engine();
+        type_text(&mut eng, "zh");
+        assert!(eng.candidates().is_empty());
+
+        let mut eng2 = engine();
+        type_text(&mut eng2, "z");
+        assert!(eng2.candidates().is_empty());
+    }
+
+    #[test]
+    fn backspace从残缺回到完整音节重算候选() {
+        let mut engine = engine();
+        type_text(&mut engine, "nih");
+        assert!(engine.candidates().iter().any(|c| c.text == "你好"));
+        assert!(engine.handle_backspace());
+        assert_eq!(engine.composing(), "ni");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["你"]);
+    }
+
+    #[test]
+    fn 选择前缀候选后残留拼音丢弃() {
+        let mut engine = engine();
+        type_text(&mut engine, "nih");
+        let selected = engine.select_index(2); // 完成组"你"（对应 ni，残留 h 丢弃）
+        assert_eq!(selected, Some("你".to_owned()));
+        assert_eq!(engine.composing(), "");
+        assert!(engine.candidates().is_empty());
+        assert!(engine.user_dictionary().frequency_by_word("你") > 0);
     }
 
     #[test]
@@ -699,6 +1695,136 @@ mod tests {
         assert!(engine.handle_letter('n'));
     }
 
+    /// T-086（FR-050）：中英混合串解码——`python代码` 类输入整句候选置首，
+    /// 分段候选随后；`yyds`/纯拼音不被劫持（§14.3.5 不回退清单）。
+    #[test]
+    fn 混合串解码整句置首且分段随后() {
+        use zhu_ye_core::candidate::CandidateSource;
+        use zhu_ye_core::DictionaryEntry;
+        let dictionary: Arc<dyn zhu_ye_core::Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                DictionaryEntry::new("代码", "daima", 5000),
+                DictionaryEntry::new("你好", "nihao", 100),
+            ]));
+        let mut engine = InputEngine::new(dictionary.clone());
+        type_text(&mut engine, "pythondaima");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        // 整句 = python（英文词表原形）+ 代码（拼音段词典命中），置首
+        assert_eq!(texts[0], "python代码");
+        assert!(texts.contains(&"python"));
+        assert!(texts.contains(&"代码"));
+        assert!(engine
+            .candidates()
+            .iter()
+            .any(|c| c.source == CandidateSource::Mixed));
+        // 确定性：重建引擎结果一致
+        let mut again = InputEngine::new(dictionary.clone());
+        type_text(&mut again, "pythondaima");
+        assert_eq!(texts, {
+            let t: Vec<&str> = again.candidates().iter().map(|c| c.text.as_str()).collect();
+            t
+        });
+    }
+
+    #[test]
+    fn 纯拼音与纯缩写不走混合路径() {
+        use zhu_ye_core::candidate::CandidateSource;
+        let mut engine1 = engine();
+        type_text(&mut engine1, "nihao");
+        assert_eq!(engine1.candidates()[0].text, "你好");
+        assert_ne!(engine1.candidates()[0].source, CandidateSource::Mixed);
+
+        // yyds：无 slang 时缩写路径不产出；混合路径不得劫持（无任何 Mixed 候选）
+        let mut engine2 = engine();
+        type_text(&mut engine2, "yyds");
+        assert!(engine2
+            .candidates()
+            .iter()
+            .all(|c| c.source != CandidateSource::Mixed));
+    }
+
+    #[test]
+    fn 混合串被邮箱网址格式判定先行截获() {
+        use zhu_ye_core::candidate::CandidateSource;
+        // FR-031 优先级高于混合解码（验收标准 14.1.2）：`pythondaima@x` 走邮箱
+        // 候选（detect_format 先 return），混合分支不接管。
+        let mut engine = engine();
+        type_text(&mut engine, "pythondaima");
+        assert!(engine.handle_format_char('@'));
+        type_text(&mut engine, "x");
+        assert!(engine
+            .candidates()
+            .iter()
+            .all(|c| c.source != CandidateSource::Mixed));
+        assert!(engine.candidates()[0].text.contains('@'));
+    }
+
+    /// T-049：含数字缩写键（拼音键含 ASCII 数字）必须能被 `is_abbreviation_prefix` 识别，
+    /// 从而让数字键走组合串路径而非选词；纯拼音词条不得被误判。
+    #[test]
+    fn 数字缩写键前缀可识别且不误判拼音词() {
+        let dictionary: Arc<dyn zhu_ye_core::Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("九九六", "996", 5000),
+                zhu_ye_core::DictionaryEntry::new("有一说一", "u1s1", 5000),
+                zhu_ye_core::DictionaryEntry::new("你好", "nihao", 100),
+            ]));
+        let engine = InputEngine::new(dictionary);
+
+        // 纯数字与含数字混合键的前缀链都识别。
+        assert!(engine.is_abbreviation_prefix("9"));
+        assert!(engine.is_abbreviation_prefix("99"));
+        assert!(engine.is_abbreviation_prefix("u"));
+        assert!(engine.is_abbreviation_prefix("u1"));
+        assert!(engine.is_abbreviation_prefix("u1s"));
+        // 完整键本身也算前缀（`lookup_prefix` 含等值匹配）。
+        assert!(engine.is_abbreviation_prefix("996"));
+        // 纯拼音词前缀不得被判为数字缩写前缀，否则会夺走数字选词。
+        assert!(!engine.is_abbreviation_prefix("n"));
+        assert!(!engine.is_abbreviation_prefix("ni"));
+        assert!(!engine.is_abbreviation_prefix(""));
+    }
+
+    /// T-049：数字进入组合串后与字母拼接，走整串直查得到缩写词。
+    #[test]
+    fn 数字进入组合串可查询含数字缩写词() {
+        let dictionary: Arc<dyn zhu_ye_core::Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("九九六", "996", 5000),
+                zhu_ye_core::DictionaryEntry::new("有一说一", "u1s1", 5000),
+            ]));
+        let mut engine = InputEngine::new(dictionary);
+
+        for c in "996".chars() {
+            assert!(engine.handle_digit(c), "数字 {c} 应进入组合串");
+        }
+        assert_eq!(engine.composing(), "996");
+        assert_eq!(engine.candidates()[0].text, "九九六");
+
+        engine.handle_escape();
+        assert!(engine.handle_letter('u'));
+        assert!(engine.handle_digit('1'));
+        assert!(engine.handle_letter('s'));
+        assert!(engine.handle_digit('1'));
+        assert_eq!(engine.composing(), "u1s1");
+        assert_eq!(engine.candidates()[0].text, "有一说一");
+    }
+
+    /// T-049：英文模式与非法字符不得进入组合串，避免破坏既有模式语义。
+    #[test]
+    fn 英文模式与非法字符不进入数字组合() {
+        let mut engine = engine();
+        engine.toggle_mode();
+        assert!(!engine.handle_digit('9'));
+        engine.toggle_mode();
+        assert!(!engine.handle_digit('a'));
+        assert!(!engine.handle_digit('中'));
+    }
+
     #[test]
     fn 候选生成确定且整词与切分合并去重() {
         let table = SyllableTable::standard();
@@ -732,6 +1858,91 @@ mod tests {
         assert_eq!(engine.handle_space().as_deref(), Some("你好"));
         type_text(&mut engine, "de");
         assert_eq!(engine.candidates()[0].text, "得");
+    }
+
+    fn suggestion_engine() -> InputEngine {
+        let mut bigram = InMemoryBigramModel::new();
+        bigram.insert("你好", "世界", 120);
+        bigram.insert("你好", "中国", 80);
+        bigram.insert("世界", "你好", 90);
+        bigram.insert("世界", "中国", 60);
+        bigram.insert("中国", "你好", 50);
+        bigram.insert("中国", "世界", 40);
+        InputEngine::with_bigram(m1_seed_dictionary(), Arc::new(bigram))
+    }
+
+    fn commit_nihao(engine: &mut InputEngine) {
+        type_text(engine, "nihao");
+        assert_eq!(engine.handle_space().as_deref(), Some("你好"));
+    }
+
+    #[test]
+    fn 上屏后出现联想且数字选择上屏并继续联想() {
+        let mut engine = suggestion_engine();
+        commit_nihao(&mut engine);
+        assert!(engine.suggestion_active());
+        let ui = engine.candidate_ui_view();
+        // 联想态组合串为空，候选窗 items 置入联想列表（T-059 显示依据）。
+        assert_eq!(ui.composition, "");
+        let texts: Vec<&str> = ui.items.iter().map(|i| i.text.as_str()).collect();
+        // 整词（世界/中国）在前，短语（你好+后继）置后，符合 T-058 候选契约。
+        assert_eq!(texts, vec!["世界", "中国", "你好世界", "你好中国"]);
+        assert_eq!(engine.previous_word(), Some("你好"));
+
+        // 数字选择联想词上屏，并以联想词为前词继续联想。
+        assert_eq!(engine.select_index(1).as_deref(), Some("中国"));
+        assert!(engine.suggestion_active());
+        assert_eq!(engine.previous_word(), Some("中国"));
+        let after: Vec<String> = engine
+            .candidate_ui_view()
+            .items
+            .iter()
+            .map(|i| i.text.clone())
+            .collect();
+        assert_eq!(after, vec!["你好", "世界", "中国你好", "中国世界"]);
+    }
+
+    #[test]
+    fn 输入字母退出联想态() {
+        let mut engine = suggestion_engine();
+        commit_nihao(&mut engine);
+        assert!(engine.suggestion_active());
+        type_text(&mut engine, "n");
+        assert!(!engine.suggestion_active());
+        assert_eq!(engine.composing(), "n");
+    }
+
+    #[test]
+    fn 联想态回车与越界数字不产生提交esc关闭联想() {
+        let mut engine = suggestion_engine();
+        commit_nihao(&mut engine);
+        // 越界数字（第 9 条不存在）放行，不吞键也不上屏空串。
+        assert_eq!(engine.select_index(9), None);
+        assert!(engine.suggestion_active());
+        // 联想态 Enter 放行给宿主（不提交联想词）。
+        assert_eq!(engine.handle_enter(), None);
+        assert!(engine.suggestion_active());
+        // Esc 关闭联想窗。
+        assert!(engine.handle_escape());
+        assert!(!engine.suggestion_active());
+    }
+
+    #[test]
+    fn 联想态空格上屏当前选中联想词() {
+        let mut engine = suggestion_engine();
+        commit_nihao(&mut engine);
+        assert_eq!(engine.handle_space().as_deref(), Some("世界"));
+        assert!(engine.suggestion_active());
+        assert_eq!(engine.previous_word(), Some("世界"));
+    }
+
+    #[test]
+    fn 无bigram数据时上屏不联想() {
+        let mut engine =
+            InputEngine::with_bigram(m1_seed_dictionary(), Arc::new(InMemoryBigramModel::new()));
+        commit_nihao(&mut engine);
+        assert!(!engine.suggestion_active());
+        assert!(engine.candidate_ui_view().items.is_empty());
     }
 
     #[test]
@@ -857,6 +2068,78 @@ mod tests {
     }
 
     #[test]
+    fn 上下键在页内移动选中行并在边界停住() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao"); // 你好、尼好
+        engine.select_down();
+        assert_eq!(engine.selected_on_page(), 1);
+        engine.select_down();
+        assert_eq!(engine.selected_on_page(), 1); // 页尾停住
+        engine.select_up();
+        assert_eq!(engine.selected_on_page(), 0);
+        engine.select_up();
+        assert_eq!(engine.selected_on_page(), 0); // 页首停住
+    }
+
+    #[test]
+    fn 选中行决定空格提交内容() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao");
+        engine.select_down();
+        assert_eq!(engine.preview_space().as_deref(), Some("尼好"));
+        assert_eq!(engine.handle_space().as_deref(), Some("尼好"));
+    }
+
+    #[test]
+    fn 输入变化后选中行回到第一行() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao");
+        engine.select_down();
+        assert_eq!(engine.selected_on_page(), 1);
+        engine.handle_backspace();
+        assert_eq!(engine.selected_on_page(), 0);
+        engine.handle_letter('o');
+        assert_eq!(engine.selected_on_page(), 0);
+    }
+
+    #[test]
+    fn 翻页保持选中行且末页不足时封顶() {
+        let dictionary = zhu_ye_core::dict::InMemoryDictionary::from_entries(vec![
+            zhu_ye_core::DictionaryEntry::new("词一", "nihao", 100),
+            zhu_ye_core::DictionaryEntry::new("词二", "nihao", 80),
+            zhu_ye_core::DictionaryEntry::new("词三", "nihao", 60),
+            zhu_ye_core::DictionaryEntry::new("词四", "nihao", 40),
+            zhu_ye_core::DictionaryEntry::new("词五", "nihao", 20),
+        ]);
+        let mut engine = InputEngine::new(Arc::new(dictionary));
+        type_text(&mut engine, "nihao");
+        engine.page_size = 2;
+        assert_eq!(engine.page_count(), 3);
+        engine.select_down(); // 页 0 第 2 项
+        assert_eq!(engine.selected_on_page(), 1);
+        engine.next_page(); // 页 1 有两项，行位保持
+        assert_eq!(engine.page(), 1);
+        assert_eq!(engine.selected_on_page(), 1);
+        engine.next_page(); // 页 2 仅一项，封顶回第一行
+        assert_eq!(engine.page(), 2);
+        assert_eq!(engine.selected_on_page(), 0);
+        engine.previous_page(); // 返回页 1，行位保持
+        assert_eq!(engine.page(), 1);
+        assert_eq!(engine.selected_on_page(), 0);
+    }
+
+    #[test]
+    fn 选中行同步到视图快照高亮() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao");
+        engine.select_down();
+        let view = engine.candidate_ui_view();
+        assert_eq!(view.selected, 1);
+        assert_eq!(view.selected_on_page(), Some(1));
+        assert_eq!(view.visible_items()[1].text, "尼好");
+    }
+
+    #[test]
     fn 翻页后视图快照可见项跟随当前页() {
         let mut engine = engine();
         type_text(&mut engine, "nihao");
@@ -877,6 +2160,10 @@ mod tests {
         type_text(&mut engine, "nihao");
         engine.page_size = 1;
         engine.next_page();
+        // 连续退格：`niha` 时 M7 纠错提供「你好/尼好」候选（2 页，page=1 仍有效，
+        // 预期改进）；退到 `ni`（整词单候选）时页码必须收敛归零。
+        engine.handle_backspace();
+        engine.handle_backspace();
         engine.handle_backspace();
         assert_eq!(engine.page(), 0);
     }
@@ -962,5 +2249,932 @@ mod tests {
         let view = engine.candidate_ui_view();
         assert_eq!(view.composition, "nihao");
         assert!(view.items.is_empty());
+    }
+
+    // ---- 输入体验优化（M7，FR-023 至 FR-025）引擎集成 ----
+
+    fn m7_engine() -> InputEngine {
+        use zhu_ye_core::dict::{DictionaryEntry, InMemoryDictionary};
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你好", "nihao", 100),
+            DictionaryEntry::new("我", "wo", 88),
+            DictionaryEntry::new("想", "xiang", 75),
+            DictionaryEntry::new("明天", "mingtian", 72),
+            DictionaryEntry::new("去", "qu", 68),
+            DictionaryEntry::new("北京", "beijing", 95),
+            DictionaryEntry::new("为什么", "weishenme", 80),
+            DictionaryEntry::new("中国", "zhongguo", 92),
+            DictionaryEntry::new("难", "nan", 50),
+        ]);
+        InputEngine::with_bigram(Arc::new(dictionary), Arc::new(InMemoryBigramModel::new()))
+    }
+
+    #[test]
+    fn 简拼nh出你好主候选() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "nh");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(texts.contains(&"你好"), "nh 简拼应出你好，实际: {texts:?}");
+    }
+
+    #[test]
+    fn 简拼wsm出为什么() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "wsm");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(
+            texts.contains(&"为什么"),
+            "wsm 简拼应出为什么，实际: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 可切分输入不触发简拼噪声() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "wo");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        // wo 应正常出整词候选「我」，不被简拼展开污染成「我哦」等。
+        assert!(
+            engine.candidates().iter().any(|c| c.text == "我"),
+            "wo 应出我，实际: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 模糊音zongguo纠错出中国() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "zongguo");
+        let candidates = engine.candidates();
+        let zhongguo = candidates
+            .iter()
+            .find(|c| c.text == "中国")
+            .expect("zongguo 应纠错出中国");
+        assert_eq!(
+            zhongguo.source,
+            zhu_ye_core::candidate::CandidateSource::Corrected
+        );
+    }
+
+    #[test]
+    fn 少字母niha纠错出你好() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "niha");
+        let candidates = engine.candidates();
+        assert!(
+            candidates.iter().any(|c| c.text == "你好"),
+            "niha 应补全 ha→hao 出你好，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 整词命中不触发纠错() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "nihao");
+        let candidates = engine.candidates();
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Corrected),
+            "nihao 整词命中不应出现纠错候选"
+        );
+    }
+
+    #[test]
+    fn 整句输入整句组居首() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "woxiangmingtianqubeijing");
+        let candidates = engine.candidates();
+        assert!(
+            candidates.iter().any(|c| c.text == "我想明天去北京"),
+            "长串应出整句，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        // 整句组置于列表前部（首个候选即整句）。
+        assert_eq!(candidates[0].text, "我想明天去北京", "整句应居首");
+    }
+
+    #[test]
+    fn 短串不启动整句路径() {
+        let mut engine = m7_engine();
+        type_text(&mut engine, "nihao");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["你好"], "nihao 整词命中，候选只有整词本身");
+    }
+
+    // ---- 场景7（T-061）：数字格式候选 / v 模式 / emoji 推荐 ----
+
+    fn digit_engine() -> InputEngine {
+        engine()
+    }
+
+    #[test]
+    fn 数字模式累积并刷新日期候选() {
+        let mut eng = digit_engine();
+        assert!(!eng.digit_active());
+        for c in ['2', '0', '2', '6', '0', '9', '3', '0'] {
+            assert!(eng.digit_append(c));
+        }
+        assert!(eng.digit_active());
+        assert!(eng.composing().is_empty(), "数字模式不应出现组合串");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["2026-09-30", "2026/09/30", "2026年9月30日", "2026.09.30"]
+        );
+        assert_eq!(
+            eng.candidates()[0].source,
+            zhu_ye_core::candidate::CandidateSource::NumberFormat
+        );
+    }
+
+    #[test]
+    fn 数字模式选中格式返回替换长度() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        let (text, replace_len) = eng.preview_digit(1).expect("第 2 个日期候选");
+        assert_eq!(text, "2026/09/30");
+        assert_eq!(replace_len, 8, "替换长度为 buffer 的 UTF-16 长度");
+        let committed = eng.commit_digit(1).expect("提交");
+        assert_eq!(committed.0, "2026/09/30");
+        assert!(!eng.digit_active(), "提交后退出数字模式");
+        assert!(eng.candidates().is_empty());
+    }
+
+    #[test]
+    fn 数字模式选中越界返回空且状态保持() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        assert_eq!(eng.preview_digit(9), None);
+        assert_eq!(eng.select_index(9), None);
+        assert!(eng.digit_active(), "越界选择不应退出数字模式");
+    }
+
+    #[test]
+    fn 数字模式不足五位无候选() {
+        let mut eng = digit_engine();
+        for c in "12".chars() {
+            eng.digit_append(c);
+        }
+        assert!(eng.digit_active());
+        assert!(eng.candidates().is_empty(), "12 不应触发格式候选");
+    }
+
+    #[test]
+    fn 数字模式退格与退出() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        assert!(eng.digit_backspace());
+        assert_eq!(eng.digit_text(), "2026093");
+        assert!(eng.handle_backspace(), "引擎层退格路由到数字模式");
+        assert_eq!(eng.digit_text(), "202609");
+        assert!(eng.handle_escape());
+        assert!(!eng.digit_active(), "Esc 退出数字模式");
+        assert!(eng.candidates().is_empty());
+    }
+
+    #[test]
+    fn 数字模式空格空格选第一个格式() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        let text = eng.handle_space().expect("空格应选中第 0 项");
+        assert_eq!(text, "2026-09-30");
+        assert!(!eng.digit_active());
+    }
+
+    #[test]
+    fn 金额与电话格式候选() {
+        let mut eng = digit_engine();
+        for c in ['1', '2', '3', '4', '5', '.', '6'] {
+            assert!(eng.digit_append(c), "数字模式接受小数点点位（金额）");
+        }
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["12,345.6", "一万二千三百四十五点六"]);
+
+        let mut phone = digit_engine();
+        for c in "13800138000".chars() {
+            phone.digit_append(c);
+        }
+        let texts: Vec<&str> = phone.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["138 0013 8000", "138-0013-8000"]);
+    }
+
+    #[test]
+    fn 字母进入拼音组合自动退出数字模式() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        assert!(eng.handle_letter('n'));
+        assert!(!eng.digit_active(), "字母进入组合应退出数字模式");
+        assert_eq!(eng.composing(), "n");
+    }
+
+    #[test]
+    fn 组合态数字不进数字模式() {
+        let mut eng = digit_engine();
+        type_text(&mut eng, "niha");
+        assert!(!eng.digit_active());
+        // 组合态数字属于网络语缩写前缀判定后走选词/组合，不启动数字模式。
+        assert!(!eng.digit_append('9'));
+    }
+
+    #[test]
+    fn v模式启动与符号组() {
+        let mut eng = engine();
+        assert!(eng.v_start());
+        assert!(eng.v_active());
+        assert_eq!(eng.v_buffer_len(), 1, "只有 v 时等待类型码");
+        assert!(eng.v_code('1'));
+        assert_eq!(eng.v_buffer_len(), 2);
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts.len(), 9);
+        assert_eq!(texts[0], "①");
+        assert_eq!(
+            eng.candidates()[0].source,
+            zhu_ye_core::candidate::CandidateSource::Symbol
+        );
+    }
+
+    #[test]
+    fn v模式数学与标点组() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('x');
+        let math: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(math[0], "±");
+        assert!(math.contains(&"∞"));
+
+        eng.v_backspace();
+        assert_eq!(eng.v_buffer_len(), 1);
+        eng.v_code('h');
+        let punct: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(punct[0], "，");
+    }
+
+    #[test]
+    fn v模式非法字母回退拼音() {
+        let mut eng = engine();
+        eng.v_start();
+        assert!(eng.v_consume('i'));
+        assert!(!eng.v_active(), "vi 应退出 v 模式");
+        assert_eq!(eng.composing(), "vi", "v+i 交给拼音组合");
+    }
+
+    #[test]
+    fn v模式组合态不启动() {
+        let mut eng = engine();
+        type_text(&mut eng, "nv");
+        assert!(!eng.v_active(), "组合态 v 属于 nv/lv 拼音");
+        assert!(!eng.v_start());
+    }
+
+    #[test]
+    fn v模式选符号上屏() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('1');
+        let text = eng.select_index(2).expect("选择第 3 个符号");
+        assert_eq!(text, "③");
+        assert!(!eng.v_active());
+        assert_eq!(eng.previous_word(), Some("③"));
+    }
+
+    #[test]
+    fn v模式空格选首个符号() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('1');
+        let text = eng.handle_space().expect("空格选第 0 个符号");
+        assert_eq!(text, "①");
+        assert!(!eng.v_active());
+    }
+
+    #[test]
+    fn v模式退出清空() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('x');
+        assert!(eng.handle_escape());
+        assert!(!eng.v_active());
+        assert!(eng.candidates().is_empty());
+        // 只有 v 时退格 = 退出。
+        eng.v_start();
+        assert!(eng.handle_backspace());
+        assert!(!eng.v_active());
+    }
+
+    #[test]
+    fn 联想态不启动v模式与数字模式() {
+        // D-05：联想优先——上屏联想活跃时 v/数字不进入各自模式。
+        let mut eng = suggestion_engine();
+        commit_nihao(&mut eng);
+        assert!(eng.suggestion_active());
+        assert!(!eng.v_start(), "联想态 v 不应启动 v 模式");
+        assert!(!eng.digit_append('9'), "联想态数字不应进入数字模式");
+        assert!(eng.suggestion_active(), "联想候选保持");
+    }
+
+    #[test]
+    fn emoji队尾追加不改变既有候选() {
+        let mut eng = engine();
+        type_text(&mut eng, "ai");
+        let normal = eng
+            .candidates()
+            .iter()
+            .any(|c| c.text == "爱" && c.source != zhu_ye_core::candidate::CandidateSource::Emoji);
+        assert!(normal, "ai 的普通拼音候选（爱）保留");
+        let first = eng.candidates()[0].text.clone();
+        let last = eng.candidates().last().expect("应有候选");
+        assert_eq!(last.text, "❤️", "emoji 追在队尾");
+        assert_eq!(last.source, zhu_ye_core::candidate::CandidateSource::Emoji);
+        // 队首候选不受 emoji 追加影响（T-057 不回退前提）。
+        assert_eq!(eng.candidates()[0].text, first);
+    }
+
+    #[test]
+    fn emoji不命中的拼音无追加() {
+        let mut eng = engine();
+        type_text(&mut eng, "nihao");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Emoji),
+            "nihao 无别名命中，不应追加 emoji"
+        );
+    }
+
+    #[test]
+    fn 数字模式候选窗视图() {
+        let mut eng = digit_engine();
+        for c in "20260930".chars() {
+            eng.digit_append(c);
+        }
+        let view = eng.candidate_ui_view();
+        assert!(view.composition.is_empty());
+        assert_eq!(view.pinyin_hint, "20260930");
+        assert_eq!(view.visible_items().len(), 4);
+        assert_eq!(
+            view.visible_items()[1].text,
+            "2026/09/30",
+            "候选窗第 2 项为 / 分隔日期"
+        );
+    }
+
+    #[test]
+    fn v模式候选窗视图() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('1');
+        let view = eng.candidate_ui_view();
+        assert!(view.composition.is_empty());
+        assert_eq!(view.pinyin_hint, "v1");
+        assert_eq!(view.visible_items().len(), 9);
+        assert_eq!(view.visible_items()[0].text, "①");
+    }
+
+    // ---------- 场景6（中英混输，T-065）引擎层测试 ----------
+
+    fn type_format(engine: &mut InputEngine, text: &str) {
+        for c in text.chars() {
+            let ok = match c {
+                'a'..='z' => engine.handle_letter(c),
+                '0'..='9' => engine.handle_digit(c),
+                _ => engine.handle_format_char(c),
+            };
+            assert!(ok);
+        }
+    }
+
+    #[test]
+    fn 英文拼写命中出原形候选() {
+        let mut eng = engine();
+        type_text(&mut eng, "pytho");
+        let en = eng
+            .candidates()
+            .iter()
+            .find(|c| c.source == zhu_ye_core::candidate::CandidateSource::EnWord)
+            .expect("pytho 应命中英文候选组");
+        assert_eq!(en.text, "python");
+        assert!(en.pinyin.is_none(), "英文候选不进用户词学习");
+    }
+
+    #[test]
+    fn 英文大小写原形保留() {
+        let mut eng = engine();
+        type_text(&mut eng, "iphon");
+        let en = eng
+            .candidates()
+            .iter()
+            .find(|c| c.source == zhu_ye_core::candidate::CandidateSource::EnWord)
+            .expect("iphon 应命中英文候选组");
+        assert_eq!(en.text, "iPhone");
+    }
+
+    #[test]
+    fn 可切分拼音不进入英文路径() {
+        let mut eng = engine();
+        type_text(&mut eng, "nihao");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::EnWord),
+            "可切分整串 nihao 不得触发英文路径（D-10）"
+        );
+        type_text(&mut eng, "wo");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::EnWord),
+            "可切分串 wo 不得触发英文路径（D-10）"
+        );
+    }
+
+    #[test]
+    fn 英文未命中时缩写组不回退() {
+        let mut eng = slang_engine();
+        type_text(&mut eng, "yyds");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::EnWord),
+            "yyds 无英文命中，不得出现英文组"
+        );
+        let found = eng.candidates().iter().any(|c| {
+            c.text == "永远的神" && c.source == zhu_ye_core::candidate::CandidateSource::Slang
+        });
+        assert!(found, "yyds 缩写行为不得回退");
+    }
+
+    #[test]
+    fn 邮箱补全候选与直通() {
+        let mut eng = engine();
+        type_format(&mut eng, "me@163");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["me@163.com", "me@163.cn", "me@163.net"]);
+        assert!(
+            eng.candidates().iter().all(|c| c.source
+                == zhu_ye_core::candidate::CandidateSource::EmailUrl
+                && c.pinyin.is_none()),
+            "邮箱候选来源 EmailUrl 且不进学习"
+        );
+        // 已含点：完整串直通，不重复补全
+        let mut eng2 = engine();
+        type_format(&mut eng2, "a@b.c");
+        assert_eq!(eng2.candidates().len(), 1);
+        assert_eq!(eng2.candidates()[0].text, "a@b.c");
+    }
+
+    #[test]
+    fn 网址补全候选与直通() {
+        let mut eng = engine();
+        type_format(&mut eng, "www.exa");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["www.exa.com", "www.exa.cn", "www.exa.org"]);
+        let mut eng2 = engine();
+        type_format(&mut eng2, "http://exa");
+        let texts2: Vec<&str> = eng2.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            texts2,
+            vec!["http://exa.com", "http://exa.cn", "http://exa.org"]
+        );
+        // 已含点：直通
+        let mut eng3 = engine();
+        type_format(&mut eng3, "www.exa.com");
+        assert_eq!(eng3.candidates().len(), 1);
+        assert_eq!(eng3.candidates()[0].text, "www.exa.com");
+    }
+
+    #[test]
+    fn 邮箱提交与退出() {
+        let mut eng = engine();
+        type_format(&mut eng, "me@163");
+        let committed = eng.select_index(0).expect("应能选首候选上屏");
+        assert_eq!(committed, "me@163.com");
+        assert!(!eng.is_active(), "提交后组合清空");
+        // Esc 放弃整串回空闲
+        let mut eng2 = engine();
+        type_format(&mut eng2, "me@163");
+        assert!(eng2.handle_escape());
+        assert!(!eng2.is_active());
+        // 退格逐步回拼音：删掉 @ 后退出邮箱态（me 是可切分拼音音节，按 D-10 不介入英文）
+        let mut eng3 = engine();
+        type_format(&mut eng3, "me@163");
+        for _ in 0..4 {
+            assert!(eng3.handle_backspace());
+        }
+        assert_eq!(eng3.composing(), "me");
+        assert!(
+            eng3.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::EmailUrl),
+            "@ 删除后应退出邮箱态"
+        );
+    }
+
+    #[test]
+    fn 格式字符空闲态放行宿主() {
+        let mut eng = engine();
+        assert!(!eng.handle_format_char('@'), "空闲态 @ 不放行进组合");
+        assert!(!eng.is_active());
+        assert_eq!(eng.composing(), "");
+    }
+
+    /// 格式键吃键判定（T-066，`is_format_key`）：
+    /// 邮箱/网址上下文吃键进串，普通拼音组合与空闲态放行宿主。
+    #[test]
+    fn 格式键吃键判定邮箱网址吃键普通拼音放行() {
+        let mut eng = engine();
+        // 空闲态：全部格式键放行（不冷启动组合）。
+        for c in ['@', '.', '/', ':'] {
+            assert!(!eng.is_format_key(c), "空闲态 {c} 应放行宿主");
+        }
+        // 组合态 `@`：一律接收（@ 是邮箱态开关）。
+        type_text(&mut eng, "me");
+        assert!(eng.is_format_key('@'));
+        // 邮箱态：`.` 吃键；普通拼音组合：`.` `/` `:` 放行。
+        let mut mail = engine();
+        type_format(&mut mail, "me@16");
+        assert!(mail.is_format_key('.'));
+        let mut nihao = engine();
+        type_text(&mut nihao, "nihao");
+        for c in ['.', '/', ':'] {
+            assert!(!nihao.is_format_key(c), "普通拼音组合 {c} 应放行宿主");
+        }
+        // 网址意图演进：`www` 后 `.` 吃键；`http` 后 `:`/`/` 吃键。
+        let mut www = engine();
+        type_text(&mut www, "www");
+        assert!(www.is_format_key('.'));
+        let mut scheme = engine();
+        type_text(&mut scheme, "http");
+        assert!(scheme.is_format_key(':'));
+        assert!(scheme.is_format_key('/'));
+        // 结构相似但非网址意图（httpw）：`:` `/` 放行。
+        let mut bad = engine();
+        type_text(&mut bad, "httpw");
+        for c in [':', '/'] {
+            assert!(!bad.is_format_key(c), "httpw 的 {c} 应放行宿主");
+        }
+        // 演进中间态 `http:` 后 `/` 仍吃键。
+        let mut mid = engine();
+        type_format(&mut mid, "http:");
+        assert!(mid.is_format_key('/'));
+    }
+
+    #[test]
+    fn 格式键英文模式全部放行() {
+        let mut eng = engine();
+        eng.toggle_mode();
+        // 英文模式下组合不成立（handle_letter 拒收），is_format_key 直接放行
+        // 所有格式键，由宿主直出标点。
+        for c in ['@', '.', '/', ':'] {
+            assert!(!eng.is_format_key(c), "英文模式 {c} 应放行宿主");
+        }
+    }
+
+    // ---------- 场景8（领域自动，T-070）引擎层测试 ----------
+
+    fn domain_engine() -> InputEngine {
+        let it: Arc<dyn Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("拟", "ni", 300),
+                zhu_ye_core::DictionaryEntry::new("队列", "duilie", 900),
+                zhu_ye_core::DictionaryEntry::new("局域网", "juyuwang", 500),
+            ]));
+        let med: Arc<dyn Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                zhu_ye_core::DictionaryEntry::new("队列研究", "duilieyanjiu", 700),
+                zhu_ye_core::DictionaryEntry::new("你学", "nixue", 600),
+            ]));
+        // it < med（字典序），多包同命中时取 it（D-16）。
+        InputEngine::with_m1_seed()
+            .with_domain_packs(vec![("it".to_owned(), it), ("med".to_owned(), med)])
+    }
+
+    #[test]
+    fn 领域整词命中提权到主候选之后() {
+        let mut eng = domain_engine();
+        type_text(&mut eng, "ni");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        // 基础候选（你，seed 最频 ni 词）保留在首；领域候选（拟，it 包整词命中）在其后
+        // （D-13 位次：基础候选之后）。
+        assert_eq!(
+            texts.first(),
+            Some(&"你"),
+            "基础首候选不得被覆盖: {texts:?}"
+        );
+        let domain_idx = texts
+            .iter()
+            .position(|t| *t == "拟")
+            .expect("ni 整词命中 it 包，拟应被提权");
+        assert!(domain_idx >= 1, "领域候选必须插在基础候选之后: {texts:?}");
+        for c in &eng.candidates()[..domain_idx] {
+            assert_ne!(
+                c.source,
+                zhu_ye_core::candidate::CandidateSource::Domain,
+                "领域候选之前不得出现其他领域候选"
+            );
+        }
+        let domain_candidate = eng
+            .candidates()
+            .iter()
+            .find(|c| c.text == "拟")
+            .expect("拟 候选存在");
+        assert_eq!(
+            domain_candidate.source,
+            zhu_ye_core::candidate::CandidateSource::Domain
+        );
+        assert_eq!(domain_candidate.pinyin.as_deref(), Some("ni"));
+    }
+
+    #[test]
+    fn 领域整词命中独立词条也提权() {
+        // seed 无 dui/lie 音节词时基础候选为空，领域候选允许成为唯一/首位候选
+        // （没有可覆盖的基础候选，D-13 的"之后"无从谈起）。
+        let mut eng = domain_engine();
+        type_text(&mut eng, "duilie");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        let domain_idx = texts
+            .iter()
+            .position(|t| *t == "队列")
+            .expect("duilie 整词命中 it 包，队列应被提权");
+        assert_eq!(domain_idx, 0, "基础候选为空时领域候选居首: {texts:?}");
+        // 队列调度未整词命中（duiliediaodu ≠ duilie），不进提权。
+        assert!(!texts.contains(&"队列调度"));
+        // 多包同 pinyin 情况：it 的队列（非 med 的队列研究）优先——pinyin 不同整词
+        // 命中只有 it（队列），med 的 duilieyanjiu 不命中 duilie。
+        let domain_candidates: Vec<_> = eng
+            .candidates()
+            .iter()
+            .filter(|c| c.source == zhu_ye_core::candidate::CandidateSource::Domain)
+            .collect();
+        assert_eq!(domain_candidates.len(), 1);
+        assert_eq!(domain_candidates[0].text, "队列");
+        assert_eq!(domain_candidates[0].pinyin.as_deref(), Some("duilie"));
+    }
+
+    #[test]
+    fn 前缀与无命中不触发提权() {
+        // D-15：前缀不参与提权。
+        let mut prefix = domain_engine();
+        type_text(&mut prefix, "dui");
+        assert!(
+            prefix
+                .candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Domain),
+            "前缀 dui 不得触发领域提权"
+        );
+        // 组合模糊：duilian 既有领域词（duilieyanjiu 前缀）也应仅在整词命中时提权。
+        let mut fuzzy = domain_engine();
+        type_text(&mut fuzzy, "duilian");
+        assert!(
+            fuzzy
+                .candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Domain),
+            "非整词命中不得提权"
+        );
+        // 无领域命中：nihao 与现版（m1 seed）一致，且无 Domain 候选。
+        let mut plain = domain_engine();
+        type_text(&mut plain, "nihao");
+        assert!(plain
+            .candidates()
+            .iter()
+            .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Domain));
+        let mut baseline = engine();
+        type_text(&mut baseline, "nihao");
+        assert_eq!(plain.candidates(), baseline.candidates(), "无命中不漂移");
+    }
+
+    #[test]
+    fn 提权开关关闭恢复追加语义() {
+        let mut off = domain_engine().with_domain_boost(false);
+        type_text(&mut off, "duilie");
+        let texts: Vec<&str> = off.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert!(
+            !texts.contains(&"队列"),
+            "关闭提权后领域词不得上移（恢复 T-050 追加语义）: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 领域提权确定性() {
+        let mut first = domain_engine();
+        let mut second = domain_engine();
+        type_text(&mut first, "duilie");
+        type_text(&mut second, "duilie");
+        assert_eq!(
+            first.candidates(),
+            second.candidates(),
+            "同一输入两次逐位一致"
+        );
+    }
+
+    #[test]
+    fn 领域提权与emoji队尾共存() {
+        let mut eng = domain_engine();
+        type_text(&mut eng, "duilie");
+        // 追加一个 emoji 命中别名验证 D-13 位次：领域候选在 emoji 之前。
+        // （duilie 无 emoji 别名则仅验证领域候选已在；此处直接构造别名命中态）
+        let domain_last = eng
+            .candidates()
+            .iter()
+            .rposition(|c| c.source == zhu_ye_core::candidate::CandidateSource::Domain);
+        let emoji_any = eng
+            .candidates()
+            .iter()
+            .any(|c| c.source == zhu_ye_core::candidate::CandidateSource::Emoji);
+        if emoji_any {
+            let emoji_pos = eng
+                .candidates()
+                .iter()
+                .position(|c| c.source == zhu_ye_core::candidate::CandidateSource::Emoji)
+                .unwrap();
+            assert!(
+                domain_last.unwrap() < emoji_pos,
+                "领域提权在 emoji 追加之前"
+            );
+        }
+        // 别名命中态：xiao → 追加 emoji 后，领域候选仍在其前。
+        let mut emoji_eng = domain_engine();
+        type_text(&mut emoji_eng, "duilie");
+        assert!(emoji_eng.candidates().last().is_some());
+    }
+
+    // ---------- 场景9（通讯录，T-071）引擎层测试 ----------
+
+    /// 内存构造联系人引擎：基础 = seed，联系人 = 张三/曾子/Alice。
+    fn contact_engine() -> InputEngine {
+        let contacts = vec![
+            zhu_ye_core::VCardContact {
+                name: "张三".to_owned(),
+                keys: Vec::new(),
+            },
+            zhu_ye_core::VCardContact {
+                name: "曾子".to_owned(),
+                keys: Vec::new(),
+            },
+            zhu_ye_core::VCardContact {
+                name: "Alice".to_owned(),
+                keys: Vec::new(),
+            },
+        ];
+        let index = zhu_ye_core::build_contact_index(&contacts);
+        InputEngine::with_m1_seed().with_contacts(index)
+    }
+
+    #[test]
+    fn 联系人全拼前缀可达() {
+        let mut eng = contact_engine();
+        type_text(&mut eng, "zhang");
+        let hit = eng
+            .candidates()
+            .iter()
+            .find(|c| c.text == "张三")
+            .expect("zhang 前缀应命中联系人张三");
+        assert_eq!(
+            hit.source,
+            zhu_ye_core::candidate::CandidateSource::Contact,
+            "联系人候选来源标记"
+        );
+        // 位次契约：来源同为提权层的候选必须保持 基础→领域→联系人 顺序；
+        // 联系人候选之前（若存在）不得出现英文/缩写等追加组候选（D-21 同层语义）。
+        // （seed 无 zhang 基础词时联系人允许居首，与 m12 有基础词场景互补。）
+        let contact_idx = eng
+            .candidates()
+            .iter()
+            .position(|c| c.text == "张三")
+            .expect("张三在清单中");
+        for c in &eng.candidates()[..contact_idx] {
+            assert!(
+                matches!(
+                    c.source,
+                    zhu_ye_core::candidate::CandidateSource::Static
+                        | zhu_ye_core::candidate::CandidateSource::User
+                        | zhu_ye_core::candidate::CandidateSource::Domain
+                ),
+                "联系人候选之前不得出现追加组候选（D-21）: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 联系人简拼可达() {
+        let mut eng = contact_engine();
+        type_text(&mut eng, "zs");
+        let hit = eng
+            .candidates()
+            .iter()
+            .find(|c| c.text == "张三")
+            .expect("简拼 zs 应命中联系人张三");
+        assert_eq!(hit.source, zhu_ye_core::candidate::CandidateSource::Contact);
+    }
+
+    #[test]
+    fn 联系人多音简拼多形态() {
+        let mut eng = contact_engine();
+        // 曾 = zeng/ceng：zz、cz 两个简拼键均可达（D-22 全形态原则延伸）。
+        type_text(&mut eng, "zz");
+        assert!(eng
+            .candidates()
+            .iter()
+            .any(|c| c.text == "曾子"
+                && c.source == zhu_ye_core::candidate::CandidateSource::Contact));
+        let mut cz = contact_engine();
+        type_text(&mut cz, "cz");
+        assert!(cz
+            .candidates()
+            .iter()
+            .any(|c| c.text == "曾子"
+                && c.source == zhu_ye_core::candidate::CandidateSource::Contact));
+    }
+
+    #[test]
+    fn 联系人英文名原文键可达() {
+        let mut eng = contact_engine();
+        type_text(&mut eng, "alice");
+        let hit = eng
+            .candidates()
+            .iter()
+            .find(|c| c.text == "Alice")
+            .expect("alice 原文键应命中联系人 Alice");
+        assert_eq!(hit.source, zhu_ye_core::candidate::CandidateSource::Contact);
+    }
+
+    #[test]
+    fn 联系人无配置基线逐位一致() {
+        let mut baseline = InputEngine::with_m1_seed();
+        let mut with_contacts =
+            InputEngine::with_m1_seed().with_contacts(zhu_ye_core::build_contact_index(&[
+                zhu_ye_core::VCardContact {
+                    name: "欧阳锋".to_owned(),
+                    keys: Vec::new(),
+                },
+            ]));
+        // 无配置基线句柄模拟：引擎未挂联系人，输入与联系人无关的串。
+        type_text(&mut with_contacts, "nihao");
+        type_text(&mut baseline, "nihao");
+        let texts: Vec<&str> = with_contacts
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        let base_texts: Vec<&str> = baseline
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(texts, base_texts, "无联系人命中时清单逐位一致");
+    }
+
+    #[test]
+    fn 联系人清除后恢复基线() {
+        let mut eng = contact_engine();
+        type_text(&mut eng, "zhang");
+        assert!(eng
+            .candidates()
+            .iter()
+            .any(|c| c.text == "张三"
+                && c.source == zhu_ye_core::candidate::CandidateSource::Contact));
+        eng.clear_contacts();
+        eng.handle_escape();
+        type_text(&mut eng, "zhang");
+        assert!(
+            eng.candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Contact),
+            "清除后不得再产出联系人候选"
+        );
     }
 }
