@@ -1,0 +1,101 @@
+# 正式 Release 打包（发布分发闭环 CI 化，T-094 延伸）
+#
+# 触发：
+#   - push tags "v*"：正式发布（git-publish 在 main 合入后打 tag），自动上传资产；
+#   - workflow_dispatch：手动试跑（默认只构建+验证，不创建/上传 Release）。
+#
+# 链路（与本地 scripts/assemble-release.ps1 + verify-release-e2e.ps1 同一套逻辑）：
+#   fetch-sources（pins 锁定校验）→ 全量词典构建 → 公钥注入构建引擎 →
+#   私钥签名 manifest + verify 复核 → 组装 zip/SHA256SUMS → e2e 全链 →
+#   gh release create/upload。
+#
+# 密钥：
+#   ZHU_YE_RELEASE_SECRET_KEY  = Actions secret（私钥，别名运行时可见即可，绝不打印）
+#   ZHU_YE_RELEASE_PUBLIC_KEY  = Actions variable（公钥，公开材料）
+#   两者经环境变量传入，分别被 assemble-release.ps1 与 option_env! 消费。
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "上传资产到 GitHub Release（false = 只构建+验证）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+jobs:
+  pack:
+    runs-on: windows-latest
+    env:
+      ZHU_YE_RELEASE_PUBLIC_KEY: ${{ vars.ZHU_YE_RELEASE_PUBLIC_KEY }}
+      ZHU_YE_RELEASE_SECRET_KEY: ${{ secrets.ZHU_YE_RELEASE_SECRET_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 构建缓存
+        uses: swatinem/rust-cache@v2
+
+      - name: 数据源下载与锁定校验（data/pins→data/cache，含 bundle 抓取）
+        shell: pwsh
+        run: ./scripts/fetch-sources.ps1
+
+      - name: 英文词表 en.zyen（ECDICT 锁定 + 构建 + 性能验收）
+        shell: pwsh
+        run: ./scripts/build-en-wordbook.ps1
+
+      - name: 基础包与领域包（base/it/med/slang）
+        shell: pwsh
+        run: |
+          cargo run --release -p zhu-ye-dict -- build-base
+          cargo run --release -p zhu-ye-dict -- build-pack it
+          cargo run --release -p zhu-ye-dict -- build-pack med
+          cargo run --release -p zhu-ye-dict -- build-slang
+
+      - name: 组装发布资产（公钥注入构建 + 私钥签名 manifest + verify 复核 + zip + SHA256SUMS）
+        shell: pwsh
+        run: ./scripts/assemble-release.ps1
+
+      - name: 端到端验证（apply 落地 / 哈希一致 / 篡改自愈 / 篡改 manifest 拒绝）
+        shell: pwsh
+        run: ./scripts/verify-release-e2e.ps1
+
+      - name: 上传到 GitHub Release（tag 触发或手动 upload 时）
+        if: github.event_name == 'push' || inputs.upload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ github.ref_name }}"
+          if ($version -like 'v*') { $version = $version.Substring(1) }
+          $dir = "target/release-assets/$version"
+          if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+            throw "发布资产目录缺失: $dir"
+          }
+          $assets = @(
+            "$dir/SHA256SUMS.txt",
+            "$dir/ai-zhu-ye-ime-$version.zip",
+            "$dir/packs/it.zyct",
+            "$dir/packs/med.zyct",
+            "$dir/packs/slang.zyct",
+            "$dir/packs/manifest.json"
+          )
+          $tag = "v$version"
+          $prerelease = if ($version -match '-') { '--prerelease' } else { '' }
+          # Release 可能已存在（重跑幂等）；失败忽略后走 upload --clobber。
+          gh release create $tag --title $tag --notes "发布说明见 CHANGELOG [$version] 段（https://github.com/menghun3-cn/zhu-ye-ime/blob/main/CHANGELOG.md）" $prerelease --latest 2>$null
+          gh release upload $tag @assets --clobber
