@@ -1249,6 +1249,23 @@ impl InputEngine {
             }
             zhu_ye_core::FormatKind::None => {}
         }
+        // T-086（FR-050）：混合串解码——同时含非 ASCII 段与不可切字母段
+        // （如 `python代码`/`API接口`/`iPhone价格`）时接管候选路径：
+        // 整句候选置首 + 各段最优候选随后（§14.3.3）。FR-031（`@`/`www.`/
+        // http 前缀）已在上述 detect_format 优先判定，不被混合解码劫持；
+        // 纯拼音/纯缩写/纯英文/纯中文由 `is_mixed_input` 判别不触发（§14.3.5）。
+        if zhu_ye_core::mixed::is_mixed_input(&self.table, &self.composing) {
+            self.candidates = zhu_ye_core::mixed::mixed_candidates(
+                &self.table,
+                Some(self.dictionary.as_ref()),
+                self.en_lexicon.as_ref(),
+                &self.composing,
+            );
+            self.cached_translation_candidates.clear();
+            self.selected_on_page = 0;
+            self.clamp_page();
+            return;
+        }
         // T-029：输入串存在尾部残缺音节时走前缀候选（补全组优先 + 完成组回退），
         // 两组分别经排序模型排序后按组间顺序融合，确保补全组始终在前。
         let groups = zhu_ye_core::generate_prefix_candidates(
@@ -1676,6 +1693,74 @@ mod tests {
         assert!(!engine.is_active());
         engine.toggle_mode();
         assert!(engine.handle_letter('n'));
+    }
+
+    /// T-086（FR-050）：中英混合串解码——`python代码` 类输入整句候选置首，
+    /// 分段候选随后；`yyds`/纯拼音不被劫持（§14.3.5 不回退清单）。
+    #[test]
+    fn 混合串解码整句置首且分段随后() {
+        use zhu_ye_core::candidate::CandidateSource;
+        use zhu_ye_core::DictionaryEntry;
+        let dictionary: Arc<dyn zhu_ye_core::Dictionary> =
+            Arc::new(zhu_ye_core::InMemoryDictionary::from_entries(vec![
+                DictionaryEntry::new("代码", "daima", 5000),
+                DictionaryEntry::new("你好", "nihao", 100),
+            ]));
+        let mut engine = InputEngine::new(dictionary.clone());
+        type_text(&mut engine, "pythondaima");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        // 整句 = python（英文词表原形）+ 代码（拼音段词典命中），置首
+        assert_eq!(texts[0], "python代码");
+        assert!(texts.contains(&"python"));
+        assert!(texts.contains(&"代码"));
+        assert!(engine
+            .candidates()
+            .iter()
+            .any(|c| c.source == CandidateSource::Mixed));
+        // 确定性：重建引擎结果一致
+        let mut again = InputEngine::new(dictionary.clone());
+        type_text(&mut again, "pythondaima");
+        assert_eq!(texts, {
+            let t: Vec<&str> = again.candidates().iter().map(|c| c.text.as_str()).collect();
+            t
+        });
+    }
+
+    #[test]
+    fn 纯拼音与纯缩写不走混合路径() {
+        use zhu_ye_core::candidate::CandidateSource;
+        let mut engine1 = engine();
+        type_text(&mut engine1, "nihao");
+        assert_eq!(engine1.candidates()[0].text, "你好");
+        assert_ne!(engine1.candidates()[0].source, CandidateSource::Mixed);
+
+        // yyds：无 slang 时缩写路径不产出；混合路径不得劫持（无任何 Mixed 候选）
+        let mut engine2 = engine();
+        type_text(&mut engine2, "yyds");
+        assert!(engine2
+            .candidates()
+            .iter()
+            .all(|c| c.source != CandidateSource::Mixed));
+    }
+
+    #[test]
+    fn 混合串被邮箱网址格式判定先行截获() {
+        use zhu_ye_core::candidate::CandidateSource;
+        // FR-031 优先级高于混合解码（验收标准 14.1.2）：`pythondaima@x` 走邮箱
+        // 候选（detect_format 先 return），混合分支不接管。
+        let mut engine = engine();
+        type_text(&mut engine, "pythondaima");
+        assert!(engine.handle_format_char('@'));
+        type_text(&mut engine, "x");
+        assert!(engine
+            .candidates()
+            .iter()
+            .all(|c| c.source != CandidateSource::Mixed));
+        assert!(engine.candidates()[0].text.contains('@'));
     }
 
     /// T-049：含数字缩写键（拼音键含 ASCII 数字）必须能被 `is_abbreviation_prefix` 识别，

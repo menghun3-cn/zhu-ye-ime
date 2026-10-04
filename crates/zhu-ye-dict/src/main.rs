@@ -63,6 +63,7 @@ fn run() -> Result<(), String> {
             en_bench_command(&required_path(&args, 2)?, args.get(3).map(String::as_str))
         }
         Some("en-inspect") => en_inspect_command(&required_path(&args, 2)?),
+        Some("mixed-bench") => mixed_bench_command(args.get(2).map(String::as_str)),
         _ => {
             print_usage();
             Ok(())
@@ -112,6 +113,7 @@ fn print_usage() {
     );
     println!("  en-bench <文件> [查询数]  英文词表加载与前缀查询性能实测（T-085，输出 指标: 行）");
     println!("  en-inspect <文件>    打印英文词表头部元数据与内容哈希（T-085）");
+    println!("  mixed-bench [次数]  中英混合串解码性能实测（T-086，输出 指标: 行，验收 ≤1ms/次）");
 }
 
 /// 英文词表默认产物路径（T-085）。
@@ -253,6 +255,80 @@ fn en_bench_command(path: &Path, samples: Option<&str>) -> Result<(), String> {
     println!("指标: en_load_ms={load_ms:.2}");
     println!("指标: en_query_us={median_us:.3}");
     println!("指标: en_query_p99_us={p99_us:.3}");
+    Ok(())
+}
+
+/// 混合串解码样本（T-086）：覆盖 触发（英文词+拼音后缀/大写缩写/中文段/数字夹层）
+/// 与 不触发（纯拼音/纯缩写/纯英文/无前缀乱串）两类，逐条计入计时。
+const MIXED_BENCH_SAMPLES: &[&str] = &[
+    "pythondaima",
+    "APIjiekou",
+    "iphonejiage",
+    "Webkaifa",
+    "pythondaima123",
+    "nihaoAPI",
+    "pythonku",
+    "diamant", // 非英文词前缀乱串，字面回退
+    "jisuanji",
+    "diannao",
+    "shouji",
+    "zhongwen",
+    "xuexi",
+    "howareyou", // 纯英文：is_mixed 快速为 false
+    "yyds",
+    "nihao",
+    "xie",
+    "qwertyu",
+    "abcdefghijkl",
+    "qqwe",
+    "zzzz",
+    "aaaa",
+];
+
+/// `mixed-bench`：固定样本循环计时（T-086，验收标准 §14.2"混合串解码 ≤1ms"回填）。
+///
+/// 热路径口径：`is_mixed_input` 判定 + 触发时 `mixed_candidates` 完整解码
+/// （静态英文表 + 无词典，与验收环境一致、可复现）。
+fn mixed_bench_command(samples: Option<&str>) -> Result<(), String> {
+    let iterations: usize = samples.and_then(|s| s.parse().ok()).unwrap_or(100_000);
+    use std::time::Instant;
+    let table = zhu_ye_core::pinyin::SyllableTable::standard();
+    // 预热一轮样本（内存分配/静态表常量首次访问不计入计时）。
+    for text in MIXED_BENCH_SAMPLES {
+        if zhu_ye_core::is_mixed_input(&table, text) {
+            let _ = zhu_ye_core::mixed_candidates(&table, None, None, text);
+        }
+    }
+    let mut durations: Vec<u128> = Vec::with_capacity(iterations);
+    let mut checksum: u64 = 0;
+    let mut triggered = 0u64;
+    for i in 0..iterations {
+        let text = MIXED_BENCH_SAMPLES[i % MIXED_BENCH_SAMPLES.len()];
+        let t = Instant::now();
+        if zhu_ye_core::is_mixed_input(&table, text) {
+            triggered += 1;
+            let cands = zhu_ye_core::mixed_candidates(&table, None, None, text);
+            checksum = checksum.wrapping_add(cands.len() as u64);
+        } else {
+            checksum = checksum.wrapping_add(text.len() as u64);
+        }
+        durations.push(t.elapsed().as_nanos());
+    }
+    durations.sort_unstable();
+    let median_us = if durations.is_empty() {
+        0.0
+    } else {
+        durations[durations.len() / 2] as f64 / 1000.0
+    };
+    let p99_us = durations[(durations.len() * 99) / 100] as f64 / 1000.0;
+    let max_us = durations.last().map(|d| *d as f64 / 1000.0).unwrap_or(0.0);
+    println!(
+        "混合串解码：{iterations} 次（{} 组样本循环，触发 {triggered}），单次中位数 {median_us:.3} us，P99 {p99_us:.3} us，最大 {max_us:.3} us，校验和 {checksum}",
+        MIXED_BENCH_SAMPLES.len()
+    );
+    println!("指标: mixed_median_us={median_us:.3}");
+    println!("指标: mixed_p99_us={p99_us:.3}");
+    println!("指标: mixed_max_us={max_us:.3}");
     Ok(())
 }
 

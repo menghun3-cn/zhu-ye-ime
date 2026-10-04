@@ -23,6 +23,7 @@ pub mod error;
 pub mod format;
 pub mod identity;
 pub mod manifest;
+pub mod mixed;
 pub mod pack_config;
 pub mod pinyin;
 pub mod suggestion;
@@ -63,6 +64,7 @@ pub use manifest::{
     verify_pack_contents, verify_signature, verify_signature_with_key, version_at_least, Manifest,
     ManifestSignature, PackMeta, SignatureError, MANIFEST_SCHEMA, SIGNATURE_ALGORITHM,
 };
+pub use mixed::{is_mixed_input, mixed_candidates};
 pub use pack_config::{
     is_distributable_pack, load_config, pack_display, plan_packs, save_config, ConfigFile,
     ModeChoice, PackDisplay, PackPlan, ThemeChoice, BASE_PACK_FILE_NAME, CONFIG_FORMAT_VERSION,
