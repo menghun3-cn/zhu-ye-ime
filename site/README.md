@@ -22,7 +22,7 @@ site/
   docs/index.html      文档页（安装与使用提炼，非仓库 docs/ 开发文档）
   download/index.html  下载页（发布状态如实呈现）
   privacy/index.html   隐私页（零网络 / 本机处理）
-  about/index.html     关于页（简介 / 状态 / 许可 / 借鉴记录）
+  about/index.html     关于页（简介 / 技术栈 / 许可 / 链接）
   404.html             未找到（吉祥物探头姿态）
   llms.txt             AI 检索入口（llmstxt.org v2，FR-058/S-18）
   agents.txt           面向 AI 代理的站点导读（本站格式，FR-058/S-18）
@@ -91,7 +91,7 @@ site/
 ## 内容真实性守则（改文案前必读）
 
 - 只宣称**已实现并经测试/验收**的能力；能力词表与禁止词见 [官网设计.md §7](../docs/官网设计.md)。
-- 规划中的能力（如 M13 五项）只能出现在首页"路线图"区块并带 `<span class="tag">规划中</span>`。
+- 规划中的能力（如正式版发布、英文官网）只能出现在首页"路线图"区块并带 `<span class="tag">规划中</span>`。
 - 版本状态行（footer/下载页/关于页共用的同一句话）与当前里程碑口径必须一致（S-17）；
   发布流程中，CHANGELOG 发布条目需同步更新该行。
 - 下载页以安装包为主：所有安装包（便携 zip；exe 安装包规划中）一律来自 GitHub Releases 资产
