@@ -25,17 +25,14 @@ pub fn config_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join(CONFIG_FILE))
 }
 
-/// 验收期文件日志所在目录。
+/// 产品日志目录（FR-060，T-091）：`%LOCALAPPDATA%\ai-zhu-ye-ime\logs`。
 ///
-/// TSF 侧仅在 `C:\zhu-ye-test\tsf-debug.enable` 存在时把日志追加写到
-/// `C:\zhu-ye-test\tsf-debug.log`（见 `crates/zhu-ye-ime/src/tsf.rs` 的 `FILE_LOG_PATH`），
-/// 因此**生产环境该目录通常不存在**。界面据此给出明确提示，而不是打开一个空目录。
-///
-/// 路径与 TSF 侧同源，但此处是字面复制：`FILE_LOG_PATH` 是 `tsf.rs` 内的私有常量，
-/// 跨 crate 复用它要把常量提为 `pub` 并改成运行时拼接，代价大于收益。
+/// TSF 侧产品模式把文件日志写到该目录（`ime.log`，默认 warn 级别，1 MiB
+/// 轮转；见 `crates/zhu-ye-ime/src/tsf.rs` 的 `product_log`）。设置窗口独立
+/// 进程可能先于首条日志打开 → 打开前由 `open_target` 幂等创建（设计 §5）。
 #[must_use]
-pub fn acceptance_log_dir() -> PathBuf {
-    PathBuf::from(r"C:\zhu-ye-test")
+pub fn product_log_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|root| PathBuf::from(root).join(APPDATA_DIR).join("logs"))
 }
 
 /// 读取配置；缺失或损坏时回退默认并回报诊断。
@@ -433,5 +430,24 @@ mod tests {
         let (vcards, diagnostic) = super::load_contact_vcards(&path);
         assert!(vcards.is_empty());
         assert_eq!(diagnostic, None);
+    }
+
+    #[test]
+    fn 产品日志目录按本地应用数据目录解析且缺失时为空() {
+        // T-091（FR-060）：`%LOCALAPPDATA%\ai-zhu-ye-ime\logs`，与 TSF 侧
+        // 产品轨 `ime.log` 路径同源。环境变量在单个测试内串行覆盖/恢复，
+        // 规避并行线程互相覆盖。
+        let original = std::env::var_os("LOCALAPPDATA");
+        let dir = temp_dir("logdir");
+        std::env::set_var("LOCALAPPDATA", &dir);
+        assert_eq!(
+            super::product_log_dir(),
+            Some(dir.join("ai-zhu-ye-ime").join("logs"))
+        );
+        std::env::remove_var("LOCALAPPDATA");
+        assert_eq!(super::product_log_dir(), None);
+        if let Some(path) = original {
+            std::env::set_var("LOCALAPPDATA", path);
+        }
     }
 }

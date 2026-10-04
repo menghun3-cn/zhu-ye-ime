@@ -59,6 +59,7 @@ fn run() -> Result<(), String> {
         Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
         Some("sign-manifest") => sign_manifest_command(required_path(&args, 2)?),
         Some("verify-signature") => verify_signature_command(required_path(&args, 2)?),
+        Some("keygen") => keygen_command(),
         Some("en-build") => en_build_command(&args),
         Some("en-bench") => {
             en_bench_command(&required_path(&args, 2)?, args.get(3).map(String::as_str))
@@ -109,6 +110,9 @@ fn print_usage() {
     );
     println!(
         "  verify-signature <manifest.json>  用内置/指定公钥验签（读 ZHU_YE_RELEASE_PUBLIC_KEY，M6-U）"
+    );
+    println!(
+        "  keygen           生成 ed25519 发布密钥对（私钥仅发布环境保存、绝不入库；公钥经构建期注入客户端，M6-U/T-094）"
     );
     println!(
         "  en-build [--freqwords 文件] [--cedict 文件] [--capitals 文件] [--exclude 文件] [输出]  构建英文词表 en.zyen（T-085）"
@@ -602,6 +606,29 @@ fn verify_manifest_command(path: PathBuf) -> Result<(), String> {
 ///
 /// 私钥从环境变量 `ZHU_YE_RELEASE_SECRET_KEY` 读取（32 字节十六进制），
 /// **绝不写入仓库、日志或命令行参数**——参数会留在进程列表与 shell 历史里。
+/// `keygen`（M6-U/T-094）：生成新的 ed25519 发布密钥对。
+///
+/// 输出 `(私钥种子 hex, 公钥 hex)`。私钥只应在发布环境中保存（发布流程
+/// 文档约定存储位置），绝不入库；公钥配置到构建环境 `ZHU_YE_RELEASE_PUBLIC_KEY`，
+/// 客户端由此内置信任锚。
+fn keygen_command() -> Result<(), String> {
+    let (secret, public) = zhu_ye_core::generate_keypair()?;
+    println!("已生成 ed25519 发布密钥对（P-04 信任锚）");
+    println!();
+    println!("私钥（ZHU_YE_RELEASE_SECRET_KEY，仅发布环境保存，绝不入库/日志）:");
+    println!("  {secret}");
+    println!();
+    println!("公钥（ZHU_YE_RELEASE_PUBLIC_KEY，可入库；构建期注入客户端）:");
+    println!("  {public}");
+    println!();
+    println!("注意：");
+    println!("  1. 私钥泄露 = 可伪造发布包；请存储在受保护的发布环境，不要写入仓库、");
+    println!("     提交历史或任何自动化日志；");
+    println!("  2. 换钥会令旧客户端拒绝新包（信任锚编译内置），需随新引擎版本发布；");
+    println!("  3. 丢失私钥后无恢复手段：直接生成新密钥对并随下一次引擎发布轮换。");
+    Ok(())
+}
+
 fn sign_manifest_command(path: PathBuf) -> Result<(), String> {
     let secret_hex = std::env::var("ZHU_YE_RELEASE_SECRET_KEY").map_err(|_| {
         "未设置 ZHU_YE_RELEASE_SECRET_KEY（32 字节十六进制私钥）；\

@@ -33,6 +33,11 @@ function Write-PinBack($Pin, [string]$PinPath) {
 
 function Download-Once([string]$Url, [string]$Target, $Pin, [string]$PinPath) {
     $tmp = "$Target.tmp"
+    # 干净检出下 cache_rel 指向的目录（如 data/raw）可能不存在，先确保父目录（CI 试跑 T-095 暴露）
+    $dir = Split-Path -Parent $Target
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
     $attempt = 0
     while ($attempt -lt 3) {
         try {

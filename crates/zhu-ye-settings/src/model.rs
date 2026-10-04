@@ -116,7 +116,9 @@ impl OpenTarget {
         match self {
             Self::ConfigFile => "用系统默认方式打开 config.json（启用的领域包、主题等）",
             Self::DataDir => "配置、用户词库与已安装的领域包都在这里",
-            Self::LogDir => "文件日志仅在验收期启用，生产环境通常不存在",
+            Self::LogDir => {
+                "产品日志目录（默认记录错误，级别见 config.json log_level）；首次写日志时自动创建"
+            }
         }
     }
 }

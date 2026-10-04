@@ -20,8 +20,10 @@ pub mod emoji;
 pub mod en_lexicon;
 pub mod en_words;
 pub mod error;
+pub mod file_log;
 pub mod format;
 pub mod identity;
+pub mod log_level;
 pub mod manifest;
 pub mod mixed;
 pub mod pack_config;
@@ -43,9 +45,9 @@ pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
 pub use candidate::{
     abbreviation_candidates, append_abbreviation_group, corrected_candidates, en_word_candidates,
     en_word_candidates_from, generate_candidates, generate_prefix_candidates, initial_candidates,
-    is_abbreviation_input, merge_candidate_groups, sentence_candidates, Candidate, CandidateSorter,
-    PrefixCandidateGroups, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
-    ABBREVIATION_MIN_LEN, BEAM_WIDTH, BEAM_WORD_CAP, CORRECTION_VARIANT_CAP,
+    is_abbreviation_input, merge_candidate_groups, prefix_expand_candidates, sentence_candidates,
+    Candidate, CandidateSorter, PrefixCandidateGroups, RankingConfig, RankingContext, RankingModel,
+    StaticRankingModel, ABBREVIATION_MIN_LEN, BEAM_WIDTH, BEAM_WORD_CAP, CORRECTION_VARIANT_CAP,
     INITIAL_COMPLETION_CAP, INITIAL_MAX_LEN, INITIAL_MIN_LEN, SENTENCE_MAX_WORD_CHARS,
     SENTENCE_TOP_N,
 };
@@ -62,11 +64,14 @@ pub use emoji::{emoji_for, EmojiEntry, EMOJI_TABLE};
 pub use en_lexicon::{compile_en_records, EnHeader, EnLexicon, EnRecord};
 pub use en_words::{en_words_with_prefix, EnWordEntry, EN_WORDS};
 pub use error::{Error, Result};
+pub use file_log::{FileLogger, DEFAULT_LOG_SIZE_LIMIT};
 pub use format::{cn_numeral, format_candidates, FormatCandidate};
+pub use log_level::{deserialize_log_level, LogLevel};
 pub use manifest::{
-    canonical_bytes, parse_manifest, parse_public_key, sha256_file, sha256_hex, sign_manifest,
-    verify_pack_contents, verify_signature, verify_signature_with_key, version_at_least, Manifest,
-    ManifestSignature, PackMeta, SignatureError, MANIFEST_SCHEMA, SIGNATURE_ALGORITHM,
+    canonical_bytes, generate_keypair, parse_manifest, parse_public_key, sha256_file, sha256_hex,
+    sign_manifest, verify_pack_contents, verify_signature, verify_signature_with_key,
+    version_at_least, Manifest, ManifestSignature, PackMeta, SignatureError, MANIFEST_SCHEMA,
+    SIGNATURE_ALGORITHM,
 };
 pub use mixed::{is_mixed_input, mixed_candidates};
 pub use pack_config::{

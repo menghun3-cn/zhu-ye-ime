@@ -1287,6 +1287,23 @@ impl InputEngine {
             let direct_hit = !dictionary.lookup(&composing).is_empty();
             let mut main = self.ranking.rank(candidates, &context);
 
+            // FR-059（第十一期）：完整拼音整词命中不足一页时，前缀组词展开补足
+            // （D-70 仅不足一页才展开、D-71 独立追加组按词频取前 N 补足一页）。
+            // 展开组不参与主排序（整词命中组序原样保留），置于整词命中组之后；
+            // 常见拼音（候选 ≥9）逐位不变，T-050 基线零漂移、T-057 eval 零回退。
+            if direct_hit && main.len() < self.page_size {
+                let expanded = zhu_ye_core::prefix_expand_candidates(
+                    dictionary.as_ref(),
+                    &composing,
+                    self.page_size - main.len(),
+                    &main,
+                );
+                if !expanded.is_empty() {
+                    let expanded = self.ranking.rank(expanded, &context);
+                    main = append_group(main, expanded);
+                }
+            }
+
             // M7 整句（FR-025）：无整词命中时用 beam 搜索全局最优整句，
             // 作为独立「整句组」置于主候选最前（长串用户意图即整句）。
             if !direct_hit {
@@ -1611,7 +1628,8 @@ mod tests {
             .iter()
             .map(|c| c.text.as_str())
             .collect();
-        assert_eq!(texts, vec!["你"]);
+        // FR-059：ni 整词命中不足一页 → 前缀组词展开补足（你 + 你好/尼好）。
+        assert_eq!(texts, vec!["你", "你好", "尼好"]);
     }
 
     #[test]
@@ -2999,6 +3017,155 @@ mod tests {
             second.candidates(),
             "同一输入两次逐位一致"
         );
+    }
+
+    // ---- 前缀组词展开（FR-059，T-090，第十一期）----
+
+    fn shui_engine() -> InputEngine {
+        use zhu_ye_core::dict::{DictionaryEntry, InMemoryDictionary};
+        // 真实词典口径：shui 整词命中 4 条（低频音节，不足一页），
+        // 前缀更深组词 8 条可补足。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("说", "shui", 413852),
+            DictionaryEntry::new("睡", "shui", 80000),
+            DictionaryEntry::new("水", "shui", 60000),
+            DictionaryEntry::new("水稻", "shuidao", 120000),
+            DictionaryEntry::new("水果", "shuiguo", 90000),
+            DictionaryEntry::new("水平", "shuiping", 85000),
+            DictionaryEntry::new("睡觉", "shuijiao", 70000),
+            DictionaryEntry::new("水面", "shuimian", 65000),
+            DictionaryEntry::new("水灾", "shuizai", 64000),
+            DictionaryEntry::new("水分", "shuifen", 63000),
+            DictionaryEntry::new("水彩", "shuicai", 62000),
+            DictionaryEntry::new("水波", "shuibo", 61000),
+        ]);
+        InputEngine::new(Arc::new(dictionary))
+    }
+
+    #[test]
+    fn 前缀组词展开补足低频音节到一页() {
+        let mut engine = shui_engine();
+        type_text(&mut engine, "shui");
+        let candidates = engine.candidates();
+        // 排除 emoji 队尾追加（shui→😴 属 FR-029 既有行为，非展开组）。
+        let non_emoji: Vec<&zhu_ye_core::Candidate> = candidates
+            .iter()
+            .filter(|c| c.source != zhu_ye_core::candidate::CandidateSource::Emoji)
+            .collect();
+        let texts: Vec<&str> = non_emoji.iter().map(|c| c.text.as_str()).collect();
+        // 主组序原样（rank 后频率降序），展开组接其后不参与主排序。
+        assert_eq!(
+            texts[..3],
+            ["说", "睡", "水"],
+            "整词命中组序不得被展开改变: {texts:?}"
+        );
+        // 展开组按词频降序补足到 9 条（水稻/水果/水平/睡觉/水面/水灾）。
+        assert_eq!(
+            texts[3..],
+            ["水稻", "水果", "水平", "睡觉", "水面", "水灾"],
+            "展开组词频降序补足: {texts:?}"
+        );
+        assert!(
+            non_emoji[3..]
+                .iter()
+                .all(|c| c.source == zhu_ye_core::candidate::CandidateSource::PrefixExpand),
+            "展开组来源必须为 PrefixExpand"
+        );
+        assert_eq!(texts.len(), 9, "首屏补足到一页");
+        let mut seen = std::collections::HashSet::new();
+        assert!(texts.iter().all(|t| seen.insert(*t)), "展开后无重复");
+    }
+
+    #[test]
+    fn 常见拼音候选已满一页不展开() {
+        use zhu_ye_core::dict::{DictionaryEntry, InMemoryDictionary};
+        // nihao 整词命中 9 条：候选已满一页 → 零展开（D-70），列表逐位与基线一致。
+        let words = [
+            "你好", "妮好", "尼好", "泥好", "你号", "拟好", "匿好", "逆好", "腻好",
+        ];
+        let entries: Vec<DictionaryEntry> = words
+            .iter()
+            .enumerate()
+            .map(|(i, word)| DictionaryEntry::new(*word, "nihao", 5000 - i as u64))
+            .collect();
+        let mut engine = InputEngine::new(Arc::new(InMemoryDictionary::from_entries(entries)));
+        type_text(&mut engine, "nihao");
+        assert!(
+            engine
+                .candidates()
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::PrefixExpand),
+            "候选已满一页时不得展开"
+        );
+        assert_eq!(engine.candidates().len(), 9);
+    }
+
+    #[test]
+    fn 前缀组词展开按页大小补足() {
+        // 注入小页验证 fill 计算：main=3、page_size=5 → fill=2。
+        let mut engine = shui_engine();
+        engine.page_size = 5;
+        type_text(&mut engine, "shui");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .filter(|c| c.source != zhu_ye_core::candidate::CandidateSource::Emoji)
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(texts[..3], ["说", "睡", "水"]);
+        assert_eq!(texts[3..], ["水稻", "水果"], "fill=2 只补 2 条: {texts:?}");
+        assert_eq!(texts.len(), 5);
+    }
+
+    #[test]
+    fn 不完整拼音仍走前缀补全不展开() {
+        let mut engine = shui_engine();
+        type_text(&mut engine, "shuip");
+        let candidates = engine.candidates();
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::PrefixExpand),
+            "不完整拼音 shuip 走既有前缀补全路径（FR-023），不得进入展开组"
+        );
+        assert!(
+            candidates.iter().any(|c| c.text == "水平"),
+            "shuip 前缀补全应出水平"
+        );
+    }
+
+    #[test]
+    fn 领域包词被展开截获不重复() {
+        // 领域包含 shui 键词「谁」：展开组（Composite 前缀查询）会提前截获该词，
+        // 领域提权 append 同文本去重 → 全文只出现一次（D-13 位次语义等价的展示）。
+        use zhu_ye_core::dict::{DictionaryEntry, InMemoryDictionary};
+        let base = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("说", "shui", 413852),
+            DictionaryEntry::new("睡", "shui", 80000),
+            DictionaryEntry::new("水", "shui", 60000),
+            DictionaryEntry::new("水稻", "shuidao", 120000),
+            DictionaryEntry::new("水果", "shuiguo", 90000),
+            DictionaryEntry::new("水平", "shuiping", 85000),
+            DictionaryEntry::new("睡觉", "shuijiao", 70000),
+        ]);
+        let it = InMemoryDictionary::from_entries(vec![DictionaryEntry::new("谁", "shui", 127180)]);
+        let mut engine = InputEngine::new(Arc::new(base))
+            .with_domain_packs(vec![("it".to_owned(), Arc::new(it) as Arc<dyn Dictionary>)]);
+        type_text(&mut engine, "shui");
+        let candidates = engine.candidates();
+        let count = candidates.iter().filter(|c| c.text == "谁").count();
+        assert_eq!(count, 1, "领域词被展开组截获后不得重复: {candidates:?}");
+        assert!(
+            candidates.iter().filter(|c| c.text == "谁").all(|c| {
+                c.source == zhu_ye_core::candidate::CandidateSource::PrefixExpand
+                    || c.source == zhu_ye_core::candidate::CandidateSource::Domain
+            }),
+            "谁 的来源应为 PrefixExpand（被展开截获）或 Domain"
+        );
+        // 展开组在低频音节仍然生效（Composite 口径含领域包）。
+        assert!(candidates
+            .iter()
+            .any(|c| c.source == zhu_ye_core::candidate::CandidateSource::PrefixExpand));
     }
 
     #[test]
