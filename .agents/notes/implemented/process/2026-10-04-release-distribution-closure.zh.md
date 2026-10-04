@@ -64,6 +64,49 @@ M6-U（[词典更新信任链](../architecture/2026-09-29-dictionary-update-trus
 （`2-alpha` → 2），保留"非数字段按 0、缺段按 0 补齐"的既有语义；补 6 条
 pre-release 断言。
 
+### 正式发布密钥配置 GitHub（T-095）
+
+2026-10-04 以 `zhu-ye-dict keygen` 重新生成正式密钥对（替代并作废旧测试密钥对）：
+私钥仅存于 GitHub Actions secret `ZHU_YE_RELEASE_SECRET_KEY`（stdin 写入，不落盘、
+不出现于进程参数与仓库），公钥为 Actions variable `ZHU_YE_RELEASE_PUBLIC_KEY`
+（= `832dc4a549afed41b013b6aae8ebc7739b88d6fde9a7831336e9d59231067cce`，公开材料）。
+镜像密钥给其他维护者的安排留待后续（需求 L235）。
+
+### `.github/workflows/release.yml`：CI 化正式打包（T-095）
+
+推送 `v*` tag 自动执行全链；`workflow_dispatch` 手动跑同一全链（`upload` 输入为
+true 才上传），`concurrency` 组防止并发发布构建相互覆盖。windows-latest 步骤：
+checkout → rust-toolchain → rust-cache → `fetch-sources.ps1`（pins 锁定校验下载，
+含 bundle 抓取）→ `unpack-cedict.ps1` → `build-en-wordbook.ps1`（en.zyen）→
+`build-base` / `build-pack it|med` / `build-slang` → `assemble-release.ps1`（公钥
+注入构建、私钥签名 manifest、verify 复核、zip、SHA256SUMS）→
+`verify-release-e2e.ps1`（4/4）→ `gh release create/upload`（6 项资产，仅 tag
+推送或 `upload=true` 时）。secret 以环境变量进 runner，不出现于 `run` 文本。
+
+### CI 试跑暴露的干净检出加固（T-095）
+
+试跑暴露了一批只在本地工作区成立的假设（`data/raw`、`data/artifacts` 由早前
+手工构建产生），逐一修复：
+
+- `fetch-sources.ps1`：`Download-Once` 写入前创建目标目录（git 不跟踪空目录，
+  干净检出下 `data/raw` 不存在）；
+- `zhu-ye-dict` `en-build`：写 `data/artifacts/en.zyen` 前创建父目录（唯一缺
+  `create_dir_all` 的构建输出；base/pack/slang 均已具备）；
+- `data/pins/ecdict.json`：url 笔误 `ecdict-full.csv` → `ecdict.csv`（仓库实际
+  文件名；内容哈希不变，无需重锁）；
+- `data/pins/social-media-zh.json`：kind 由 `url`（误取到仓库主页 HTML）修正为
+  `bundle` + `fetch_script`（既有的合并脚本），SHA-256 锁定不变；
+- `scripts/unpack-cedict.ps1`：把锁定的 `data/raw/cedict.ts.gz` 幂等解压为构建
+  链读取的明文 `cedict_ts.u8`，并加入 workflow 步骤。
+
+### CC-CEDICT 月度更新重锁（T-095）
+
+试跑按预期拦截 CEDICT 源漂移（pin 锁定 2026-09-21 快照，mdbg 月度更新）。
+人工核验新内容（gzip 完整、9,858,607 字节 / 约 12.5 万词条、抽查含新增网络词）
+后于 2026-10-05 重锁（`850243FB…` → `FD16B26F…`，size 3974945 → 3978521）。
+CI 发布产物据此使用新 CEDICT 构建；本地开发锚（既有 zyct 产物与 T-057 eval
+基线）在发布检查清单回归复跑前保持不变。
+
 ## 曾考虑的替代方案
 
 - **keygen 用 PowerShell/openssl 实现**：否决——Rust 无新依赖（`getrandom` 已跨
@@ -76,12 +119,15 @@ pre-release 断言。
 
 ## 后果
 
-- 发布 = 生成/载入密钥 → 注入公钥构建 → `assemble-release` → `gh release
-  create/upload` → `verify-release-e2e`；**v0.1.2-alpha 起更新器才真正可用**
-  （先前产物内置空公钥，拒更）。
+- 发布动作现在 = 推送 `v*` tag → `release.yml` 构建、组装、以正式密钥签名、
+  e2e 验证并上传全部资产到 GitHub Release（版本含 `-` 时为 prerelease）；手动
+  全链试跑一键 `workflow_dispatch`（默认 `upload=false`）。**v0.1.2-alpha 起更新器
+  才真正可用**（先前产物内置空公钥，拒更）。
+- 正式密钥对已配置 GitHub（secret + variable）并经 CI 试跑端到端证明（内置公钥
+  `832dc4…`、签名 manifest、e2e 4/4）；旧测试密钥对作废，不得签署发布产物。
 - 换钥成本高（信任锚编译内置，需随引擎发布），列入发布手册故障预案。
 - 本 note 是流程层记录，不取代信任链机制 note（`2026-09-29-dictionary-update-trust-chain`，
   保持 active，交叉引用）。
-- 测试密钥对仅用于本机管线验证，**发布前重新 `keygen`**，测试密钥不得再用。
-- 验证证据：`assemble-release` 全流程通过（ed25519 签名 + verify 3/3）；e2e 脚本
-  4/4 全绿；`cargo test` 291 项（含新增 keygen 与版本门槛断言）。
+- 验证证据：CI 试跑 37242703873 全链 5m20s 通过（pins 15/15 锁定、en.zyen +
+  base/it/med/slang 构建完成、正式密钥签名并复核、e2e 4/4 全绿）；五轮试跑收敛
+  （fetch 目录 → ecdict url → social kind → 解压 → CEDICT 重锁）。

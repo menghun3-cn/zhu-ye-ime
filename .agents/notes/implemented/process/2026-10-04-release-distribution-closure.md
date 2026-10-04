@@ -78,6 +78,62 @@ be rejected by its own updater**. Fixed to take the leading digits of each segme
 (`2-alpha` -> 2), keeping the existing "non-numeric = 0, missing segment = 0"
 semantics; added six pre-release assertions.
 
+### Production key pair configured in GitHub (T-095)
+
+A fresh official pair was generated with `zhu-ye-dict keygen` on 2026-10-04
+(replacing the old test pair, which is now defunct): the private key lives only
+in the GitHub Actions secret `ZHU_YE_RELEASE_SECRET_KEY` (written via stdin,
+never on disk, never in process arguments or the repository), and the public key
+is the Actions variable `ZHU_YE_RELEASE_PUBLIC_KEY`
+(`832dc4a549afed41b013b6aae8ebc7739b88d6fde9a7831336e9d59231067cce`). Mirror
+copies for other maintainers remain a later item (requirement L235).
+
+### `.github/workflows/release.yml`: CI-driven formal packaging (T-095)
+
+Pushing a `v*` tag runs the full chain automatically; `workflow_dispatch` runs
+the same chain manually (no upload unless the `upload` input is true), and a
+`concurrency` group prevents overlapping release builds. Steps on
+windows-latest: checkout -> rust-toolchain -> rust-cache -> `fetch-sources.ps1`
+(pin-locked source download, including bundle fetch) -> `unpack-cedict.ps1` ->
+`build-en-wordbook.ps1` (en.zyen) -> `build-base` / `build-pack it|med` /
+`build-slang` -> `assemble-release.ps1` (public key injected into the build,
+private key signs the manifest, verify recheck, zip, SHA256SUMS) ->
+`verify-release-e2e.ps1` (4/4) -> `gh release create/upload` (6 assets, only on
+tag push or `upload=true`). Secrets reach the runner as env vars, never in
+`run` text.
+
+### Clean-checkout hardening found by the CI trial runs (T-095)
+
+The trial runs exposed assumptions that only held in the local workspace
+(where `data/raw`, `data/artifacts` had been created by earlier manual builds)
+and were fixed:
+
+- `fetch-sources.ps1`: `Download-Once` now creates the target directory
+  (git does not track empty directories, so `data/raw` is missing on a clean
+  checkout);
+- `zhu-ye-dict` `en-build`: creates its output parent directory before writing
+  `data/artifacts/en.zyen` (the only build output missing `create_dir_all`;
+  base/pack/slang already had it);
+- `data/pins/ecdict.json`: URL typo `ecdict-full.csv` -> `ecdict.csv` (actual
+  repo filename; content hash unchanged, no relock needed);
+- `data/pins/social-media-zh.json`: kind corrected from `url` (which fetched
+  the repo homepage HTML) to `bundle` + `fetch_script`, the intended
+  merge script; the SHA-256 lock is unchanged;
+- `scripts/unpack-cedict.ps1`: idempotent gunzip of the locked
+  `data/raw/cedict.ts.gz` into the plain-text `cedict_ts.u8` the build chain
+  reads; added as a workflow step.
+
+### CC-CEDICT monthly relock (T-095)
+
+The trial runs correctly blocked a drifted CEDICT (the pin locked the
+2026-09-21 snapshot; mdbg ships monthly updates). New content was reviewed
+(gzip intact, 9,858,607 bytes / ~125k entries, spot-checks include new slang
+terms) and the pin was relocked on 2026-10-05 (`850243FB…` -> `FD16B26F…`,
+size 3974945 -> 3978521). The production build therefore uses the newer
+CEDICT; the local development anchors (existing zyct artifacts and the T-057
+eval baseline) are unchanged until the release-checklist regression re-runs
+them.
+
 ## Alternatives considered
 
 - **keygen in PowerShell/openssl**: rejected -- Rust adds no dependency
@@ -92,16 +148,21 @@ semantics; added six pre-release assertions.
 
 ## Consequences
 
-- A release is: load/generate keys -> build with injected public key ->
-  `assemble-release` -> `gh release create/upload` -> `verify-release-e2e`; the
-  updater only becomes genuinely usable **from v0.1.2-alpha on** (earlier artifacts
-  carry an empty built-in key and refuse updates).
+- A release is now: push tag `v*` -> `release.yml` builds, assembles, signs
+  (production key), verifies e2e, and uploads all assets to the GitHub Release
+  (prerelease when the version contains `-`); a manual full-chain trial run is
+  one `workflow_dispatch` away (`upload=false` by default). The updater only
+  becomes genuinely usable **from v0.1.2-alpha on** (earlier artifacts carry an
+  empty built-in key and refuse updates).
+- The production key pair is already configured in GitHub (secret + variable)
+  and proven end-to-end by the CI trial run (built-in key `832dc4…`, signed
+  manifest, e2e 4/4); the old test pair is defunct and must never sign release
+  artifacts.
 - Key rotation is expensive (compile-time trust anchor, needs an engine release);
   recorded in the runbook's failure plan.
 - This note is process-level and does not replace the trust-chain mechanism note
   (`2026-09-29-dictionary-update-trust-chain`, kept active, cross-referenced).
-- The test key pair is for local pipeline verification only; **generate a fresh
-  pair before the actual release** and do not reuse it.
-- Evidence: `assemble-release` full run passed (ed25519 signature + verify 3/3);
-  e2e script 4/4 green; `cargo test` 291 items including the new keygen and
-  version-gate assertions.
+- Evidence: CI trial run 37242703873 passed the whole chain in 5m20s (pins 15/15
+  locked, en.zyen + base/it/med/slang built, manifest signed with the production
+  key and verified, e2e 4/4 green); five trial runs converged (fetch dirs ->
+  ecdict URL -> social kind -> unpack -> CEDICT relock).
