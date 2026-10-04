@@ -1203,16 +1203,17 @@ dependencies = [
 
 [[package]]
 name = "zhu-ye-cli"
-version = "0.1.1-alpha"
+version = "0.1.2-alpha"
 dependencies = [
  "zhu-ye-core",
 ]
 
 [[package]]
 name = "zhu-ye-core"
-version = "0.1.1-alpha"
+version = "0.1.2-alpha"
 dependencies = [
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "memmap2",
  "proptest",
  "serde",
@@ -1222,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "zhu-ye-dict"
-version = "0.1.1-alpha"
+version = "0.1.2-alpha"
 dependencies = [
  "flate2",
  "rmpv",
@@ -1235,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "zhu-ye-ime"
-version = "0.1.1-alpha"
+version = "0.1.2-alpha"
 dependencies = [
  "windows",
  "windows-core",
@@ -1245,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "zhu-ye-settings"
-version = "0.1.1-alpha"
+version = "0.1.2-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -1256,11 +1257,11 @@ dependencies = [
 
 [[package]]
 name = "zhu-ye-ui"
-version = "0.1.1-alpha"
+version = "0.1.2-alpha"
 
 [[package]]
 name = "zhu-ye-updater"
-version = "0.1.1-alpha"
+version = "0.1.2-alpha"
 dependencies = [
  "ed25519-dalek",
  "zhu-ye-core",

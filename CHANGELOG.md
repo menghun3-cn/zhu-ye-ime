@@ -12,6 +12,7 @@
 - 候选覆盖增强（M14，FR-059）：低频音节前缀组词展开补足首屏——输入 `shui` 时「睡觉/水/谁」等前缀词直接入候选；仅当候选不足一页时介入，前缀组以词频序独立追加、不改变既有候选相对顺序；eval 基准与 host-e2e 全量回归零回退（T-090，PR #59）
 - 产品化日志目录（M14，FR-060）：分级文件日志落盘 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`（默认 warn 级、热路径零 IO，1 MiB 写前轮转），`config.json` 新增 `log_level` 字段可调（宽松解析、不升配置版本）；TSF 53 调用点分级（8 error/7 warn/14 info/24 debug）+ 11 热路径守卫；调试哨兵双轨保留旧路径全量日志（`C:\zhu-ye-test\tsf-debug.enable` 存在时原样写 tsf-debug.log）（T-091，PR #60）
 - 官网页面对齐 v0.1.2-alpha（T-092/T-093）：版本状态行统一 M1–M14 口径（S-17，六页 footer + agents.txt）、hero-note 与 llms.txt 版本号同步，AI 入口四件套口径一致（S-18）；todos-done 里程碑归档补全（G-016~G-078）
+- 发布分发闭环（P-01 第十期）：更新器内置 ed25519 发布公钥，可分发的词典领域包经签名 manifest 通过 GitHub Releases 分发（it/med/slang，默认关闭、开启后验签下载原子替换）；新增发布密钥生成（keygen）、发布资产组装（assemble-release）与端到端验证（verify-release-e2e）工具链，发布操作手册见 `docs/发布流程.md`（T-094）
 
 ## [0.1.1-alpha] - 2026-10-04
 

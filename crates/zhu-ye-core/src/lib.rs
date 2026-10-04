@@ -68,9 +68,10 @@ pub use file_log::{FileLogger, DEFAULT_LOG_SIZE_LIMIT};
 pub use format::{cn_numeral, format_candidates, FormatCandidate};
 pub use log_level::{deserialize_log_level, LogLevel};
 pub use manifest::{
-    canonical_bytes, parse_manifest, parse_public_key, sha256_file, sha256_hex, sign_manifest,
-    verify_pack_contents, verify_signature, verify_signature_with_key, version_at_least, Manifest,
-    ManifestSignature, PackMeta, SignatureError, MANIFEST_SCHEMA, SIGNATURE_ALGORITHM,
+    canonical_bytes, generate_keypair, parse_manifest, parse_public_key, sha256_file, sha256_hex,
+    sign_manifest, verify_pack_contents, verify_signature, verify_signature_with_key,
+    version_at_least, Manifest, ManifestSignature, PackMeta, SignatureError, MANIFEST_SCHEMA,
+    SIGNATURE_ALGORITHM,
 };
 pub use mixed::{is_mixed_input, mixed_candidates};
 pub use pack_config::{
