@@ -94,36 +94,52 @@ pub fn pack_display(pack_id: &str) -> Option<PackDisplay> {
     })
 }
 
-/// 候选窗主题选择（第八期设置窗口写入，FR-041）。
+/// 候选窗主题选择（第八期设置窗口写入，FR-041；T-088 扩展自定义主题文件）。
 ///
-/// 只提供浅色与深色：高对比度由系统接管，不作为可选值（D-31）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+/// 只提供浅色与深色两个预置：高对比度由系统接管，不作为可选值（D-31）。
+/// `Custom` 携带主题文件名（不含 `.json` 扩展），对应 `%APPDATA%\ai-zhu-ye-ime\
+/// themes\<name>.json`；文件缺失或解析失败时渲染回退浅色（配置本身不失败）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ThemeChoice {
     /// 浅色（默认，沿用 T-030 的候选窗默认浅色口径）。
     #[default]
     Light,
     /// 深色。
     Dark,
+    /// 自定义主题文件名（不含扩展名）；任何非预置字符串都按此解释。
+    Custom(String),
 }
 
 impl ThemeChoice {
-    /// 配置字符串（小写），与序列化表示一致。
+    /// 配置字符串（小写）：预置返回字面值，自定义返回主题文件名。
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Light => "light",
-            Self::Dark => "dark",
+            Self::Light => std::borrow::Cow::Borrowed("light"),
+            Self::Dark => std::borrow::Cow::Borrowed("dark"),
+            Self::Custom(name) => std::borrow::Cow::Owned(name.clone()),
         }
     }
 
-    /// 宽松解析：未知值回退浅色。
+    /// 宽松解析：拼错的预置值视为自定义主题名，渲染时按文件可用性回退浅色。
     #[must_use]
     pub fn parse(value: &str) -> Self {
         match value {
+            "light" => Self::Light,
             "dark" => Self::Dark,
-            _ => Self::Light,
+            _ if value.is_empty() => Self::Light,
+            _ => Self::Custom(value.to_owned()),
         }
+    }
+}
+
+/// `ThemeChoice` 序列化为单字符串（自定义主题写入文件名本身）。
+impl Serialize for ThemeChoice {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.as_str())
     }
 }
 
@@ -520,21 +536,46 @@ mod tests {
     }
 
     #[test]
-    fn 主题值拼错不回退整体配置() {
-        // 主题最易被手改者写错；拼错时只能降级为浅色，不得让用户已勾选的领域包失效。
+    fn 主题拼错按自定义主题名处理且不回退整体配置() {
+        // T-088 值类型扩展：非预置字符串一律视为自定义主题文件名；渲染时文件缺失
+        // 回退浅色，但配置本身不失败、用户的领域包勾选不受影响。
         let text = r#"{
             "enabled_packs": ["it", "med"],
             "online_update": true,
-            "theme": "draK"
+            "theme": "bamboo-dark"
         }"#;
         let config = ConfigFile::from_json(text).unwrap();
-        assert_eq!(config.theme, super::ThemeChoice::Light);
+        assert_eq!(
+            config.theme,
+            super::ThemeChoice::Custom("bamboo-dark".to_owned())
+        );
         assert_eq!(config.enabled_packs, vec!["it", "med"]);
         assert!(config.online_update);
-        // 非字符串（如数字或对象）同样降级，不整体失败。
+        // 非字符串（如数字或对象）仍降级，不整体失败。
         let config = ConfigFile::from_json(r#"{"enabled_packs": ["it"], "theme": 5}"#).unwrap();
         assert_eq!(config.theme, super::ThemeChoice::Light);
         assert_eq!(config.enabled_packs, vec!["it"]);
+        // 空字符串与 null 也回退浅色。
+        let config = ConfigFile::from_json(r#"{"theme": ""}"#).unwrap();
+        assert_eq!(config.theme, super::ThemeChoice::Light);
+        let config = ConfigFile::from_json(r#"{"theme": null}"#).unwrap();
+        assert_eq!(config.theme, super::ThemeChoice::Light);
+    }
+
+    #[test]
+    fn 自定义主题往返一致() {
+        let config = ConfigFile {
+            theme: super::ThemeChoice::Custom("bamboo-dark".to_owned()),
+            ..ConfigFile::default()
+        };
+        let text = config.to_json().unwrap();
+        assert!(
+            text.contains(r#""theme": "bamboo-dark""#),
+            "自定义主题应序列化为文件名本身：{text}"
+        );
+        let back = ConfigFile::from_json(&text).unwrap();
+        assert_eq!(back.theme, config.theme);
+        assert_eq!(back.theme.as_str(), "bamboo-dark");
     }
 
     #[test]

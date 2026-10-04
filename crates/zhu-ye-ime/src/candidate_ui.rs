@@ -175,6 +175,27 @@ pub fn theme_from_system_colors(colors: SystemColors) -> CandidateUiTheme {
     }
 }
 
+/// 把主题文件的候选窗节叠加到基础配色上：缺失的键保留基础值（"缺键用默认值"，
+/// T-088 / FR-048）。`palette` 来自 `candidate` 节，颜色已是 `0xRRGGBB`。
+#[must_use]
+pub fn theme_with_candidate(
+    base: CandidateUiTheme,
+    palette: &zhu_ye_core::CandidatePalette,
+) -> CandidateUiTheme {
+    let overlay = |current: UiColor, theme_color: Option<zhu_ye_core::ThemeColor>| {
+        theme_color.map_or(current, |color| UiColor(color.0))
+    };
+    CandidateUiTheme {
+        background: overlay(base.background, palette.background),
+        foreground: overlay(base.foreground, palette.foreground),
+        secondary: overlay(base.secondary, palette.secondary),
+        border: overlay(base.border, palette.border),
+        highlight_background: overlay(base.highlight_background, palette.highlight_background),
+        highlight_foreground: overlay(base.highlight_foreground, palette.highlight_foreground),
+        marker: overlay(base.marker, palette.marker),
+    }
+}
+
 /// 候选窗布局尺寸；全部按 DPI 缩放，测试可验证比例关系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CandidateMetrics {
@@ -409,8 +430,9 @@ fn bgr_to_rgb(color: u32) -> u32 {
 mod tests {
     use super::{
         display_main_text, estimate_text_width, index_marker, page_footer_label, theme,
-        theme_from_system_colors, CandidateMetrics, CandidateUiItem, CandidateUiView, SystemColors,
-        UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE, SLANG_LABEL,
+        theme_from_system_colors, theme_with_candidate, CandidateMetrics, CandidateUiItem,
+        CandidateUiView, SystemColors, UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE,
+        SLANG_LABEL,
     };
     use zhu_ye_core::candidate::CandidateSource;
     use zhu_ye_ui::fit_text;
@@ -523,6 +545,37 @@ mod tests {
             high_contrast.highlight_background.to_colorref(),
             0x0000_FFFF
         );
+    }
+
+    #[test]
+    fn 主题文件候选节叠加缺键回退() {
+        use zhu_ye_core::{CandidatePalette, ThemeColor};
+        let base = theme(UiThemeKind::Light);
+        let palette = CandidatePalette {
+            background: Some(ThemeColor(0x11_22_33)),
+            marker: Some(ThemeColor(0xAA_BB_CC)),
+            ..CandidatePalette::default()
+        };
+        let applied = theme_with_candidate(base, &palette);
+        assert_eq!(applied.background, UiColor(0x11_22_33));
+        assert_eq!(applied.marker, UiColor(0xAA_BB_CC));
+        // 未写键保留基础值（缺键用默认值）。
+        assert_eq!(applied.foreground, base.foreground);
+        assert_eq!(applied.highlight_background, base.highlight_background);
+        // 空节叠加等于原样。
+        assert_eq!(
+            theme_with_candidate(base, &CandidatePalette::default()),
+            base
+        );
+        // 深色基础 + 单键覆盖。
+        let dark_base = theme(UiThemeKind::Dark);
+        let one_key = CandidatePalette {
+            foreground: Some(ThemeColor(0xFF_EE_00)),
+            ..CandidatePalette::default()
+        };
+        let applied_dark = theme_with_candidate(dark_base, &one_key);
+        assert_eq!(applied_dark.foreground, UiColor(0xFF_EE_00));
+        assert_eq!(applied_dark.background, dark_base.background);
     }
 
     #[test]

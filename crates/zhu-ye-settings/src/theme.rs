@@ -90,6 +90,48 @@ pub fn settings_theme(kind: UiThemeKind) -> SettingsTheme {
     }
 }
 
+impl SettingsTheme {
+    /// 用自定义主题文件覆盖预设配色（T-088 / FR-048）：文件里给了的键覆盖，
+    /// 缺键（或键值解析失败）回退 `self`（调用方传入的当前深浅预设）；高对比度
+    /// 由系统接管，调用方在 `HighContrast` 时不调用本函数。
+    ///
+    /// 返回 `(覆盖后的配色, 实际覆盖的键数)`，键数供界面提示"应用了 N/15 键"。
+    #[must_use]
+    pub fn with_theme_file(self, file: &zhu_ye_core::ThemeFile) -> (SettingsTheme, usize) {
+        // `ThemeColor(u32)` 与 `UiColor(u32)` 同为 0xRRGGBB 布局，可直接映射。
+        let mut covered = 0usize;
+        let mut overlay = |base: UiColor, color: Option<zhu_ye_core::ThemeColor>| {
+            if let Some(color) = color {
+                covered += 1;
+                UiColor(color.0)
+            } else {
+                base
+            }
+        };
+        let theme = SettingsTheme {
+            window: overlay(self.window, file.settings.window),
+            nav_background: overlay(self.nav_background, file.settings.nav_background),
+            nav_selected: overlay(self.nav_selected, file.settings.nav_selected),
+            nav_selected_text: overlay(self.nav_selected_text, file.settings.nav_selected_text),
+            nav_text: overlay(self.nav_text, file.settings.nav_text),
+            title_text: overlay(self.title_text, file.settings.title_text),
+            item_text: overlay(self.item_text, file.settings.item_text),
+            secondary_text: overlay(self.secondary_text, file.settings.secondary_text),
+            border: overlay(self.border, file.settings.border),
+            accent: overlay(self.accent, file.settings.accent),
+            control_background: overlay(self.control_background, file.settings.control_background),
+            control_selected: overlay(self.control_selected, file.settings.control_selected),
+            control_selected_text: overlay(
+                self.control_selected_text,
+                file.settings.control_selected_text,
+            ),
+            placeholder_text: overlay(self.placeholder_text, file.settings.placeholder_text),
+            warn_text: overlay(self.warn_text, file.settings.warn_text),
+        };
+        (theme, covered)
+    }
+}
+
 /// 按系统高对比度配色构建设置窗口配色；系统色为 `0x00BBGGRR` 字节序。
 #[must_use]
 pub fn settings_theme_from_system_colors(colors: SystemColors) -> SettingsTheme {
@@ -185,5 +227,60 @@ mod tests {
         // 白色文本在两种字节序下都应为白。
         assert_eq!(preset.item_text, UiColor::rgb(0xFF, 0xFF, 0xFF));
         assert_eq!(preset.window, explicit.window);
+    }
+
+    #[test]
+    fn 主题文件覆盖缺键回退预设并统计覆盖键数() {
+        use zhu_ye_core::{parse_theme_file, ThemeColor};
+        let light = settings_theme(UiThemeKind::Light);
+        // 只给 3 键的单节自定义主题。
+        let file = parse_theme_file(
+            r##"{
+                "version": 1,
+                "name": "午夜蓝",
+                "settings": {
+                    "window": "#101418",
+                    "nav_background": "1c2733",
+                    "accent": "#42A5F5"
+                }
+            }"##,
+        )
+        .unwrap();
+        let (theme, covered) = light.with_theme_file(&file);
+        assert_eq!(covered, 3, "只覆盖文件里给出的 3 键");
+        assert_eq!(theme.window, UiColor(ThemeColor(0x10_14_18).0));
+        assert_eq!(theme.nav_background, UiColor(ThemeColor(0x1C_27_33).0));
+        assert_eq!(theme.accent, UiColor(ThemeColor(0x42_A5_F5).0));
+        // 缺键回退浅色预设。
+        assert_eq!(theme.item_text, light.item_text);
+        assert_eq!(theme.control_selected, light.control_selected);
+        // 有候选节不影响设置窗（各读各节）。
+        let file = parse_theme_file(
+            r##"{
+                "version": 1,
+                "candidate": { "background": "#202020" }
+            }"##,
+        )
+        .unwrap();
+        let (theme, covered) = settings_theme(UiThemeKind::Dark).with_theme_file(&file);
+        assert_eq!(covered, 0, "候选节不参与设置窗覆盖");
+        assert_eq!(theme, settings_theme(UiThemeKind::Dark));
+    }
+
+    #[test]
+    fn 主题文件键值非法按缺键回退() {
+        use zhu_ye_core::parse_theme_file;
+        let dark = settings_theme(UiThemeKind::Dark);
+        // 颜色解析失败（"1234"）→ None → 回退深色预设。
+        let file = parse_theme_file(
+            r##"{
+                "version": 1,
+                "settings": { "window": "1234", "border": "#GGGGGG" }
+            }"##,
+        )
+        .unwrap();
+        let (theme, covered) = dark.with_theme_file(&file);
+        assert_eq!(covered, 0);
+        assert_eq!(theme, dark);
     }
 }

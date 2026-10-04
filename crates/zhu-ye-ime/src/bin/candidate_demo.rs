@@ -80,6 +80,7 @@ fn run() -> Result<(), String> {
         dpi,
         seconds,
         shot_path,
+        custom_theme: None,
     };
     run_candidate_demo(demo_view(translation_mode), &options)
 }

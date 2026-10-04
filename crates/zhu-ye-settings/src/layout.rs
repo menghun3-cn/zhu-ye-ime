@@ -184,9 +184,9 @@ pub fn hint_rect(metrics: &SettingsMetrics, client: UiRect) -> UiRect {
 }
 
 /// 二选一控件块的取值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChipValue {
-    /// 主题选择（浅色 / 深色）。
+    /// 主题选择（浅色 / 深色；自定义主题走"自定义主题"子视图）。
     Theme(ThemeChoice),
     /// 新会话默认中英模式（中文 / 英文，D-32 装配项）。
     Mode(ModeChoice),
@@ -195,7 +195,7 @@ pub enum ChipValue {
 }
 
 /// 二选一控件块：取值决定绘制时的选中状态与点击后的动作。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chip {
     /// 取值。
     pub value: ChipValue,
@@ -629,6 +629,174 @@ pub fn diagnostics_layout(
 }
 
 // ---------------------------------------------------------------------------
+// T-088 三子视图：用户词表 / 通讯录 / 自定义主题（FR-048）布局
+// ---------------------------------------------------------------------------
+
+/// 「用户词表」子视图布局（T-088 / FR-048）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserWordsLayout {
+    /// 说明区（导出/导入口径）。
+    pub info: UiRect,
+    /// 结果/错误消息区（上次导入导出结果，随操作更新）。
+    pub result: UiRect,
+    /// "导出用户词表…"按钮。
+    pub export: UiRect,
+    /// "从文件导入…"按钮。
+    pub import: UiRect,
+    /// "返回常用设置"按钮。
+    pub back: UiRect,
+}
+
+/// 计算「用户词表」子视图布局：说明在上、结果居中、三个按钮在底部等宽排列。
+#[must_use]
+pub fn userwords_layout(metrics: &SettingsMetrics, client: UiRect) -> UserWordsLayout {
+    let content = content_rect(metrics, client);
+    let row_height = metrics.pack_row_height.saturating_sub(metrics.gap);
+    let info = UiRect {
+        left: content.left,
+        top: content.top,
+        right: content.right,
+        bottom: content.top + row_height * 3,
+    };
+    let button_top = content.bottom - metrics.pack_button_height;
+    let gap = metrics.gap;
+    let width = (content.width() - gap * 2) / 3;
+    let export = UiRect {
+        left: content.left,
+        top: button_top,
+        right: content.left + width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let import = UiRect {
+        left: export.right + gap,
+        top: button_top,
+        right: export.right + gap + width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let back = UiRect {
+        left: import.right + gap,
+        top: button_top,
+        right: content.right,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let result = UiRect {
+        left: content.left,
+        top: info.bottom + gap,
+        right: content.right,
+        bottom: button_top - gap,
+    };
+    UserWordsLayout {
+        info,
+        result,
+        export,
+        import,
+        back,
+    }
+}
+
+/// 「通讯录」子视图布局（T-088 / FR-048：.vcf 界面化导入）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactsLayout {
+    /// 说明区。
+    pub info: UiRect,
+    /// 已登记 .vcf 路径的逐行区（超出可用高度截断并提示）。
+    pub rows: Vec<UiRect>,
+    /// "导入 .vcf…"按钮。
+    pub import: UiRect,
+    /// "返回常用设置"按钮。
+    pub back: UiRect,
+}
+
+/// 计算「通讯录」子视图布局：说明在上、路径列表居中、导入/返回按钮在底部。
+#[must_use]
+pub fn contacts_layout(
+    metrics: &SettingsMetrics,
+    client: UiRect,
+    row_count: usize,
+) -> ContactsLayout {
+    let content = content_rect(metrics, client);
+    let row_height = 30.max(metrics.pack_row_height.saturating_sub(metrics.gap));
+    let info = UiRect {
+        left: content.left,
+        top: content.top,
+        right: content.right,
+        bottom: content.top + row_height * 2,
+    };
+    let button_top = content.bottom - metrics.pack_button_height;
+    let gap = metrics.gap;
+    let width = (content.width() - gap) / 2;
+    let import = UiRect {
+        left: content.left,
+        top: button_top,
+        right: content.left + width,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let back = UiRect {
+        left: import.right + gap,
+        top: button_top,
+        right: content.right,
+        bottom: button_top + metrics.pack_button_height,
+    };
+    let available = (button_top - gap - info.bottom) / row_height;
+    let shown = row_count.min(available.max(0) as usize);
+    let rows: Vec<UiRect> = (0..shown)
+        .map(|index| UiRect {
+            left: content.left,
+            top: info.bottom + index as i32 * row_height,
+            right: content.right,
+            bottom: info.bottom + (index as i32 + 1) * row_height,
+        })
+        .collect();
+    ContactsLayout {
+        info,
+        rows,
+        import,
+        back,
+    }
+}
+
+/// 「自定义主题」子视图布局（T-088 / FR-048：主题文件列表与选择）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemesLayout {
+    /// 说明区。
+    pub info: UiRect,
+    /// 主题文件逐行区（显示名 + 状态）。
+    pub rows: Vec<UiRect>,
+    /// "返回常用设置"按钮。
+    pub back: UiRect,
+}
+
+/// 计算「自定义主题」子视图布局：说明在上、主题行居中、返回按钮在底部。
+#[must_use]
+pub fn themes_layout(metrics: &SettingsMetrics, client: UiRect, row_count: usize) -> ThemesLayout {
+    let content = content_rect(metrics, client);
+    let row_height = metrics.pack_row_height.saturating_sub(metrics.gap);
+    let info = UiRect {
+        left: content.left,
+        top: content.top,
+        right: content.right,
+        bottom: content.top + row_height * 2,
+    };
+    let back = UiRect {
+        left: content.left,
+        top: content.bottom - metrics.pack_button_height,
+        right: content.left + metrics.pack_button_width,
+        bottom: content.bottom,
+    };
+    let available = (back.top - metrics.gap - info.bottom) / row_height;
+    let shown = row_count.min(available.max(0) as usize);
+    let rows: Vec<UiRect> = (0..shown)
+        .map(|index| UiRect {
+            left: content.left,
+            top: info.bottom + index as i32 * row_height,
+            right: content.right,
+            bottom: info.bottom + (index as i32 + 1) * row_height,
+        })
+        .collect();
+    ThemesLayout { info, rows, back }
+}
+
+// ---------------------------------------------------------------------------
 // 工具箱面板（浮层）布局
 // ---------------------------------------------------------------------------
 
@@ -898,7 +1066,7 @@ mod tests {
         let metrics = SettingsMetrics::new(96);
         let items = Page::Common.items();
         // 「简繁切换」仍是规划中条目：点击可展开。
-        let expand_index = 9;
+        let expand_index = 12;
         let plain = item_rows(&metrics, CLIENT, items, None);
         let expanded = item_rows(&metrics, CLIENT, items, Some(expand_index));
         // 展开项自身多出说明区。
@@ -995,8 +1163,8 @@ mod tests {
             assert!(chip.rect.top >= rows[0].rect.top);
             assert!(chip.rect.bottom <= rows[0].rect.bottom);
         }
-        // 无控件条目没有块（添加词库与最后的生僻字条目）。
-        assert!(rows[2].chips.is_empty());
+        // 无控件条目没有块（自定义主题与用户词表等子视图条目）。
+        assert!(rows[1].chips.is_empty());
         assert!(rows[rows.len() - 1].chips.is_empty());
     }
 
@@ -1004,7 +1172,7 @@ mod tests {
     fn 英文输入法条目有两个中英模式控件块() {
         let metrics = SettingsMetrics::new(96);
         let rows = item_rows(&metrics, CLIENT, Page::Common.items(), None);
-        let chips = &rows[1].chips;
+        let chips = &rows[2].chips;
         assert_eq!(chips.len(), 2, "英文输入法是 D-32 装配项二选一");
         assert_eq!(
             chips[0].value,
@@ -1017,7 +1185,7 @@ mod tests {
         assert_eq!(chips[0].label, "中文");
         assert_eq!(chips[1].label, "英文");
         assert!(chips[0].rect.right <= chips[1].rect.left);
-        assert_eq!(chips[1].rect.right, rows[1].rect.right - metrics.gap);
+        assert_eq!(chips[1].rect.right, rows[2].rect.right - metrics.gap);
     }
 
     #[test]

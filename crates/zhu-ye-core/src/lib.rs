@@ -28,10 +28,14 @@ pub mod pack_config;
 pub mod pinyin;
 pub mod suggestion;
 pub mod symbols;
+pub mod theme_file;
+pub mod time;
 pub mod translate;
 pub mod update;
+pub mod update_status;
 pub mod user_dict;
 pub mod user_store;
+pub mod user_words_exchange;
 pub mod vcard;
 
 pub use ai::{AiService, OfflineAiService};
@@ -78,15 +82,32 @@ pub use suggestion::{
     suggest_phrases, suggest_words, suggestion_candidates, SUGGESTION_CAP, SUGGESTION_PHRASE_CAP,
     SUGGESTION_WORD_CAP,
 };
-pub use symbols::{symbol_group, MATH_SYMBOLS, NUMBER_SYMBOLS, PUNCT_SYMBOLS};
+pub use symbols::{
+    all_panel_groups, symbol_group, EXTRA_SYMBOL_GROUPS, MATH_SYMBOLS, NUMBER_SYMBOLS,
+    PUNCT_SYMBOLS,
+};
+pub use theme_file::{
+    is_safe_theme_name, load_theme_file, parse_theme_file, CandidatePalette, SettingsPalette,
+    ThemeColor, ThemeFile, THEME_FILE_VERSION,
+};
+pub use time::{civil_from_days, format_date, today_compact};
 pub use translate::{InMemoryTranslator, TranslationDirection, Translator};
 pub use update::{
     apply_release, apply_staged, backup_path, clean_staging, find_outdated, rollback_pack,
     stage_packs, staging_dir, verify_installed, verify_release, ApplyOutcome, UpdateError,
     BACKUP_SUFFIX, STAGING_DIR_NAME,
 };
+pub use update_status::{
+    check_due, parse_update_status, read_update_status, to_json as update_status_to_json,
+    write_update_status, UpdateStatus, CHECK_INTERVAL_DAYS, DAY_SECONDS, UPDATE_STATUS_FILE_NAME,
+    UPDATE_STATUS_FORMAT, UPDATE_STATUS_VERSION,
+};
 pub use user_dict::UserDictionary;
 pub use user_store::{probe_user_words_file, unix_now, UserDictStore, UserWordsProbe};
+pub use user_words_exchange::{
+    export_user_words, merge_exchange_items, parse_exchange_file, ExchangeFile, ExchangeItem,
+    USER_WORDS_EXCHANGE_FORMAT, USER_WORDS_EXCHANGE_VERSION,
+};
 pub use vcard::{parse_vcard, VCardContact, VCardError};
 
 pub use demo::{seed_bigrams, seed_entries};

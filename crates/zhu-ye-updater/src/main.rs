@@ -8,9 +8,12 @@
 //! - `status`：打印当前配置、已安装包与 manifest 差异（不联网）
 //! - `check`：联网拉取 manifest，报告可用更新（不下载包）
 //! - `apply`：联网拉取 manifest 与包，验签验哈希后原子应用
+//! - `check-once`：启动异步检查一次（T-088 / FR-048）：无 UI、无 stdout，结果只写
+//!   `update_status.json` 并记录 `config.json` 的 `last_check`
 //!
 //! **默认关闭**（P-03）：`config.json` 的 `online_update` 为 `false` 时，
-//! `check`/`apply` 直接退出且不发起任何网络请求。
+//! `check`/`apply` 直接退出且不发起任何网络请求；`check-once` 同样直接退出
+//! （TSF 侧也只在开关开启时才会 spawn 本程序，验收"默认关闭零 spawn/零网络"）。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,6 +24,7 @@ use zhu_ye_core::manifest::{
 };
 use zhu_ye_core::pack_config::{load_config, plan_packs, ConfigFile, PACKS_DIR_NAME};
 use zhu_ye_core::update::{apply_release, find_outdated};
+use zhu_ye_core::UpdateStatus;
 
 /// 发布清单默认 URL；可用 `ZHU_YE_MANIFEST_URL` 覆盖（测试与私有渠道）。
 const DEFAULT_MANIFEST_URL: &str =
@@ -40,6 +44,7 @@ fn main() -> ExitCode {
         Some("status") | None => status_command(),
         Some("check") => check_command(false),
         Some("apply") => check_command(true),
+        Some("check-once") => check_once_command(),
         Some("--help") | Some("-h") => {
             print_usage();
             Ok(())
@@ -61,6 +66,7 @@ fn print_usage() {
     println!("  zhu-ye-updater status   查看配置与已安装包状态（不联网）");
     println!("  zhu-ye-updater check    检查可用更新（需 online_update=true）");
     println!("  zhu-ye-updater apply    下载并应用更新（需 online_update=true）");
+    println!("  zhu-ye-updater check-once   启动时静默检查一次（结果写 update_status.json）");
 }
 
 /// `%APPDATA%\ai-zhu-ye-ime`。
@@ -245,6 +251,82 @@ fn check_command(apply: bool) -> Result<(), String> {
         eprintln!("警告: 写入配置失败: {error}");
     }
     println!("更新完成。重启输入法后生效（P-12）。");
+    Ok(())
+}
+
+/// 启动时静默检查一次（T-088 / FR-048，方案设计 §14.5.4）。
+///
+/// - `online_update=false` → 直接退出：不联网、不写状态文件（配合 TSF 侧开关判断，
+///   达成验收"默认关闭零 spawn/零网络"）；
+/// - 距上次检查不足 [`zhu_ye_core::CHECK_INTERVAL_DAYS`] 天 → 直接退出（保留旧状态）；
+/// - 否则联网拉取并验签 manifest，把结果原子写入 `update_status.json`，并回写
+///   `config.json` 的 `last_check`（S-8：以进入本命令时重读的配置为基线，保存前不再整体覆盖）；
+/// - 网络/验签失败也写状态文件（含错误摘要，关于页可见），`last_check` 照记，避免故障期
+///   每次启动都重试；
+/// - 全程无 stdout（无 UI、无打扰）。
+fn check_once_command() -> Result<(), String> {
+    let config_path = config_path()?;
+    let (config, _diagnostic) = load_config(&config_path);
+    if !config.online_update {
+        return Ok(());
+    }
+
+    let now = zhu_ye_core::unix_now();
+    if !zhu_ye_core::check_due(config.last_check, now) {
+        return Ok(());
+    }
+
+    let url =
+        std::env::var("ZHU_YE_MANIFEST_URL").unwrap_or_else(|_| DEFAULT_MANIFEST_URL.to_owned());
+    let outcome = (|| -> Result<UpdateStatus, String> {
+        let manifest_text = http_get_text(&url)?;
+        let manifest = parse_manifest(&manifest_text).map_err(|error| error.to_string())?;
+        let key = trusted_key()?;
+        verify_signature_with_key(&manifest, &key).map_err(|error| error.to_string())?;
+        let packs_dir = packs_dir()?;
+        // 只考虑可分发包：基础包随安装只读交付，real/seed 是开发产物，都不在更新范围。
+        let outdated: Vec<String> = find_outdated(&manifest, &packs_dir)
+            .into_iter()
+            .filter(|id| zhu_ye_core::is_distributable_pack(id))
+            .collect();
+        if outdated.is_empty() {
+            return Ok(UpdateStatus::up_to_date(now));
+        }
+        // 可更新包中的最大版本号（比较口径同 `version_at_least`）。
+        let latest = manifest
+            .packs
+            .iter()
+            .filter(|pack| outdated.contains(&pack.id))
+            .map(|pack| pack.version.as_str())
+            .max_by(|a, b| {
+                if version_at_least(a, b) {
+                    std::cmp::Ordering::Greater
+                } else if version_at_least(b, a) {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .unwrap_or_default()
+            .to_owned();
+        Ok(UpdateStatus::available(now, outdated, latest))
+    })();
+    let status = outcome.unwrap_or_else(|error| UpdateStatus::failed(now, error));
+
+    // 写状态文件失败不阻断：尽力而为，问题留给日志与关于页的旧状态。
+    let status_path = appdata_root()?.join(zhu_ye_core::UPDATE_STATUS_FILE_NAME);
+    if let Err(error) = zhu_ye_core::write_update_status(&status_path, &status) {
+        eprintln!("zhu-ye-updater: 写入更新状态失败: {error}");
+    }
+
+    // 回写检查时间（间隔判断的数据源）。
+    let updated = ConfigFile {
+        last_check: Some(now),
+        ..config
+    };
+    if let Err(error) = zhu_ye_core::pack_config::save_config(&config_path, &updated) {
+        eprintln!("zhu-ye-updater: 写入配置失败: {error}");
+    }
     Ok(())
 }
 

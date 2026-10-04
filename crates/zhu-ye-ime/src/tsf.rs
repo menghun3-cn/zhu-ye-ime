@@ -199,6 +199,34 @@ fn configured_theme_preference() -> ThemePreference {
     match config.theme {
         zhu_ye_core::ThemeChoice::Dark => ThemePreference::Dark,
         zhu_ye_core::ThemeChoice::Light => ThemePreference::Auto,
+        // 自定义主题：以 Auto 为基底（浅色、高对比由系统接管 D-31），
+        // 具体配色由 configured_custom_theme 读主题文件叠加（T-088 / FR-048）。
+        zhu_ye_core::ThemeChoice::Custom(_) => ThemePreference::Auto,
+    }
+}
+
+/// 读取配置里的自定义主题文件（T-088 / FR-048）。
+///
+/// `config.theme` 为 `Custom(name)` 时从 `%APPDATA%\ai-zhu-ye-ime\themes\<name>.json`
+/// 读取并解析；名称不合法（见 `zhu_ye_core::is_safe_theme_name`，防目录逃逸）、文件
+/// 缺失或损坏 → `None`，候选窗回退浅色基底（与设置窗口口径一致，配置不失败）。
+fn configured_custom_theme() -> Option<zhu_ye_core::ThemeFile> {
+    let (config, _) = zhu_ye_core::load_config(&config_path());
+    let zhu_ye_core::ThemeChoice::Custom(name) = &config.theme else {
+        return None;
+    };
+    if !zhu_ye_core::is_safe_theme_name(name) {
+        return None;
+    }
+    let themes = appdata_root()?.join("themes");
+    zhu_ye_core::load_theme_file(&themes.join(format!("{name}.json"))).ok()
+}
+
+/// 从配置解析装配候选窗的控制器：无自定义主题走偏好路径，有则用主题文件（T-088）。
+fn configured_candidate_window() -> CandidateWindow {
+    match configured_custom_theme() {
+        Some(file) => CandidateWindow::with_custom_theme(file),
+        None => CandidateWindow::with_theme(configured_theme_preference()),
     }
 }
 
@@ -238,7 +266,7 @@ impl EngineState {
             tid: 0,
             keystroke_mgr: None,
             composition: None,
-            candidate_window: CandidateWindow::with_theme(configured_theme_preference()),
+            candidate_window: configured_candidate_window(),
             lang_bar: None,
         }
     }
@@ -1461,6 +1489,11 @@ fn resolve_base_dir(
 /// `zhu-ye-ime-vN.dll` 规避“被 explorer 锁定”问题，不能按名查找）。
 fn dictionary_module_anchor() {}
 
+/// zhu-ye-updater.exe 路径：与 DLL 同目录（安装/便携结构一致）。
+fn installed_updater_path() -> Option<PathBuf> {
+    installed_module_file("zhu-ye-updater.exe")
+}
+
 /// 返回 DLL 同目录存在的 `dictionary.zyct`；便于安装器做机器级部署。
 fn installed_dictionary_path() -> Option<PathBuf> {
     installed_module_file(DICTIONARY_FILE_NAME)
@@ -1583,9 +1616,46 @@ pub unsafe extern "system" fn DllGetClassObject(
         return CLASS_E_CLASSNOTAVAILABLE;
     }
 
+    // 启动异步更新检查（T-088 / FR-048）：DLL 进入宿主进程（ctfmon/explorer/
+    // 编辑器）时最多尝试一次；更新器子进程 detached + 低优先级，<10ms 返回。
+    spawn_update_check_once();
+
     let factory: IUnknown =
         create_class_factory(Some(UserDictStore::new(user_words_path()))).into();
     unsafe { factory.query(riid, ppv) }
+}
+
+/// 启动异步更新检查的一次性开关（T-088 / FR-048）：每个宿主进程至多尝试一次，
+/// 失败也不重试；进程内不做任何网络请求（S-4，检查发生在 updater 子进程）。
+static UPDATE_CHECK_SPAWNED: AtomicBool = AtomicBool::new(false);
+
+/// 启动异步更新检查（每宿主进程一次）。
+///
+/// 前置判定全部为只读：`online_update` 关闭 → 零 spawn（验收：默认关闭零网络零进程）；
+/// 开启但距上次检查不足 7 天（`check_due`）→ 零 spawn 零网络。满足条件才
+/// detach 拉起 `zhu-ye-updater.exe check-once`：`CREATE_NO_WINDOW` 无黑窗、
+/// `BELOW_NORMAL_PRIORITY_CLASS` 低优先级（≤10ms 返回）；写盘（update_status.json、
+/// `last_check`）由 updater 子进程完成，IME 进程内零写。
+fn spawn_update_check_once() {
+    use std::os::windows::process::CommandExt;
+    if UPDATE_CHECK_SPAWNED.swap(true, Ordering::Relaxed) {
+        return; // 每宿主进程一次，避免反复 spawn。
+    }
+    let (config, _) = zhu_ye_core::load_config(&config_path());
+    if !config.online_update {
+        return; // 默认关闭：零 spawn。
+    }
+    if !zhu_ye_core::check_due(config.last_check, zhu_ye_core::unix_now()) {
+        return; // 距上次检查不足 7 天：零网络。
+    }
+    let Some(updater_exe) = installed_updater_path() else {
+        return; // 便携/开发目录没有更新器：静默跳过。
+    };
+    let _ = std::process::Command::new(updater_exe)
+        .arg("check-once")
+        // CREATE_NO_WINDOW(0x0800_0000) | BELOW_NORMAL_PRIORITY_CLASS(0x0000_4000)。
+        .creation_flags(0x0800_0000 | 0x0000_4000)
+        .spawn();
 }
 
 /// DLL 标准导出：无活动对象且未被 LockServer 时允许卸载。
