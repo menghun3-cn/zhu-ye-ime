@@ -481,6 +481,11 @@ pub fn build_en_wordbook(
     // 存储序与展示序解耦：按 norm 升序摆放（compile 断言），rank 随记录携带。
     records.sort_by(|a, b| a.norm.as_bytes().cmp(b.norm.as_bytes()));
     let produced = compile_en_records(&records);
+    // 干净检出下 data/artifacts 目录可能不存在（git 不跟踪空目录），先建父目录（CI 试跑 T-095 暴露）。
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建输出目录失败（{}）：{e}", parent.display()))?;
+    }
     std::fs::write(out, &produced)
         .map_err(|e| format!("写 en 词表失败（{}）：{e}", out.display()))?;
 
