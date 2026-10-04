@@ -9,13 +9,19 @@
 
 ### 新增
 
+- 候选覆盖增强（M14，FR-059）：低频音节前缀组词展开补足首屏——输入 `shui` 时「睡觉/水/谁」等前缀词直接入候选；仅当候选不足一页时介入，前缀组以词频序独立追加、不改变既有候选相对顺序；eval 基准与 host-e2e 全量回归零回退（T-090，PR #59）
+- 产品化日志目录（M14，FR-060）：分级文件日志落盘 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`（默认 warn 级、热路径零 IO，1 MiB 写前轮转），`config.json` 新增 `log_level` 字段可调（宽松解析、不升配置版本）；TSF 53 调用点分级（8 error/7 warn/14 info/24 debug）+ 11 热路径守卫；调试哨兵双轨保留旧路径全量日志（`C:\zhu-ye-test\tsf-debug.enable` 存在时原样写 tsf-debug.log）（T-091，PR #60）
+- 官网页面对齐 v0.1.2-alpha（T-092/T-093）：版本状态行统一 M1–M14 口径（S-17，六页 footer + agents.txt）、hero-note 与 llms.txt 版本号同步，AI 入口四件套口径一致（S-18）；todos-done 里程碑归档补全（G-016~G-078）
+
+## [0.1.1-alpha] - 2026-10-04
+
+### 新增
+
 - 英文词典全量扩容（M13，FR-046）：英文词表从 1.5 万词扩展为 ECDICT 全量离线词表——ZYEN v1 独立 mmap 词表 `en.zyen`（760,987 词条 / 18.56 MiB，加载+校验 28ms、前缀查询中位 43µs，均低于预算），拼写/大小写原形补全覆盖大幅提升；TSF 装配优先从 DLL 同目录加载、失败静态回退（T-085）
 - 中英混合整句解码（M13，FR-050）：输入 `python代码` 这类无分隔中英混合串按整句出候选（整句置首 + 分段候选）；纯拼音、缩写与邮箱/网址格式路径不受影响（T-086）
 - 网络语词典扩充（M13，FR-047）：social-media-chinese-words 高频子集 1 万清洗并入 slang 领域包（9,900 词条，含人工种子表扩充 19 条；来源与许可证见 `docs/licenses.md` D-020/D-021）（T-087）
 - 设置窗口五项增强（M13，FR-048）：用户词表导入导出、符号集扩充至 230 字符、自定义主题文件（深浅色 + 候选窗同源装配）、启动时检查更新（默认关闭、零网络请求）、通讯录 vcf 界面化导入（T-088）
 - 竹叶输入法官网上线（第十期，FR-051~FR-058）：`site/` 零构建静态官网（首页/文档/下载/隐私/关于 + 404），手写 SVG 品牌资产与候选窗示例插图，AI 入口四件套（llms.txt 按 llmstxt.org v2、agents.txt、robots.txt、sitemap.xml），GitHub Pages 工作流与内链自检就绪；下载页以安装包为主、全部指向 GitHub Releases（T-083、T-084）
-- 候选覆盖增强（M14，FR-059）：低频音节前缀组词展开补足首屏——输入 `shui` 时「睡觉/水/谁」等前缀词直接入候选；仅当候选不足一页时介入，前缀组以词频序独立追加、不改变既有候选相对顺序；eval 基准与 host-e2e 全量回归零回退（T-090，PR #59）
-- 产品化日志目录（M14，FR-060）：分级文件日志落盘 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`（默认 warn 级、热路径零 IO，1 MiB 写前轮转），`config.json` 新增 `log_level` 字段可调（宽松解析、不升配置版本）；TSF 53 调用点分级（8 error/7 warn/14 info/24 debug）+ 11 热路径守卫；调试哨兵双轨保留旧路径全量日志（`C:\zhu-ye-test\tsf-debug.enable` 存在时原样写 tsf-debug.log）（T-091，PR #60）
 - 简拼/首字母输入：`nh`→你好、`wsm`→为什么；静态 22 字母简拼音节表 + 前序笛卡尔积展开，上限 32 条，仅主候选为空且不可切分时介入（T-053，FR-023）
 - 模糊音与纠错：zh↔z 等 7 组映射、单处替换；`zongguo`→中国（模糊替换）、`niha`→你好（少字母补全），独立 Corrected 组追加主候选之后（T-054，FR-024）
 - 整句/长句 Beam Search：`woxiangmingtianqubeijing`→我想明天去北京；跨音节整词匹配 + 词间转移评分（unigram 上限、bigram 缺失惩罚），整句组置主候选最前（T-055，FR-025）
