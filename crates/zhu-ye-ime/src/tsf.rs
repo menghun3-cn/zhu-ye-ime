@@ -16,12 +16,13 @@
 use std::ffi::c_void;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_POINTER, HMODULE, LPARAM, POINT, RECT,
@@ -333,7 +334,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
     fn Activate(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32) -> Result<()> {
         // 自检等场景允许空线程管理器；此时不注册按键事件，其余状态照常可用。
         let Some(thread_mgr) = ptim.cloned() else {
-            debug_log("zhu-ye: Activate tm=none");
+            product_log(zhu_ye_core::LogLevel::Info, "zhu-ye: Activate tm=none");
             return Ok(());
         };
 
@@ -343,7 +344,10 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         let keystroke_mgr = match unsafe { get_keystroke_mgr(&thread_mgr) } {
             Ok(km) => km,
             Err(err) => {
-                debug_log(&format!("zhu-ye: Activate keystroke-mgr FAILED {err:?}"));
+                product_log(
+                    zhu_ye_core::LogLevel::Error,
+                    &format!("zhu-ye: Activate keystroke-mgr FAILED {err:?}"),
+                );
                 return Err(err);
             }
         };
@@ -353,27 +357,36 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
                 let mut state = state_lock(self);
                 state.tid = tid;
                 state.keystroke_mgr = Some(keystroke_mgr);
-                debug_log(&format!("zhu-ye: Activate tid={tid} key-sink ok"));
+                product_log(
+                    zhu_ye_core::LogLevel::Info,
+                    &format!("zhu-ye: Activate tid={tid} key-sink ok"),
+                );
                 // T-046：注册语言栏中英模式图标。语言栏/ctfmon 不可用时
                 // 不阻断激活（图标属增强反馈，缺了不影响输入闭环）。
                 match LangBarHandle::register(&thread_mgr, state.engine.mode()) {
                     Ok(handle) => {
                         state.lang_bar = Some(handle);
-                        debug_log("zhu-ye: langbar added");
+                        product_log(zhu_ye_core::LogLevel::Info, "zhu-ye: langbar added");
                     }
-                    Err(err) => debug_log(&format!("zhu-ye: langbar skip {err:?}")),
+                    Err(err) => product_log(
+                        zhu_ye_core::LogLevel::Error,
+                        &format!("zhu-ye: langbar skip {err:?}"),
+                    ),
                 }
                 Ok(())
             }
             Err(err) => {
-                debug_log(&format!("zhu-ye: Activate key-sink FAILED {err:?}"));
+                product_log(
+                    zhu_ye_core::LogLevel::Error,
+                    &format!("zhu-ye: Activate key-sink FAILED {err:?}"),
+                );
                 Err(err)
             }
         }
     }
 
     fn Deactivate(&self) -> Result<()> {
-        debug_log("zhu-ye: Deactivate");
+        product_log(zhu_ye_core::LogLevel::Info, "zhu-ye: Deactivate");
         let mut state = state_lock(self);
         state.composition = None;
         state.engine.cancel_input();
@@ -382,7 +395,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         // T-046：注销语言栏项目（消耗句柄持有），优先于按键 sink 清理。
         if let Some(handle) = state.lang_bar.take() {
             handle.unregister();
-            debug_log("zhu-ye: langbar removed");
+            product_log(zhu_ye_core::LogLevel::Info, "zhu-ye: langbar removed");
         }
         if let Some(keystroke_mgr) = state.keystroke_mgr.take() {
             let _ = unsafe { keystroke_mgr.UnadviseKeyEventSink(state.tid) };
@@ -393,14 +406,20 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 
 impl ITfTextInputProcessorEx_Impl for TextService_Impl {
     fn ActivateEx(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32, dwflags: u32) -> Result<()> {
-        debug_log(&format!("zhu-ye: ActivateEx flags=0x{dwflags:X} tid={tid}"));
+        product_log(
+            zhu_ye_core::LogLevel::Info,
+            &format!("zhu-ye: ActivateEx flags=0x{dwflags:X} tid={tid}"),
+        );
         ITfTextInputProcessor_Impl::Activate(self, ptim, tid)
     }
 }
 
 impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnSetFocus(&self, fforeground: BOOL) -> Result<()> {
-        debug_log(&format!("zhu-ye: OnSetFocus fg={}", fforeground.0));
+        product_log(
+            zhu_ye_core::LogLevel::Info,
+            &format!("zhu-ye: OnSetFocus fg={}", fforeground.0),
+        );
         Ok(())
     }
 
@@ -417,10 +436,12 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             shift_key_down(),
             self.state(),
         );
-        debug_log(&format!(
-            "zhu-ye: TestKeyDown 0x{:X} -> {:?}",
-            wparam.0, action
-        ));
+        if should_log(zhu_ye_core::LogLevel::Debug) {
+            debug_log(&format!(
+                "zhu-ye: TestKeyDown 0x{:X} -> {:?}",
+                wparam.0, action
+            ));
+        }
         Ok(BOOL(action.is_some() as i32))
     }
 
@@ -448,10 +469,12 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         if !action.needs_edit_session() {
             sync_engine(self.state(), action);
             refresh_candidate_window(self.state(), None);
-            debug_log(&format!(
-                "zhu-ye: key 0x{:X} state action {:?}",
-                wparam.0, action
-            ));
+            if should_log(zhu_ye_core::LogLevel::Debug) {
+                debug_log(&format!(
+                    "zhu-ye: key 0x{:X} state action {:?}",
+                    wparam.0, action
+                ));
+            }
             return Ok(BOOL(1));
         }
 
@@ -459,7 +482,9 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             return Ok(BOOL(0));
         };
 
-        debug_log(&format!("zhu-ye: key 0x{:X} action {:?}", wparam.0, action));
+        if should_log(zhu_ye_core::LogLevel::Debug) {
+            debug_log(&format!("zhu-ye: key 0x{:X} action {:?}", wparam.0, action));
+        }
 
         let tid = state_lock(self).tid;
         let sink = self.to_object().to_interface::<ITfCompositionSink>();
@@ -802,7 +827,9 @@ fn apply_action(
         KeyAction::VConsume(c) => {
             let text = compose_text(state, action);
             update_composition(state, context, sink, ec, &text)?;
-            debug_log(&format!("zhu-ye: v-consume {c} -> {text:?}"));
+            if should_log(zhu_ye_core::LogLevel::Debug) {
+                debug_log(&format!("zhu-ye: v-consume {c} -> {text:?}"));
+            }
         }
         KeyAction::Space | KeyAction::Enter | KeyAction::Escape | KeyAction::Select(_) => {
             let text = commit_text(state, action);
@@ -885,7 +912,9 @@ fn replace_last_chars(context: &ITfContext, ec: u32, replace_len: usize, text: &
     unsafe {
         context.SetSelection(ec, &[selection])?;
     }
-    debug_log(&format!("zhu-ye: replace-last {replace_len} -> {text:?}"));
+    if should_log(zhu_ye_core::LogLevel::Debug) {
+        debug_log(&format!("zhu-ye: replace-last {replace_len} -> {text:?}"));
+    }
     Ok(())
 }
 
@@ -903,7 +932,9 @@ fn compose_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
             _ => String::new(),
         }
     };
-    debug_log(&format!("zhu-ye: compose-text {action:?} -> {text:?}"));
+    if should_log(zhu_ye_core::LogLevel::Debug) {
+        debug_log(&format!("zhu-ye: compose-text {action:?} -> {text:?}"));
+    }
     text
 }
 
@@ -919,10 +950,12 @@ fn commit_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
             _ => String::new(),
         }
     };
-    debug_log(&format!(
-        "zhu-ye: commit-text {action:?} -> {text:?} ({} utf8)",
-        text.len()
-    ));
+    if should_log(zhu_ye_core::LogLevel::Debug) {
+        debug_log(&format!(
+            "zhu-ye: commit-text {action:?} -> {text:?} ({} utf8)",
+            text.len()
+        ));
+    }
     text
 }
 
@@ -1026,7 +1059,9 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
 fn refresh_candidate_window(state: &Rc<Mutex<EngineState>>, edit: Option<(&ITfContext, u32)>) {
     let view = state.lock().unwrap().engine.candidate_ui_view();
     if view.composition.is_empty() && view.items.is_empty() {
-        debug_log("zhu-ye: cand-hide (no composition, no items)");
+        if should_log(zhu_ye_core::LogLevel::Debug) {
+            debug_log("zhu-ye: cand-hide (no composition, no items)");
+        }
         state.lock().unwrap().candidate_window.hide();
         return;
     }
@@ -1035,11 +1070,13 @@ fn refresh_candidate_window(state: &Rc<Mutex<EngineState>>, edit: Option<(&ITfCo
     } else {
         edit.and_then(|(context, ec)| composition_placement(state, context, ec))
     };
-    debug_log(&format!(
-        "zhu-ye: cand-show items={} first={:?}",
-        view.visible_items().len(),
-        view.visible_items().first()
-    ));
+    if should_log(zhu_ye_core::LogLevel::Debug) {
+        debug_log(&format!(
+            "zhu-ye: cand-show items={} first={:?}",
+            view.visible_items().len(),
+            view.visible_items().first()
+        ));
+    }
     state
         .lock()
         .unwrap()
@@ -1108,7 +1145,9 @@ fn update_composition(
         Some(composition) => {
             let range = unsafe { composition.GetRange() }?;
             unsafe { range.SetText(ec, 0, &wide) }?;
-            debug_log(&format!("zhu-ye: comp-update {text:?}"));
+            if should_log(zhu_ye_core::LogLevel::Debug) {
+                debug_log(&format!("zhu-ye: comp-update {text:?}"));
+            }
         }
         None => {
             debug_log("zhu-ye: comp-insert-begin");
@@ -1181,7 +1220,9 @@ fn finish_composition(
             if text.is_empty() {
                 debug_log("zhu-ye: commit-cancel (empty)");
             } else {
-                debug_log(&format!("zhu-ye: commit {text:?} ({} utf8)", text.len()));
+                if should_log(zhu_ye_core::LogLevel::Debug) {
+                    debug_log(&format!("zhu-ye: commit {text:?} ({} utf8)", text.len()));
+                }
             }
         }
         None if !text.is_empty() => {
@@ -1205,16 +1246,46 @@ fn to_wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// 输出调试日志：先写入调试器输出通道，再在“验收期文件日志”开关
-/// （`C:\zhu-ye-test\tsf-debug.enable` 存在）时追加写
-/// `C:\zhu-ye-test\tsf-debug.log`，便于在没有调试器的远程虚拟机上观察
-/// TSF 生命周期与按键流程。验收结束后移除文件日志部分。
+/// 输出调试日志（第十一期 FR-060，T-091 分级后的 debug 级入口）：
+/// 先写入调试器输出通道（`OutputDebugStringW`，无调试器时空转无成本），
+/// 再按 D-73 双轨写文件——哨兵存在时全量写 `C:\zhu-ye-test\tsf-debug.log`
+/// （VM 取证零改动），否则按产品轨级别门写用户目录日志。调用点默认包
+/// `should_log` 前置守卫（热路径构造前短路）。
+#[inline]
 fn debug_log(message: &str) {
+    product_log(zhu_ye_core::LogLevel::Debug, message);
+}
+
+/// 产品化日志（FR-060，T-091）：按级别写文件日志。双轨（D-73）：
+/// - 哨兵 `C:\zhu-ye-test\tsf-debug.enable` 存在 → 全量写原路径（格式不变，
+///   vm-accept-sop 零改动）；
+/// - 否则 → 产品轨：级别门（config `log_level`，默认 warn，D-72）短路后
+///   `FileLogger` 写 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`（1 MiB 轮转）。
+///
+/// 目录创建与文件写只发生在达到级别的消息上（热路径由调用点守卫短路）。
+fn product_log(level: zhu_ye_core::LogLevel, message: &str) {
     let wide = to_wide(message);
     unsafe { OutputDebugStringW(PCWSTR(wide.as_ptr())) };
-    if !file_log_enabled() {
+    if file_log_enabled() {
+        write_sentinel_log(message);
         return;
     }
+    if level > product_log_level() {
+        return;
+    }
+    let mut guard = PRODUCT_LOGGER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_none() {
+        *guard = build_product_logger();
+    }
+    if let Some(logger) = guard.as_mut() {
+        logger.write(level, unsafe { GetCurrentThreadId() }, message);
+    }
+}
+
+/// 哨兵轨：全量追加写 `C:\zhu-ye-test\tsf-debug.log`（现状格式，无级别过滤）。
+fn write_sentinel_log(message: &str) {
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1230,20 +1301,117 @@ fn debug_log(message: &str) {
     }
 }
 
-/// 验收期文件日志路径与开关缓存。
+/// 产品轨配置级别（进程生命周期内缓存；P-12 配置不做热切换）。
+fn product_log_level() -> zhu_ye_core::LogLevel {
+    static LEVEL: OnceLock<zhu_ye_core::LogLevel> = OnceLock::new();
+    *LEVEL.get_or_init(|| zhu_ye_core::load_config(&config_path()).0.log_level)
+}
+
+/// `level` 消息当前是否值得构造与落盘（热路径调用点前置守卫用）：
+/// 哨兵模式恒真（全量写），产品模式按级别门判断。
+fn should_log(level: zhu_ye_core::LogLevel) -> bool {
+    file_log_enabled() || level <= product_log_level()
+}
+
+/// 产品日志主文件路径：`%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`
+/// （与设置窗口 `product_log_dir` 同源；`%LOCALAPPDATA%` 缺失返回 `None`）。
+fn product_log_path() -> Option<PathBuf> {
+    let root = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        PathBuf::from(root)
+            .join("ai-zhu-ye-ime")
+            .join("logs")
+            .join("ime.log"),
+    )
+}
+
+/// 产品轨 `FileLogger` 惰性装配：首次真正需要写时解析路径（设计 §4.2）；
+/// `%LOCALAPPDATA%` 缺失时返回 `None`（尽力而为，仅保留调试器输出）。
+fn build_product_logger() -> Option<zhu_ye_core::FileLogger> {
+    Some(zhu_ye_core::FileLogger::new(
+        product_log_path()?,
+        product_log_level(),
+    ))
+}
+
+/// 产品轨 logger 静态持有：TSF 事件线程内串行访问，`Mutex` 兜底跨线程回调
+/// （core `FileLogger` 本身无锁，见诊断产品化设计 §3）。
+static PRODUCT_LOGGER: Mutex<Option<zhu_ye_core::FileLogger>> = Mutex::new(None);
+
+/// 验收期哨兵文件路径与开关缓存（D-73 双轨之哨兵轨）。
 const FILE_LOG_PATH: &str = r"C:\zhu-ye-test\tsf-debug.log";
+const FILE_LOG_SENTINEL: &str = r"C:\zhu-ye-test\tsf-debug.enable";
 static FILE_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
 static FILE_LOG_CHECKED: AtomicBool = AtomicBool::new(false);
+
+/// 哨兵存在性判定（D-73）：`tsf-debug.enable` 存在即启用全量写旧路径。
+/// 抽成参数化纯函数便于单测（真实哨兵路径是 VM 取证契约，不得注入/改动）。
+fn sentinel_enabled(sentinel: &std::path::Path) -> bool {
+    sentinel.exists()
+}
 
 fn file_log_enabled() -> bool {
     if !FILE_LOG_CHECKED.load(Ordering::Relaxed) {
         FILE_LOG_ENABLED.store(
-            PathBuf::from(r"C:\zhu-ye-test\tsf-debug.enable").exists(),
+            sentinel_enabled(Path::new(FILE_LOG_SENTINEL)),
             Ordering::Relaxed,
         );
         FILE_LOG_CHECKED.store(true, Ordering::Relaxed);
     }
     FILE_LOG_ENABLED.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod log_tests {
+    //! 产品化日志（FR-060，T-091）路径与哨兵判定的单元测试。
+    //!
+    //! 只测纯函数（路径拼接、哨兵存在性），不触碰进程级静态缓存
+    //! （`FILE_LOG_CHECKED` 首次判定后锁定）与真实 `C:\zhu-ye-test`。
+    //! 环境变量操作在单个测试内串行完成，规避并行线程互相覆盖。
+
+    use super::{product_log_path, sentinel_enabled};
+
+    /// 测试专属临时目录（创建后保留；进程内计数唯一，产物不入库）。
+    fn temp_dir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "zy-tsf-log-test-{}-{}-{}",
+            std::process::id(),
+            stamp,
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("创建测试临时目录");
+        dir
+    }
+
+    #[test]
+    fn 产品日志路径随本地应用数据目录解析且缺失时为空() {
+        let original = std::env::var_os("LOCALAPPDATA");
+        let dir = temp_dir();
+        std::env::set_var("LOCALAPPDATA", &dir);
+        let expected = dir.join("ai-zhu-ye-ime").join("logs").join("ime.log");
+        assert_eq!(product_log_path(), Some(expected));
+        std::env::remove_var("LOCALAPPDATA");
+        assert_eq!(product_log_path(), None);
+        if let Some(path) = original {
+            std::env::set_var("LOCALAPPDATA", path);
+        }
+    }
+
+    #[test]
+    fn 哨兵文件存在性判定随文件创建与删除变化() {
+        let sentinel = temp_dir().join("tsf-debug.enable");
+        assert!(!sentinel_enabled(&sentinel));
+        std::fs::write(&sentinel, "").expect("创建临时哨兵");
+        assert!(sentinel_enabled(&sentinel));
+        std::fs::remove_file(&sentinel).expect("删除临时哨兵");
+        assert!(!sentinel_enabled(&sentinel));
+    }
 }
 
 /// 创建输入引擎（M6-R 多包装配）。
@@ -1259,31 +1427,46 @@ fn file_log_enabled() -> bool {
 fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
     let (config, config_diagnostic) = zhu_ye_core::load_config(&config_path());
     if let Some(diagnostic) = config_diagnostic {
-        debug_log(&format!("zhu-ye: config-warn {diagnostic}"));
+        product_log(
+            zhu_ye_core::LogLevel::Error,
+            &format!("zhu-ye: config-warn {diagnostic}"),
+        );
     }
 
     let plan = assembly_plan(&config);
     for id in &plan.unknown {
-        debug_log(&format!("zhu-ye: config-unknown-pack id={id}"));
+        product_log(
+            zhu_ye_core::LogLevel::Warn,
+            &format!("zhu-ye: config-unknown-pack id={id}"),
+        );
     }
     for id in &plan.missing {
-        debug_log(&format!("zhu-ye: config-missing-pack id={id}"));
+        product_log(
+            zhu_ye_core::LogLevel::Warn,
+            &format!("zhu-ye: config-missing-pack id={id}"),
+        );
     }
 
     let paths = plan.paths();
     let (composite, skipped) = CompositeDictionary::from_paths(&paths);
     for diagnostic in &skipped {
-        debug_log(&format!("zhu-ye: pack-skipped {diagnostic}"));
+        product_log(
+            zhu_ye_core::LogLevel::Error,
+            &format!("zhu-ye: pack-skipped {diagnostic}"),
+        );
     }
 
     // 英文词表文件（T-085）：缺失/失败回退内嵌静态表，不阻断装配。
     let en_lexicon = en_lexicon();
 
     if composite.is_empty() {
-        debug_log(&format!(
-            "zhu-ye: dict-fallback path={:?}",
-            plan.base.clone().unwrap_or_default()
-        ));
+        product_log(
+            zhu_ye_core::LogLevel::Error,
+            &format!(
+                "zhu-ye: dict-fallback path={:?}",
+                plan.base.clone().unwrap_or_default()
+            ),
+        );
         let mut engine = match user_store {
             Some(store) => InputEngine::with_user_store(m1_seed_dictionary(), store),
             None => InputEngine::with_m1_seed(),
@@ -1295,14 +1478,20 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
     }
 
     for (name, entries) in composite.describe() {
-        debug_log(&format!("zhu-ye: pack-ok path={name:?} entries={entries}"));
+        product_log(
+            zhu_ye_core::LogLevel::Info,
+            &format!("zhu-ye: pack-ok path={name:?} entries={entries}"),
+        );
     }
-    debug_log(&format!(
-        "zhu-ye: composite-ok packs={} enabled={:?} online_update={}",
-        composite.file_count(),
-        config.enabled_packs,
-        config.online_update
-    ));
+    product_log(
+        zhu_ye_core::LogLevel::Info,
+        &format!(
+            "zhu-ye: composite-ok packs={} enabled={:?} online_update={}",
+            composite.file_count(),
+            config.enabled_packs,
+            config.online_update
+        ),
+    );
 
     let slang = slang_pack(&plan);
     let dictionary: Arc<dyn Dictionary> = Arc::new(composite.clone());
@@ -1320,7 +1509,7 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
     };
     match slang {
         Some(slang) => {
-            debug_log("zhu-ye: slang-path enabled");
+            product_log(zhu_ye_core::LogLevel::Info, "zhu-ye: slang-path enabled");
             engine.with_slang(slang)
         }
         None => engine,
@@ -1359,14 +1548,17 @@ fn domain_engine(
     if packs.is_empty() {
         return engine;
     }
-    debug_log(&format!(
-        "zhu-ye: domain-boost enabled packs={}",
-        packs
-            .iter()
-            .map(|(id, _)| id.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
-    ));
+    product_log(
+        zhu_ye_core::LogLevel::Info,
+        &format!(
+            "zhu-ye: domain-boost enabled packs={}",
+            packs
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    );
     engine.with_domain_packs(packs)
 }
 
@@ -1382,36 +1574,49 @@ fn contact_engine(engine: InputEngine, config: &zhu_ye_core::ConfigFile) -> Inpu
     let mut contacts = Vec::new();
     for path in &config.contact_vcards {
         let Ok(mut file) = std::fs::File::open(path) else {
-            debug_log(&format!("zhu-ye: contact-vcf-missing path={path:?}"));
+            product_log(
+                zhu_ye_core::LogLevel::Warn,
+                &format!("zhu-ye: contact-vcf-missing path={path:?}"),
+            );
             continue;
         };
         let mut text = String::new();
         if file.read_to_string(&mut text).is_err() {
-            debug_log(&format!("zhu-ye: contact-vcf-unreadable path={path:?}"));
+            product_log(
+                zhu_ye_core::LogLevel::Warn,
+                &format!("zhu-ye: contact-vcf-unreadable path={path:?}"),
+            );
             continue;
         }
         match parse_vcard(&text) {
             Ok(mut parsed) => {
-                debug_log(&format!(
-                    "zhu-ye: contact-vcf-ok path={path:?} entries={}",
-                    parsed.len()
-                ));
+                product_log(
+                    zhu_ye_core::LogLevel::Info,
+                    &format!(
+                        "zhu-ye: contact-vcf-ok path={path:?} entries={}",
+                        parsed.len()
+                    ),
+                );
                 contacts.append(&mut parsed);
             }
-            Err(error) => debug_log(&format!(
-                "zhu-ye: contact-vcf-parse-err path={path:?} {error:?}"
-            )),
+            Err(error) => product_log(
+                zhu_ye_core::LogLevel::Warn,
+                &format!("zhu-ye: contact-vcf-parse-err path={path:?} {error:?}"),
+            ),
         }
     }
     if contacts.is_empty() {
         return engine;
     }
     let index = build_contact_index(&contacts);
-    debug_log(&format!(
-        "zhu-ye: contact-index index={} contacts={}",
-        index.len(),
-        contacts.len()
-    ));
+    product_log(
+        zhu_ye_core::LogLevel::Info,
+        &format!(
+            "zhu-ye: contact-index index={} contacts={}",
+            index.len(),
+            contacts.len()
+        ),
+    );
     engine.with_contacts(index)
 }
 
@@ -1443,7 +1648,10 @@ fn slang_pack(plan: &zhu_ye_core::PackPlan) -> Option<Arc<dyn Dictionary>> {
     match DictionaryFile::open(path) {
         Ok(file) => Some(Arc::new(file)),
         Err(error) => {
-            debug_log(&format!("zhu-ye: slang-open-failed {error}"));
+            product_log(
+                zhu_ye_core::LogLevel::Warn,
+                &format!("zhu-ye: slang-open-failed {error}"),
+            );
             None
         }
     }
@@ -1540,17 +1748,23 @@ fn en_lexicon() -> Option<zhu_ye_core::EnLexicon> {
     for candidate in [installed, appdata].into_iter().flatten() {
         match zhu_ye_core::EnLexicon::open(&candidate) {
             Ok(lexicon) => {
-                debug_log(&format!(
-                    "zhu-ye: en-wordbook-ok path={:?} entries={}",
-                    candidate,
-                    lexicon.count()
-                ));
+                product_log(
+                    zhu_ye_core::LogLevel::Info,
+                    &format!(
+                        "zhu-ye: en-wordbook-ok path={:?} entries={}",
+                        candidate,
+                        lexicon.count()
+                    ),
+                );
                 return Some(lexicon);
             }
-            Err(error) => debug_log(&format!(
-                "zhu-ye: en-wordbook-failed path={:?} error={}",
-                candidate, error
-            )),
+            Err(error) => product_log(
+                zhu_ye_core::LogLevel::Warn,
+                &format!(
+                    "zhu-ye: en-wordbook-failed path={:?} error={}",
+                    candidate, error
+                ),
+            ),
         }
     }
     None

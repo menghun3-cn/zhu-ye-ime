@@ -915,10 +915,13 @@ fn build_diagnostics(config_path: Option<&std::path::Path>) -> Vec<String> {
         Some(dir) => lines.push(format!("数据目录：{}", dir.display())),
         None => lines.push("数据目录：（未找到，APPDATA 未设置）".to_owned()),
     }
-    lines.push(format!(
-        "日志目录：{}（文件日志仅在验收期启用）",
-        config::acceptance_log_dir().display()
-    ));
+    match config::product_log_dir() {
+        Some(dir) => lines.push(format!(
+            "日志目录：{}（默认记录错误，级别见 config.json log_level）",
+            dir.display()
+        )),
+        None => lines.push("日志目录：（未找到，LOCALAPPDATA 未设置）".to_owned()),
+    }
     let packs = list_packs_now(config_path);
     if packs.is_empty() {
         lines.push("已装包：（无）".to_owned());
@@ -1081,21 +1084,34 @@ unsafe fn open_panel(hwnd: HWND, state: &mut WindowState, kind: crate::panel::Pa
 
 /// 执行「更多设置」的打开动作。
 ///
-/// 配置与日志可能尚未生成（首次改动设置前没有 `config.json`；文件日志仅在验收期启用），
-/// 因此先判断存在性再调用系统打开，避免弹出系统的"找不到文件"对话框。
+/// 配置与日志可能尚未生成（首次改动设置前没有 `config.json`；产品日志目录由
+/// TSF 首次写日志时创建），因此先判断存在性再调用系统打开，避免弹出系统的
+/// "找不到文件"对话框；日志目录则先幂等创建（设计 §5「先判断/创建再打开」，
+/// T-075 ⑤ 既有原则）。
 fn open_target(state: &mut WindowState, target: OpenTarget) {
     state.hint = Some(match shell::resolve_target(target) {
         Err(error) => error,
-        Ok(path) if path.exists() => match shell::open_path(&path) {
-            Ok(()) => format!("已打开 {}", path.display()),
-            Err(error) => error,
-        },
         Ok(path) => match target {
+            OpenTarget::LogDir => open_log_dir(&path),
+            _ if path.exists() => match shell::open_path(&path) {
+                Ok(()) => format!("已打开 {}", path.display()),
+                Err(error) => error,
+            },
             OpenTarget::ConfigFile => "配置文件尚未生成：改动任一设置后即会写入".to_owned(),
-            OpenTarget::LogDir => "未找到日志目录：文件日志仅在验收期启用".to_owned(),
             OpenTarget::DataDir => format!("目录不存在：{}", path.display()),
         },
     });
+}
+
+/// 打开日志目录：不存在时先创建（创建失败仅提示，不弹系统"找不到文件"框）。
+fn open_log_dir(path: &std::path::Path) -> String {
+    if !path.exists() && std::fs::create_dir_all(path).is_err() {
+        return format!("无法创建日志目录：{}", path.display());
+    }
+    match shell::open_path(path) {
+        Ok(()) => format!("已打开 {}", path.display()),
+        Err(error) => error,
+    }
 }
 
 /// 应用主题选择并持久化。

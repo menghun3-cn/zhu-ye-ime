@@ -149,7 +149,8 @@ pub fn resolve_target(target: OpenTarget) -> Result<PathBuf, String> {
         OpenTarget::DataDir => {
             crate::config::data_dir().ok_or_else(|| "未设置 APPDATA，无法定位数据目录".to_owned())
         }
-        OpenTarget::LogDir => Ok(crate::config::acceptance_log_dir()),
+        OpenTarget::LogDir => crate::config::product_log_dir()
+            .ok_or_else(|| "未设置 LOCALAPPDATA，无法定位日志目录".to_owned()),
     }
 }
 
