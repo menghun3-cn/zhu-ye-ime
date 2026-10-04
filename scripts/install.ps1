@@ -11,6 +11,7 @@
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
       bin/dictionary.zyct            基础词典
+      bin/en.zyen                    英文词表（T-085，英文前缀候选）
       packs/it.zyct med.zyct slang.zyct   预置领域包（D-46，可离线验收）
       scripts/                       安装/卸载/校验脚本
       docs/                          数据来源与许可证
@@ -18,7 +19,7 @@
 安装行为：
 1. 从发行包 bin\ 读取文件，不再依赖源码树与 cargo（T-078）
 2. 版本化复制 zhu-ye-ime.dll 到安装目录并校验导出（沿用原事务与失败回滚）
-3. 复制基础词典
+3. 复制基础词典与英文词表（en.zyen，T-085）
 4. 安装 zhu-ye-settings.exe / zhu-ye-updater.exe 到 Program Files\ai-zhu-ye-ime\bin
 5. 预置三个领域包到 %APPDATA%\ai-zhu-ye-ime\packs\（不覆盖用户已有包以外的动作：
    同名覆盖，保证幂等）
@@ -174,6 +175,23 @@ if ([System.IO.Path]::GetFullPath($DictionaryPath) -eq [System.IO.Path]::GetFull
 $legacyDictionary = Join-Path $InstallDir 'seed.zyct'
 if (Test-Path -LiteralPath $legacyDictionary -PathType Leaf) {
     Remove-Item -LiteralPath $legacyDictionary -Force
+}
+
+# ---- 2.5 复制英文词表 en.zyen（T-085：英文前缀候选；缺失即跳过，引擎回退内嵌静态表） ----
+$enWordbook = Join-Path $binDir 'en.zyen'
+if (Test-Path -LiteralPath $enWordbook -PathType Leaf) {
+    $targetEnWordbook = Join-Path $InstallDir 'en.zyen'
+    try {
+        Copy-Item -LiteralPath $enWordbook -Destination $targetEnWordbook -Force
+        Write-Host "已安装英文词表: $targetEnWordbook"
+    } catch {
+        if ($targetDll -ne $previousDll) {
+            Remove-Item -LiteralPath $targetDll -Force -ErrorAction SilentlyContinue
+        }
+        throw "英文词表复制失败，安装中止（未提交的 DLL 副本已删除，注册表未改动）: $($_.Exception.Message)"
+    }
+} else {
+    Write-Host '发行包未含 en.zyen（英文前缀候选回退内嵌静态表，不阻断安装）。'
 }
 
 # ---- 3. 安装设置窗口与更新器 ----

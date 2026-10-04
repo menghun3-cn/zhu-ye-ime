@@ -85,7 +85,9 @@ $pairs = @(
     @('LanguageIdHex', (Get-RustStrConst 'TSF_LANGUAGE_ID_HEX'), $psIdentity['LanguageIdHex']),
     @('InstallDir(相对段)', (Get-RustStrConst 'TSF_INSTALL_DIR_RELATIVE'), $psInstallDirRelative),
     @('DictionaryFileName', (Get-RustStrConst 'DICTIONARY_FILE_NAME'),
-        $psIdentity['DictionaryFileName'])
+        $psIdentity['DictionaryFileName']),
+    @('EnWordbookFileName', (Get-RustStrConst 'EN_WORDBOOK_FILE_NAME'),
+        $psIdentity['EnWordbookFileName'])
 )
 
 $failed = $false

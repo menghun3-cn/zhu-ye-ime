@@ -11,6 +11,7 @@
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
       bin/dictionary.zyct            基础词典（data/artifacts/base.zyct，随安装只读）
+      bin/en.zyen                    英文词表（T-085，data/artifacts/en.zyen，随安装只读）
       packs/it.zyct med.zyct slang.zyct  预置领域包（D-46，可离线验收）
       scripts/ime-identity.ps1 install.ps1 uninstall.ps1 verify-tsf-dll.ps1 verify-tsf-identity.ps1
       docs/licenses.md 数据清单.md
@@ -118,6 +119,12 @@ if (-not (Test-Path -LiteralPath $baseDictionary -PathType Leaf)) {
 }
 Copy-Item -LiteralPath $baseDictionary -Destination (Join-Path $binDir 'dictionary.zyct')
 
+$enWordbook = Join-Path $repoRoot 'data\artifacts\en.zyen'
+if (-not (Test-Path -LiteralPath $enWordbook -PathType Leaf)) {
+    throw "英文词表缺失：$enWordbook（先运行 scripts\build-en-wordbook.ps1）"
+}
+Copy-Item -LiteralPath $enWordbook -Destination (Join-Path $binDir 'en.zyen')
+
 # ---- packs：三个领域包（D-46，可离线验收） ----
 foreach ($pack in @('it.zyct', 'med.zyct', 'slang.zyct')) {
     $source = Join-Path $repoRoot "data\artifacts\$pack"
@@ -145,6 +152,7 @@ $testGuide = @'
     bin/zhu-ye-settings.exe        设置窗口
     bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
     bin/dictionary.zyct            基础词典
+    bin/en.zyen                    英文词表（英文前缀候选，T-085）
     packs/                         三个领域包（安装时预置到 %APPDATA%）
     scripts/                       安装/卸载/校验脚本
 
@@ -166,8 +174,8 @@ $testGuide = @'
 ## 参考检查
 
 - DLL 导出由 `.\scripts\verify-tsf-dll.ps1 -DllPath .\bin\zhu_ye_ime.dll` 校验。
-- 标识常量由 `.\scripts\verify-tsf-identity.ps1` 交叉比对（6 项）。
-- 安装器会把 `bin\dictionary.zyct` 复制到 DLL 同目录，并把三个领域包预置到
+- 标识常量由 `.\scripts\verify-tsf-identity.ps1` 交叉比对（7 项）。
+- 安装器会把 `bin\dictionary.zyct` 与 `bin\en.zyen` 复制到 DLL 同目录，并把三个领域包预置到
   `%APPDATA%\ai-zhu-ye-ime\packs\`；卸载清理程序文件但保留用户数据目录。
 - 本包不包含 Rust 工具链；请勿在包内运行 cargo 类命令。
 - 词典数据来源与许可证见包内 `docs/licenses.md` 与 `docs/数据清单.md`。
