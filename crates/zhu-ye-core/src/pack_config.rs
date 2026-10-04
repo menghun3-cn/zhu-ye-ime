@@ -236,6 +236,11 @@ pub struct ConfigFile {
     /// 新输入会话的默认中英模式（第八期 FR-041）；缺失或未知值时按中文处理。
     #[serde(default, deserialize_with = "deserialize_default_mode")]
     pub default_mode: ModeChoice,
+    /// 文件日志级别（第十一期 FR-060，T-091；D-72 默认只记错误级）。
+    /// 缺失/非法/未知值回退 `warn`（宽松解析，T-073 同款模式），
+    /// **不递增 `CONFIG_FORMAT_VERSION`**（旧配置无此字段按默认处理）。
+    #[serde(default, deserialize_with = "crate::log_level::deserialize_log_level")]
+    pub log_level: crate::log_level::LogLevel,
 }
 
 fn default_version() -> u32 {
@@ -257,6 +262,7 @@ impl Default for ConfigFile {
             contact_vcards: Vec::new(),
             theme: ThemeChoice::Light,
             default_mode: ModeChoice::Chinese,
+            log_level: crate::log_level::LogLevel::default(),
         }
     }
 }
@@ -510,6 +516,54 @@ mod tests {
         // 非字符串（如数字）同样降级，不整体失败。
         let config = ConfigFile::from_json(r#"{"default_mode": 5}"#).unwrap();
         assert_eq!(config.default_mode, super::ModeChoice::Chinese);
+    }
+
+    #[test]
+    fn 日志级别字段缺失时回退默认警告级别() {
+        // T-091（FR-060，D-72）：旧配置无 `log_level` 字段按默认 warn 处理，
+        // 不递增 CONFIG_FORMAT_VERSION；字段缺省不破坏既有字段。
+        let text = r#"{
+            "enabled_packs": ["it"],
+            "online_update": true
+        }"#;
+        let config = ConfigFile::from_json(text).unwrap();
+        assert_eq!(config.log_level, crate::log_level::LogLevel::Warn);
+        assert_eq!(config.enabled_packs, vec!["it"]);
+        assert!(config.online_update);
+    }
+
+    #[test]
+    fn 日志级别非法值回退警告不影响其它字段() {
+        // T-073 同款宽松模式：未知值（含 trace/off）回退 warn，用户配置不整体失败；
+        // 合法值大小写不敏感（DEBUG/debug 均为 Debug）。
+        for (raw, expected) in [
+            (r#""trace""#, crate::log_level::LogLevel::Warn),
+            (r#""off""#, crate::log_level::LogLevel::Warn),
+            (r#"5"#, crate::log_level::LogLevel::Warn),
+            (r#""DEBUG""#, crate::log_level::LogLevel::Debug),
+            (r#""debug""#, crate::log_level::LogLevel::Debug),
+        ] {
+            let config = ConfigFile::from_json(&format!(
+                r#"{{"enabled_packs": ["med"], "log_level": {raw}}}"#
+            ))
+            .unwrap();
+            assert_eq!(config.enabled_packs, vec!["med"], "输入 {raw}");
+            assert_eq!(config.log_level, expected, "输入 {raw}");
+        }
+    }
+
+    #[test]
+    fn 日志级别序列化往返() {
+        let config = ConfigFile {
+            log_level: crate::log_level::LogLevel::Info,
+            ..ConfigFile::default()
+        };
+        let text = config.to_json().unwrap();
+        assert!(
+            text.contains(r#""log_level": "info""#),
+            "序列化应写出小写级别值"
+        );
+        assert_eq!(ConfigFile::from_json(&text).unwrap(), config);
     }
 
     #[test]

@@ -20,8 +20,10 @@ pub mod emoji;
 pub mod en_lexicon;
 pub mod en_words;
 pub mod error;
+pub mod file_log;
 pub mod format;
 pub mod identity;
+pub mod log_level;
 pub mod manifest;
 pub mod mixed;
 pub mod pack_config;
@@ -62,7 +64,9 @@ pub use emoji::{emoji_for, EmojiEntry, EMOJI_TABLE};
 pub use en_lexicon::{compile_en_records, EnHeader, EnLexicon, EnRecord};
 pub use en_words::{en_words_with_prefix, EnWordEntry, EN_WORDS};
 pub use error::{Error, Result};
+pub use file_log::{FileLogger, DEFAULT_LOG_SIZE_LIMIT};
 pub use format::{cn_numeral, format_candidates, FormatCandidate};
+pub use log_level::{deserialize_log_level, LogLevel};
 pub use manifest::{
     canonical_bytes, parse_manifest, parse_public_key, sha256_file, sha256_hex, sign_manifest,
     verify_pack_contents, verify_signature, verify_signature_with_key, version_at_least, Manifest,

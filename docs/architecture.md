@@ -267,6 +267,19 @@ raw 数据（CC-CEDICT/FrequencyWords/GlobalVoices 等）
 └── data/                      # 数据清单与构建产物（大文件忽略）
 ```
 
+### 10.1 `config.json` 增量字段（T-091）
+
+配置主文件始终是纯增量可选字段扩展（缺字段取默认值，**不递增**
+`CONFIG_FORMAT_VERSION`；字段权威清单见[设置窗口设计.md §5.1](./设置窗口设计.md)）。
+
+- `log_level`（FR-060，T-091）：`error` / `warn` / `info` / `debug`
+  （大小写不敏感），缺失/非字符串/未知值回退 `warn`。TSF 侧产品日志
+  按该级别门写 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`（1 MiB 轮转，
+  见[诊断产品化设计.md](./诊断产品化设计.md)）；`warn` 为默认时热路径
+  零文件 IO（D-72）。
+- 其余增量字段（`theme` / `default_mode` 等）见设置窗口设计 §5.1，
+  反序列化宽松原则（T-073）同 `log_level`。
+
 ## 11. 构建与验证规范
 
 ```bash

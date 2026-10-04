@@ -220,8 +220,11 @@ fn multi_pack_checks(paths: &[PathBuf], runner: &mut Runner) -> Result<(), Strin
         .iter()
         .map(|c| c.text.as_str())
         .collect();
-    // 全包模式的前 N 项应与仅 base 一致（领域包只追加、不改动基础排序）。
-    if !base_texts.is_empty() && full_texts.starts_with(&base_texts) {
+    // 全包模式不得扰动基础候选：T-090 前缀组词展开（D-71 独立追加组）按
+    // 词频降序填充主组后的空位，领域包高词频词（如 slang 的 你好安怡）可能
+    // 合法进入展开组并排在某些基础候选之前——基础候选的**相对顺序**仍须
+    // 原样保持（子序列检查），断言语义比 T-090 前的前缀匹配收缩一级。
+    if !base_texts.is_empty() && is_subsequence(&base_texts, &full_texts) {
         runner.pass("全包模式基础候选顺序不漂移");
     } else {
         runner.fail(
@@ -2169,6 +2172,19 @@ fn real_smoke(path: &Path, runner: &mut Runner) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// 子序列判定：`base` 各项在 `full` 中按原相对顺序出现（T-090 展开组可在
+/// 主组后按词频引入领域包新词，但不得打乱基础候选的相对顺序）。
+fn is_subsequence(base: &[&str], full: &[&str]) -> bool {
+    let mut cursor = 0;
+    for item in base {
+        match full[cursor..].iter().position(|f| f == item) {
+            Some(pos) => cursor += pos + 1,
+            None => return false,
+        }
+    }
+    true
 }
 
 fn type_text(engine: &mut InputEngine, text: &str) {
