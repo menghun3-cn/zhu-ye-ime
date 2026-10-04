@@ -139,6 +139,19 @@ fn hex_decode(text: &str) -> Result<Vec<u8>, SignatureError> {
     Ok(out)
 }
 
+/// 生成新的 ed25519 发布密钥对（P-04 信任锚）。
+///
+/// 返回 `(私钥 seed hex, 公钥 hex)`。私钥只应在发布环境中保存，绝不写入
+/// 仓库或提交历史；公钥可入库，并在客户端构建期通过 `ZHU_YE_RELEASE_PUBLIC_KEY`
+/// 注入更新器。供 `zhu-ye-dict keygen` 调用。
+pub fn generate_keypair() -> Result<(String, String), String> {
+    let mut seed = [0u8; 32];
+    getrandom::getrandom(&mut seed).map_err(|error| format!("系统熵源不可用: {error}"))?;
+    let signing_key = SigningKey::from_bytes(&seed);
+    let public = signing_key.verifying_key().to_bytes();
+    Ok((hex_encode(&seed), hex_encode(&public)))
+}
+
 /// 用私钥对 manifest 签名，返回带签名块的 manifest。
 ///
 /// `secret` 是 32 字节 ed25519 私钥种子；调用方负责从发布环境 secret 读取，
@@ -275,13 +288,23 @@ pub fn verify_pack_contents(manifest: &Manifest, base_dir: &Path) -> Result<usiz
 
 /// 比较版本号（点分数字）；`left >= right` 返回 true。
 ///
-/// 仅用于 `min_engine_version` 门槛：非数字段按 0 处理，避免因版本串格式
-/// 差异误拒可用包。
+/// 仅用于 `min_engine_version` 门槛。每段取**前导数字**（忽略 pre-release
+/// 后缀：`0.1.2-alpha` 按 `0.1.2` 参与比较），非数字段按 0 处理，避免因
+/// 版本串格式差异误拒可用包——本仓库发布版本带 `alpha`/`beta` 后缀
+///（如 `v0.1.2-alpha`），若把 `2-alpha` 整段按 0 解析，客户端会被自己的
+/// 发布版本挡在门槛之外（T-094 e2e 发现）。
 #[must_use]
 pub fn version_at_least(current: &str, required: &str) -> bool {
     fn parts(text: &str) -> Vec<u64> {
         text.split('.')
-            .map(|part| part.trim().parse::<u64>().unwrap_or(0))
+            .map(|part| {
+                let digits: String = part
+                    .trim()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                digits.parse::<u64>().unwrap_or(0)
+            })
             .collect()
     }
     let left = parts(current);
@@ -300,9 +323,10 @@ pub fn version_at_least(current: &str, required: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_bytes, parse_manifest, parse_public_key, sha256_hex, sign_manifest,
-        verify_pack_contents, verify_signature, verify_signature_with_key, version_at_least,
-        Manifest, ManifestSignature, PackMeta, SignatureError, SIGNATURE_ALGORITHM,
+        canonical_bytes, generate_keypair, hex_decode, parse_manifest, parse_public_key,
+        sha256_hex, sign_manifest, verify_pack_contents, verify_signature,
+        verify_signature_with_key, version_at_least, Manifest, ManifestSignature, PackMeta,
+        SignatureError, SIGNATURE_ALGORITHM,
     };
     use ed25519_dalek::SigningKey;
     use std::path::PathBuf;
@@ -520,5 +544,30 @@ mod tests {
         assert!(version_at_least("1", "1.0.0"));
         // 非数字段按 0 处理，不误拒。
         assert!(version_at_least("0.2.0", "0.2"));
+        // pre-release 后缀取前导数字段（T-094：发布版本带 alpha/beta，
+        // 整段按 0 会把客户端挡在自己的版本门槛之外）。
+        assert!(version_at_least("0.1.2-alpha", "0.1.1"));
+        assert!(version_at_least("0.1.2-beta.1", "0.1.2"));
+        assert!(!version_at_least("0.1.1-alpha", "0.1.2"));
+        assert!(version_at_least("1.0.0-alpha", "0.9.9"));
+        assert!(version_at_least("0.1.2", "0.1.2-alpha"));
+        assert!(!version_at_least("0.1.2-alpha", "0.1.3"));
+    }
+
+    #[test]
+    fn keypair生成格式与派生一致() {
+        let (secret, public) = generate_keypair().unwrap();
+        assert_eq!(secret.len(), 64, "私钥应为 32 字节 hex");
+        assert_eq!(public.len(), 64, "公钥应为 32 字节 hex");
+        // 私钥种子派生的公钥与返回的公钥一致。
+        let seed_bytes = hex_decode(&secret).unwrap();
+        let seed_array: [u8; 32] = seed_bytes.try_into().unwrap();
+        let derived = SigningKey::from_bytes(&seed_array)
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(hex_of(&derived), public);
+        // 两次调用产生不同密钥对。
+        let (secret2, _) = generate_keypair().unwrap();
+        assert_ne!(secret, secret2);
     }
 }
