@@ -2,7 +2,7 @@
 
 本文件记录项目使用到的所有第三方数据、词表、语料与工具，用于许可合规审查。新增数据源必须在此登记后才能进入数据管线。
 
-现状：D-001 CC-CEDICT、D-004 FrequencyWords 中文词频与 D-006 OPUS GlobalVoices 已于 2026-09-21 引入数据管线，用于离线导入真实词库；原始文件与生成产物保存在 `data/` 且不进入 git，派生说明见 `docs/数据清单.md`。ECDICT（D-002，CC BY-SA 4.0）已于 2026-10-02 实测下载并定稿为第九期英文词典扩容数据源（770,611 词条，SHA-256 锁定，见 数据清单.md）。2026-09-28（M6）新增 D-007 至 D-015 九个外部源，均由 `data/pins/` 锁定并校验；D-016/D-017 为项目自有数据，随 git 版本管理。2026-09-29（M6-U）新增代码依赖登记一节，登记 `ed25519-dalek`（manifest 签名，BSD-3-Clause）。2026-10-02（T-064，第五期）新增 D-018 FrequencyWords 英文词频（英文词表构建基座）与 D-019（英文大小写补丁，项目自有）。
+现状：D-001 CC-CEDICT、D-004 FrequencyWords 中文词频与 D-006 OPUS GlobalVoices 已于 2026-09-21 引入数据管线，用于离线导入真实词库；原始文件与生成产物保存在 `data/` 且不进入 git，派生说明见 `docs/数据清单.md`。ECDICT（D-002，CC BY-SA 4.0）已于 2026-10-02 实测下载并定稿为第九期英文词典扩容数据源（770,611 词条，SHA-256 锁定，见 数据清单.md）。2026-09-28（M6）新增 D-007 至 D-015 九个外部源，均由 `data/pins/` 锁定并校验；D-016/D-017 为项目自有数据，随 git 版本管理。2026-09-29（M6-U）新增代码依赖登记一节，登记 `ed25519-dalek`（manifest 签名，BSD-3-Clause）。2026-10-02（T-064，第五期）新增 D-018 FrequencyWords 英文词频（英文词表构建基座）与 D-019（英文大小写补丁，项目自有）。2026-10-04（T-087，第九期）新增 D-020 social-media-chinese-words（MIT，网络语扩充源）与 D-021 清洗子集（项目自有，源 MIT 派生）。
 
 ## 数据源登记
 
@@ -27,6 +27,8 @@
 | D-017 | 把关负面清单与抽查样例 | 构建期内容把关 | 项目自有 | 2026-09-28 | 已引入（M6-P）：仅构建期输入，**不进任何发行物** |
 | D-018 | FrequencyWords 英文词频（en_full） | 英文词表构建基座（第五期 FR-030） | 内容 CC BY-SA 4.0；代码 MIT（与 D-004 同 repo 同许可） | 2026-10-02 | 已引入（T-064）：pins 锁定（data/pins/frequencywords-en.json）；派生 EN_WORDS 表须按 CC BY-SA 4.0 发布并署名，与 D-004 处理一致；清单见 [数据清单.md](./数据清单.md) |
 | D-019 | 英文大小写补丁表（en-capitals.tsv） | 英文词表大小写原形标注（D-09） | 项目自有 | 2026-10-02 | 已引入（T-064）：提交入库（data/patches/en-capitals.tsv），随版本维护；取舍原则见文件头部注释 |
+| D-020 | social-media-chinese-words（jilelab） | 网络语扩充源（第九期 FR-047/T-087，方案决策 D-52） | **MIT** | 2026-10-04（仓库 2021-05，107.78 万行，合并文件 15.4 MB，SHA-256 见 [数据清单.md](./数据清单.md) D-020） | 已引入（T-087）：7 分类 txt 由 `scripts/fetch-social-media.ps1` 下载合并，pins 锁定（data/pins/social-media-zh.json）；**派生 slang 词条按 MIT 随发行物分发**，产物头注释保留来源 |
+| D-021 | 网络语清洗子集（social-words.tsv） | slang 包词源（T-087） | 项目自有数据整理；源数据许可 MIT（D-020） | 2026-10-04 | 已引入（T-087）：`zhu-ye-dict social-clean` 确定性生成并提交入库，许可随源（MIT） |
 
 ## 代码依赖登记
 

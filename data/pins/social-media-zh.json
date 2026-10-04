@@ -1,0 +1,12 @@
+{
+  "id": "social-media-zh",
+  "name": "social-media-chinese-words（网络语扩充主源，T-087，D-52）",
+  "role": "slang-social-primary",
+  "kind": "url",
+  "url": "https://github.com/jilelab/social-media-chinese-words",
+  "cache_file": "social-media-chinese-words.txt",
+  "license": "MIT",
+  "license_note": "jilelab/social-media-chinese-words（MIT，最后推送 2021-05）：7 个分类 txt（动/美/生/时/数/音/影/娱）合并为单文件，每行「词 词频」，共 1,077,845 行；合并脚本 scripts/fetch-social-media.ps1 产出，SHA 锁定",
+  "sha256": "4D1B2E7E720E21B315E71A5993288EE9CF03E2455BDF4F8D9DB30EA60CB2AE2B",  "size": 15422853,
+  "fetched_at": "2026-10-04"
+}

@@ -39,7 +39,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn sha256_file(path: &Path) -> Result<String, String> {
+pub fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("读取 {} 失败: {error}", path.display()))?;
     Ok(sha256_hex(&bytes))
 }

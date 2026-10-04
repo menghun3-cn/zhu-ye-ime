@@ -288,6 +288,7 @@ pub struct SlangReport {
     pub blocklist_version: String,
     pub audit: GateAudit,
     pub seed_rows: usize,
+    pub social_rows: usize,
     pub word_entries: usize,
     pub abbreviation_entries: usize,
     pub gate_blocked: Vec<ExcludedSeed>,
@@ -326,7 +327,14 @@ pub fn build_slang(root: &Path) -> Result<SlangReport, String> {
         ));
     }
 
-    let seed = parse_seed(&read(SLANG_SEED)?)?;
+    let mut rows = parse_seed(&read(SLANG_SEED)?)?;
+    let seed_rows = rows.len();
+    let mut social_rows = 0usize;
+    if root.join(crate::social::SLANG_SOCIAL).exists() {
+        let social = parse_seed(&read(crate::social::SLANG_SOCIAL)?)?;
+        social_rows = social.len();
+        rows.extend(social);
+    }
     let cedict_text = read("data/raw/cedict_ts.u8")?;
     let ktghz_text = read(&format!("{CACHE_DIR}/kTGHZ2013.txt"))?;
     let tables = PinyinTables::from_texts(&cedict_text, &ktghz_text);
@@ -334,12 +342,13 @@ pub fn build_slang(root: &Path) -> Result<SlangReport, String> {
 
     let mut report = SlangReport {
         blocklist_version: gate.version.clone(),
-        seed_rows: seed.len(),
+        seed_rows,
+        social_rows,
         ..SlangReport::default()
     };
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
-    for row in &seed {
+    for row in &rows {
         let hit = gate.check_word(&row.word).or_else(|| {
             if row.abbreviation {
                 gate.check_key(&row.key)
