@@ -1,4 +1,4 @@
-﻿# check-site-structure.ps1
+# check-site-structure.ps1
 # Structural + content-vocabulary assertions for site/ (acceptance 15.1/15.3).
 #
 # Usage:
@@ -7,7 +7,7 @@
 # For every page (5 content pages + 404.html) asserts:
 #   title contains "竹叶输入法", non-empty description, favicon ref,
 #   exactly 5 nav links, a GitHub nav link, exactly one aria-current="page"
-#   (404.html: none), the four footer elements, and the shared M1-M13
+#   (404.html: none), the four footer elements, and the shared M1-M14
 #   version-status line. Then asserts the forbidden vocabulary is absent,
 #   planned-capability keywords appear only on the home page, AI entry files
 #   keep their structures (llms.txt v2, agents.txt S-18 four sections,
@@ -84,7 +84,7 @@ foreach ($p in $pages) {
             $fail++
         }
     }
-    if ($c -notmatch 'M1–M13 核心能力已实现（自动化验证通过）· 部分真实环境交互验收收尾中') {
+    if ($c -notmatch 'M1–M14 核心能力已实现（自动化验证通过）· 部分真实环境交互验收收尾中') {
         Write-Host "FAIL $name : version-status line out of date"
         $fail++
     }
