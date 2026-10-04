@@ -3,7 +3,7 @@
   "name": "ECDICT 全量词频词典 CSV（英文词表主基座，T-085）",
   "role": "en-wordlist-primary",
   "kind": "url",
-  "url": "https://raw.githubusercontent.com/skywind3000/ECDICT/master/ecdict-full.csv",
+  "url": "https://raw.githubusercontent.com/skywind3000/ECDICT/master/ecdict.csv",
   "cache_file": "ecdict-full.csv",
   "license": "CC BY-SA 4.0",
   "license_note": "Skywind 的 ECDICT 工程整体采用 CC BY-SA 4.0（含词库数据）；用于派生英文词表（D-002，T-085 扩容不再截断词频）",
