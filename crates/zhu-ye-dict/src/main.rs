@@ -14,10 +14,11 @@ use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
     audit_coverage, build_base, build_en_wordbook, build_manifest, build_pack, build_real_bigrams,
-    build_real_dictionary, build_slang, build_v2, dict_schema_version, generate_word_eval_set,
-    load_frequency_map, load_patch_table, load_standard_readings, parse_cedict_line,
-    pipeline_status, polyphone_gaps, render_eval_set, seed_bigrams, seed_entries, source_check,
-    split_pinyin_syllables, today, verify_manifest, EnWordbookInputs, EnWordbookStats,
+    build_real_dictionary, build_slang, build_v2, clean_social, dict_schema_version,
+    generate_word_eval_set, load_frequency_map, load_patch_table, load_standard_readings,
+    parse_cedict_line, pipeline_status, polyphone_gaps, render_eval_set, seed_bigrams,
+    seed_entries, source_check, split_pinyin_syllables, today, verify_manifest, EnWordbookInputs,
+    EnWordbookStats,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -64,6 +65,7 @@ fn run() -> Result<(), String> {
         }
         Some("en-inspect") => en_inspect_command(&required_path(&args, 2)?),
         Some("mixed-bench") => mixed_bench_command(args.get(2).map(String::as_str)),
+        Some("social-clean") => social_clean_command(),
         _ => {
             print_usage();
             Ok(())
@@ -114,6 +116,9 @@ fn print_usage() {
     println!("  en-bench <文件> [查询数]  英文词表加载与前缀查询性能实测（T-085，输出 指标: 行）");
     println!("  en-inspect <文件>    打印英文词表头部元数据与内容哈希（T-085）");
     println!("  mixed-bench [次数]  中英混合串解码性能实测（T-086，输出 指标: 行，验收 ≤1ms/次）");
+    println!(
+        "  social-clean        网络语扩充清洗：social 高频子集 1 万 → data/slang/social-words.tsv（T-087）"
+    );
 }
 
 /// 英文词表默认产物路径（T-085）。
@@ -332,6 +337,28 @@ fn mixed_bench_command(samples: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// `social-clean`：网络语扩充清洗（T-087）——先核对数据源 pin，再清洗并把高频
+/// 子集写入 `data/slang/social-words.tsv`（提交进仓库，供 build-slang 合并入包）。
+fn social_clean_command() -> Result<(), String> {
+    source_check(Path::new("."))?;
+    let report = clean_social(Path::new("."))?;
+    println!(
+        "网络语清洗（social-media-chinese-words）：输入 {} 行，形状过滤 {}，把关拦截 {}，种子重复 {}，同形去重 {}，输出 {} 条",
+        report.input_rows,
+        report.shape_rejected,
+        report.gate_blocked,
+        report.seed_duplicates,
+        report.deduplicated,
+        report.output_rows
+    );
+    println!(
+        "产物: data/slang/social-words.tsv（SHA-256 {}）",
+        report.output_sha256
+    );
+    println!("缓存 SHA-256: {}", report.cache_sha256);
+    Ok(())
+}
+
 /// `en-inspect`：打印英文词表头部元数据与内容哈希（T-085）。
 fn en_inspect_command(path: &Path) -> Result<(), String> {
     let lexicon = zhu_ye_core::en_lexicon::EnLexicon::open(path).map_err(|e| e.to_string())?;
@@ -392,8 +419,9 @@ fn build_slang_command() -> Result<(), String> {
         );
     }
     println!(
-        "网络语包（slang.zyct）构建完成：种子 {} 行，纯中文词 {}，缩写 {}，把关拦截 {}，排除 {}，词条 {}，大小 {} 字节",
+        "网络语包（slang.zyct）构建完成：种子 {} 行 + social 扩充 {} 行，纯中文词 {}，缩写 {}，把关拦截 {}，排除 {}，词条 {}，大小 {} 字节",
         report.seed_rows,
+        report.social_rows,
         report.word_entries,
         report.abbreviation_entries,
         report.gate_blocked.len(),

@@ -35,6 +35,9 @@ pub use m6::{
 pub mod slang;
 pub use slang::{build_slang, SlangReport};
 
+pub mod social;
+pub use social::{clean_social, SocialCleanReport, SLANG_SOCIAL};
+
 pub mod en_wordbook;
 pub use en_wordbook::{
     build_en_wordbook, EnWordbookInputs, EnWordbookStats, ECDICT_MAX_WORD_LEN, FREQ_WORDS_TOP,
