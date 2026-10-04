@@ -114,6 +114,13 @@ fn main() -> ExitCode {
             let optional = args.get(1).map(String::as_str);
             run_m12_checks(optional.map(Path::new))
         }
+        // 第十一期候选覆盖验收（FR-059，验收标准 16.1）：
+        // --m14 [<词典文件>]，内存词表断言具体展开行为；提供真实词典时追加
+        // 机制一致性复核（主组条数 <9 → 展开补足，否则零展开）。
+        Some("--m14") => {
+            let optional = args.get(1).map(String::as_str);
+            run_m14_checks(optional.map(Path::new))
+        }
         // M6-R 多包回归：--multi-pack <base.zyct> <pack1.zyct> [pack2.zyct ...]
         Some("--multi-pack") => {
             let paths: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
@@ -1213,7 +1220,6 @@ fn m10_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     Ok(())
 }
 
-/// 场景8 领域自动验收入口（命令 `--m11 <base.zyct> <it.zyct> [med.zyct ...]`）。
 /// 场景8 领域自动验收入口（命令 `--m11 [<词典文件>]`）。
 fn run_m11_checks(path: Option<&Path>) -> ExitCode {
     let mut runner = Runner {
@@ -1643,6 +1649,170 @@ fn m12_checks(path: Option<&Path>, runner: &mut Runner) -> Result<(), String> {
         }
     } else {
         println!("[SKIP] 未提供 vcf 文件，跳过真实导入链路复核");
+    }
+
+    Ok(())
+}
+
+/// 第十一期候选覆盖验收入口（命令 `--m14 [<词典文件>]`）。
+fn run_m14_checks(path: Option<&Path>) -> ExitCode {
+    let mut runner = Runner {
+        passed: 0,
+        failed: 0,
+    };
+    if let Err(error) = m14_checks(path, &mut runner) {
+        runner.fail("候选覆盖检查执行", &error);
+    }
+    runner.finish()
+}
+
+/// 第十一期候选覆盖断言组（FR-059，验收标准 16.1）。
+///
+/// 基础词表内存构造，全部可控确定：
+///
+/// - `shui → 说/睡/水`（主组 3 条 <9）+ 前缀更深组词 6 条（水稻/水果/水平/
+///   睡觉/水面/水灾）→ 首屏补足到 9 条、展开组 `PrefixExpand` 独立组在主组之后
+///   （16.1-1 低频音节首屏补足 + 排序）；
+/// - `de → 的×9`（整词命中 ≥9）→ 零展开（D-70 常见拼音逐位不变）；
+/// - `shuip`（不完整拼音）→ 走既有前缀补全路径（FR-023 互斥，展开组不出现）；
+/// - `shui` 首屏无重复文本（去重链：主组优先 + 展开组内部去重）。
+///
+/// 提供真实词典文件时，追加机制一致性复核：主组条数 <9 → 出现展开组且条数
+/// ≤ 9−主组；主组 ≥9 → 零展开（真实数据上验证触发口径，不写死具体词频）。
+fn m14_checks(path: Option<&Path>, runner: &mut Runner) -> Result<(), String> {
+    let base: Arc<dyn Dictionary> = Arc::new(InMemoryDictionary::from_entries(vec![
+        DictionaryEntry::new("说", "shui", 413852),
+        DictionaryEntry::new("睡", "shui", 80000),
+        DictionaryEntry::new("水", "shui", 60000),
+        DictionaryEntry::new("水稻", "shuidao", 120000),
+        DictionaryEntry::new("水果", "shuiguo", 90000),
+        DictionaryEntry::new("水平", "shuiping", 85000),
+        DictionaryEntry::new("睡觉", "shuijiao", 70000),
+        DictionaryEntry::new("水面", "shuimian", 65000),
+        DictionaryEntry::new("水灾", "shuizai", 64000),
+        DictionaryEntry::new("的", "de", 5000),
+        DictionaryEntry::new("得", "de", 4900),
+        DictionaryEntry::new("地", "de", 4800),
+        DictionaryEntry::new("德", "de", 4700),
+        DictionaryEntry::new("灯", "de", 4600),
+        DictionaryEntry::new("等", "de", 4500),
+        DictionaryEntry::new("低", "de", 4400),
+        DictionaryEntry::new("滴", "de", 4300),
+        DictionaryEntry::new("底", "de", 4200),
+        DictionaryEntry::new("笛", "de", 4100),
+    ]));
+
+    let mut engine = InputEngine::with_bigram(base.clone(), Arc::new(InMemoryBigramModel::new()));
+    engine.handle_escape();
+
+    let snapshot = |engine: &mut InputEngine| {
+        engine
+            .candidates()
+            .iter()
+            .filter(|c| c.source != CandidateSource::Emoji)
+            .map(|c| (c.text.clone(), c.source.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    // ---- 16.1-1：低频音节首屏补足到一页（D-70/D-71）----
+    type_text(&mut engine, "shui");
+    let cands = snapshot(&mut engine);
+    let texts: Vec<&str> = cands.iter().map(|(text, _)| text.as_str()).collect();
+    let expected = [
+        "说", "睡", "水", "水稻", "水果", "水平", "睡觉", "水面", "水灾",
+    ];
+    if texts == expected {
+        runner.pass("低频音节首屏补足到 9 条（16.1-1 展开）");
+    } else {
+        runner.fail(
+            "低频音节首屏补足到 9 条（16.1-1 展开）",
+            &format!("实际: {texts:?}，期望: {expected:?}"),
+        );
+    }
+    let expand_sources_ok = cands[3..]
+        .iter()
+        .all(|(_, source)| *source == CandidateSource::PrefixExpand);
+    if expand_sources_ok {
+        runner.pass("展开组独立来源标注 PrefixExpand（16.1-1 来源）");
+    } else {
+        runner.fail(
+            "展开组独立来源标注 PrefixExpand（16.1-1 来源）",
+            &format!("候选: {cands:?}"),
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    if texts.iter().all(|t| seen.insert(*t)) {
+        runner.pass("展开后候选无重复文本（16.1-1 去重）");
+    } else {
+        runner.fail("展开后候选无重复文本（16.1-1 去重）", &format!("{texts:?}"));
+    }
+
+    // ---- 16.1-2：常见拼音候选已满一页不展开（D-70）----
+    engine.handle_escape();
+    type_text(&mut engine, "de");
+    let de_cands = snapshot(&mut engine);
+    let de_no_expand = de_cands
+        .iter()
+        .all(|(_, source)| *source != CandidateSource::PrefixExpand);
+    if de_no_expand && de_cands.len() == 10 {
+        runner.pass("常见拼音候选已满一页不展开（16.1-2）");
+    } else {
+        runner.fail(
+            "常见拼音候选已满一页不展开（16.1-2）",
+            &format!("de 候选: {de_cands:?}"),
+        );
+    }
+
+    // ---- 16.1-3：不完整拼音与既有前缀补全互斥----
+    engine.handle_escape();
+    type_text(&mut engine, "shuip");
+    let shuip_cands = snapshot(&mut engine);
+    let no_expand = shuip_cands
+        .iter()
+        .all(|(_, source)| *source != CandidateSource::PrefixExpand);
+    let has_level = shuip_cands.iter().any(|(text, _)| text == "水平");
+    if no_expand && has_level {
+        runner.pass("不完整拼音仍走前缀补全（16.1-3 互斥）");
+    } else {
+        runner.fail(
+            "不完整拼音仍走前缀补全（16.1-3 互斥）",
+            &format!("shuip 候选: {shuip_cands:?}"),
+        );
+    }
+
+    // ---- 真实词典机制一致性复核（提供文件时）----
+    if let Some(real) = path {
+        let file = DictionaryFile::open(real)
+            .map_err(|error| format!("打开真实词典 {real:?} 失败: {error}"))?;
+        let real_dict: Arc<dyn Dictionary> = Arc::new(file.clone());
+        let mut real_eng = InputEngine::with_bigram(real_dict.clone(), Arc::new(file.clone()));
+        real_eng.handle_escape();
+        type_text(&mut real_eng, "shui");
+        let real_cands = snapshot(&mut real_eng);
+        let main_count = real_dict.lookup("shui").len();
+        let expand_count = real_cands
+            .iter()
+            .filter(|(_, source)| *source == CandidateSource::PrefixExpand)
+            .count();
+        let consistent = if main_count < 9 {
+            expand_count > 0 && expand_count <= 9 - main_count
+        } else {
+            expand_count == 0
+        };
+        if consistent {
+            runner.pass(&format!(
+                "真实词典机制一致性（shui 主组 {main_count} 条 → 展开 {expand_count} 条）"
+            ));
+        } else {
+            runner.fail(
+                "真实词典机制一致性（shui 主组 <9 有展开、≥9 零展开）",
+                &format!(
+                    "main_count={main_count} expand_count={expand_count} 候选: {real_cands:?}"
+                ),
+            );
+        }
+    } else {
+        println!("[SKIP] 未提供真实词典文件，跳过机制一致性复核");
     }
 
     Ok(())

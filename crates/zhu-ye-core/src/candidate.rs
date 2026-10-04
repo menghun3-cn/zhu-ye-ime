@@ -44,6 +44,9 @@ pub enum CandidateSource {
     /// 混合串整句/分段候选（FR-050，T-086，场景6）；`python代码` 类输入置首
     /// 整句 + 分段候选，UI 不新增标签。
     Mixed,
+    /// 前缀组词展开候选（FR-059，T-090）；完整拼音整词命中不足一页时按拼音前缀
+    /// 补足更深组词（D-70/D-71），独立追加组不参与主排序，UI 不新增标签。
+    PrefixExpand,
 }
 
 /// 输入法候选。
@@ -166,6 +169,43 @@ pub fn merge_candidate_groups(
         }
     }
     merged
+}
+
+/// 前缀组词展开（FR-059，T-090）：完整拼音整词命中不足一页时，按拼音前缀把
+/// 更深的组词补足候选（D-70 候选不足一页才展开、D-71 独立追加组按词频取前 N）。
+///
+/// 触发条件（完整音节串且有整词命中）由调用方（引擎）判定并给出 `fill`；本函数只做
+/// "展开"本身：
+/// 1. `fill == 0` 或空拼音 → 返回空（不展开）；
+/// 2. `lookup_prefix(pinyin)` 取拼音以输入串开头的词条（自然含 `shui` 更深音节组词），
+///    `candidate_from_entry` 转候选并标注 `PrefixExpand` 来源；
+/// 3. 与 `already`（整词命中组）同文本剔除，展开组内部同文本只保留第一个；
+/// 4. 组内按词频降序、同频文本升序（与 `CandidateSorter` 全序一致）后截断到 `fill` 条。
+///
+/// 展开组**不参与主候选排序**，由调用方追加到整词命中组之后；任何失败返回空，不 panic。
+#[must_use]
+pub fn prefix_expand_candidates(
+    dictionary: &dyn Dictionary,
+    pinyin: &str,
+    fill: usize,
+    already: &[Candidate],
+) -> Vec<Candidate> {
+    if fill == 0 || pinyin.is_empty() {
+        return Vec::new();
+    }
+    let mut seen: std::collections::HashSet<String> = already
+        .iter()
+        .map(|candidate| candidate.text.clone())
+        .collect();
+    let mut collected: Vec<Candidate> = dictionary
+        .lookup_prefix(pinyin)
+        .into_iter()
+        .map(|entry| candidate_from_entry(&entry).with_source(CandidateSource::PrefixExpand))
+        .filter(|candidate| seen.insert(candidate.text.clone()))
+        .collect();
+    collected.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.text.cmp(&b.text)));
+    collected.truncate(fill);
+    collected
 }
 
 /// 根据拼音串生成候选：整词优先，无整词时按音节切分组合，最后合并去重并确定性排序。
@@ -792,8 +832,9 @@ mod tests {
     use crate::candidate::{
         abbreviation_candidates, append_abbreviation_group, corrected_candidates,
         generate_candidates, generate_prefix_candidates, initial_candidates, is_abbreviation_input,
-        merge_candidate_groups, sentence_candidates, Candidate, CandidateSorter, CandidateSource,
-        RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+        merge_candidate_groups, prefix_expand_candidates, sentence_candidates, Candidate,
+        CandidateSorter, CandidateSource, RankingConfig, RankingContext, RankingModel,
+        StaticRankingModel,
     };
     use crate::dict::{DictionaryEntry, InMemoryDictionary};
     use crate::pinyin::SyllableTable;
@@ -1169,6 +1210,99 @@ mod tests {
         );
         let texts: Vec<&str> = merged.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["你好", "泥"]);
+    }
+
+    // ---- 前缀组词展开（FR-059，T-090，第十一期）----
+
+    fn shui_expand_dictionary() -> InMemoryDictionary {
+        InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("说", "shui", 413852),
+            DictionaryEntry::new("谁", "shui", 127180),
+            DictionaryEntry::new("睡", "shui", 80000),
+            DictionaryEntry::new("水果", "shuiguo", 90000),
+            DictionaryEntry::new("水平", "shuiping", 85000),
+            DictionaryEntry::new("睡觉", "shuijiao", 70000),
+            DictionaryEntry::new("水稻", "shuidao", 120000),
+            // 拼音前缀更长的无关词不命中：
+            DictionaryEntry::new("说明", "shuoming", 200000),
+        ])
+    }
+
+    #[test]
+    fn 前缀组词展开取更深组词并标注来源() {
+        let dictionary = shui_expand_dictionary();
+        // already 模拟真实主组：全部单音节整词命中（说/谁/睡）。
+        let already = vec![
+            Candidate::new("说", 413852),
+            Candidate::new("谁", 127180),
+            Candidate::new("睡", 80000),
+        ];
+        let expanded = prefix_expand_candidates(&dictionary, "shui", 4, &already);
+        let texts: Vec<&str> = expanded.iter().map(|c| c.text.as_str()).collect();
+        // 词频降序：水稻(120000) > 水果(90000) > 水平(85000) > 睡觉(70000)。
+        assert_eq!(texts, vec!["水稻", "水果", "水平", "睡觉"]);
+        assert!(expanded
+            .iter()
+            .all(|c| c.source == CandidateSource::PrefixExpand));
+        // 拼音以 shui 开头的单音节命中已被 already（整词命中组）剔除，
+        // 更窄前缀的 shuoming 不命中。
+    }
+
+    #[test]
+    fn 前缀组词展开与整词命中同文本剔除() {
+        let dictionary = shui_expand_dictionary();
+        let already: Vec<Candidate> = vec![
+            Candidate::new("说", 413852),
+            Candidate::new("水果", 90000).with_source(CandidateSource::PrefixExpand),
+        ];
+        let expanded = prefix_expand_candidates(&dictionary, "shui", 8, &already);
+        assert!(!expanded.iter().any(|c| c.text == "水果"));
+        // 其余更深组词与未覆盖的单音节命中仍按词频展开（说 已剔除；谁/睡 未被 already 覆盖）。
+        let texts: Vec<&str> = expanded.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["谁", "水稻", "水平", "睡", "睡觉"]);
+    }
+
+    #[test]
+    fn 前缀组词展开截断到填充上限() {
+        let dictionary = shui_expand_dictionary();
+        let already = vec![
+            Candidate::new("说", 413852),
+            Candidate::new("谁", 127180),
+            Candidate::new("睡", 80000),
+        ];
+        let expanded = prefix_expand_candidates(&dictionary, "shui", 2, &already);
+        let texts: Vec<&str> = expanded.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["水稻", "水果"]);
+        // fill 大于可用量时给出全部（不满一页是允许的）。
+        let expanded = prefix_expand_candidates(&dictionary, "shui", 8, &already);
+        assert_eq!(expanded.len(), 4);
+    }
+
+    #[test]
+    fn 前缀组词展开空输入或零填充为空() {
+        let dictionary = shui_expand_dictionary();
+        assert!(prefix_expand_candidates(&dictionary, "shui", 0, &[]).is_empty());
+        assert!(prefix_expand_candidates(&dictionary, "", 4, &[]).is_empty());
+        // 无前缀命中的拼音 → 空。
+        let empty_dict = InMemoryDictionary::default();
+        assert!(prefix_expand_candidates(&empty_dict, "shui", 4, &[]).is_empty());
+    }
+
+    #[test]
+    fn 前缀组词展开内部同文本去重且确定性() {
+        // 词典含同词形两条（词频不同）：展开组内只保留第一条（按文本去重语义）。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("水平", "shuiping", 85000),
+            DictionaryEntry::new("水平", "shuiping", 100),
+            DictionaryEntry::new("睡觉", "shuijiao", 70000),
+        ]);
+        let expanded = prefix_expand_candidates(&dictionary, "shui", 8, &[]);
+        let texts: Vec<&str> = expanded.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["水平", "睡觉"]);
+        assert_eq!(
+            expanded,
+            prefix_expand_candidates(&dictionary, "shui", 8, &[])
+        );
     }
 
     // ---- 输入体验优化（M7，FR-023 至 FR-025）----
