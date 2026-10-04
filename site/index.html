@@ -77,6 +77,11 @@
         <p>全拼输入之外，支持简拼/首字母、模糊音纠错、整句候选，全部本机计算，零联网。</p>
       </div>
       <div class="feature">
+        <h3>中英混排</h3>
+        <p>英文词库全量离线内置（约 76 万词条）；输入 <code>python代码</code> 这类中英混合串按
+        整句出候选；英文拼写、邮箱与网址补全都在本机完成。</p>
+      </div>
+      <div class="feature">
         <h3>默认全离线</h3>
         <p>拼音、词库、排序、学习、释义默认都不联网；用户词与个人上下文只写入本地文件。</p>
       </div>
@@ -86,12 +91,17 @@
       </div>
       <div class="feature">
         <h3>词典包体系</h3>
-        <p>基础包约 38 万词条随安装预置；<code>it</code>/<code>med</code>/<code>slang</code> 领域包
-        与网络语缩写可选启用，在线更新走签名信任链。</p>
+        <p>基础包约 38 万词条随安装预置；<code>it</code>/<code>med</code>/<code>slang</code>
+        领域包可选启用（slang 含 9,900 条网络语与缩写），在线更新走签名信任链。</p>
       </div>
       <div class="feature">
         <h3>越用越准</h3>
         <p>词频 + 上下文 bigram 排序与用户词学习；命中率评测基准 Top1 84.7% / Top3 97.2%。</p>
+      </div>
+      <div class="feature">
+        <h3>设置窗口增强</h3>
+        <p>用户词表导入导出、符号集扩充（230 个）、自定义主题、启动时检查更新（默认关）、
+        通讯录 vcf 导入。</p>
       </div>
     </div>
   </section>
@@ -114,10 +124,6 @@
     <h2 id="roadmap-h">路线图 <span class="tag">规划中</span></h2>
     <p class="note-line">以下条目需求已定稿、尚未实现，不与上方"已实现能力"混淆：</p>
     <ul>
-      <li><div class="item"><b>英文词典全面扩容</b>（ECDICT 全量词库，不截断）</div><span class="tag">规划中</span></li>
-      <li><div class="item"><b>网络语词典扩充</b>（social 高频子集，与缩写注解体系配套）</div><span class="tag">规划中</span></li>
-      <li><div class="item"><b>设置窗口增强闭环</b>（检查更新、安装包管理、导入等五项）</div><span class="tag">规划中</span></li>
-      <li><div class="item"><b>中英混合整句解码</b>（如 <code>python代码</code> 整体候选）</div><span class="tag">规划中</span></li>
       <li><div class="item"><b>正式版发布与在线更新源开通</b></div><span class="tag">流程收尾中</span></li>
       <li><div class="item"><b>英文官网</b></div><span class="tag">规划中</span></li>
     </ul>
@@ -148,7 +154,7 @@
         <li><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">Releases</a></li>
       </ul>
     </nav>
-    <div class="footer-status">Windows 内测版 · M1–M12 核心能力已实现（自动化验证通过）· 格式候选与设置窗口的真实环境交互验收收尾中</div>
+    <div class="footer-status">Windows 内测版 · M1–M13 核心能力已实现（自动化验证通过）· 部分真实环境交互验收收尾中</div>
     <div class="footer-copy">© 2026 竹叶输入法 · 代码 MIT · 词典数据来源与许可证见仓库 docs/licenses.md · <a href="./llms.txt">llms.txt（AI 阅读版）</a></div>
   </div>
 </footer>
