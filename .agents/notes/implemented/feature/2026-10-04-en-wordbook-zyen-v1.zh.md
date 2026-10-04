@@ -2,7 +2,7 @@
 
 Status: implemented
 
-[English](2026-10-16-en-wordbook-zyen-v1.md) | 中文
+[English](2026-10-04-en-wordbook-zyen-v1.md) | 中文
 
 ## Problem
 
@@ -62,7 +62,7 @@ SHA-256 锁定）：
 查询中位 >500µs 或产物 >20MB 即失败退出。`package-portable.ps1` / `install.ps1` 将
 `bin/en.zyen` 复制到 DLL 同目录；文件缺失退化为静态表回退而非安装失败。
 
-**实测（2026-10-16，release 构建）**：加载+校验 28.08ms；20 万次查询中位 43.2µs、
+**实测（2026-10-04，release 构建）**：加载+校验 28.08ms；20 万次查询中位 43.2µs、
 P99 2.2ms；产物 19,462,460B；校验和稳定。
 
 ## Alternatives considered

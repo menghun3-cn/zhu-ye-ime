@@ -2,7 +2,7 @@
 
 Status: implemented
 
-[中文](2026-10-16-en-wordbook-zyen-v1.zh.md) | English
+[中文](2026-10-04-en-wordbook-zyen-v1.zh.md) | English
 
 ## Problem
 
@@ -80,7 +80,7 @@ artifact > 20 MB. `package-portable.ps1` / `install.ps1` copy `bin/en.zyen` next
 the DLL; a missing file degrades to the static-table fallback instead of failing
 installation.
 
-**Measured (2026-10-16, release build)**: load+verify 28.08 ms; 200,000-query
+**Measured (2026-10-04, release build)**: load+verify 28.08 ms; 200,000-query
 benchmark median 43.2 µs, P99 2.2 ms; artifact 19,462,460 B; checksum stable.
 
 ## Alternatives considered

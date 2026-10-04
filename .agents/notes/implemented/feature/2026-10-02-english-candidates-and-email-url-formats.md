@@ -17,7 +17,7 @@ guards `yyds`.
 ## Decision
 
 Since T-085 (M13) the primary English word source is the ECDICT-backed wordbook
-file `en.zyen` ([en wordbook file ZYEN v1](../../implemented/feature/2026-10-16-en-wordbook-zyen-v1.md));
+file `en.zyen` ([en wordbook file ZYEN v1](../../implemented/feature/2026-10-04-en-wordbook-zyen-v1.md));
 the table described below remains as the compiled-in fallback used when the file is
 missing or fails to load, under the same public semantics (`sort-by-rank →
 truncate`, candidates after the main list, `pinyin = None`). The English word table
