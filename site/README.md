@@ -102,9 +102,27 @@ site/
 
 仓库已含 `.github/workflows/pages.yml`（将 `site/` 发布为 Pages 制品）。启用步骤：
 
-1. GitHub 仓库 → Settings → Pages → Source 选择 **GitHub Actions**。
-2. 推送 `site/` 相关改动到 `main`（或手动触发 workflow_dispatch）后，Pages 自动部署。
-3. 上线前检查（验收标准 15.4）：`check-site-links.ps1` 全绿、内容核对表全过、版本状态行与
+1. 首次启用（仓库从未建过 Pages 站点）：Settings → Pages → Source 选择
+   **GitHub Actions**，或以命令创建并选用 Actions 模式：
+
+   ```powershell
+   gh api -X POST repos/<owner>/<repo>/pages -f build_type=workflow
+   # 若 REST 报 404 Not Found，即 Pages 未启用，先执行上一条再重试
+   ```
+
+2. **环境保护分支策略**：POST 建站会自动生成 `github-pages` 环境，其部署分支
+   策略**默认只允许 develop**——`pages.yml` 从 `main` 部署会被 2 秒内拒绝
+   （workflow completed|failure 且 job 无任何 step、日志缺失）。把 `main`
+   加入环境允许分支（Settings → Environments → github-pages → Deployment
+   branches → 添加 `main`），或：
+
+   ```powershell
+   gh api -X POST repos/<owner>/<repo>/environments/github-pages/deployment-branch-policies -f name=main -f type=branch
+   ```
+
+3. 推送 `site/` 相关改动到 `main`（或 `gh workflow run pages.yml --ref main`
+   手动触发）后，Pages 自动部署。
+4. 上线前检查（验收标准 15.4）：`check-site-links.ps1` 全绿、内容核对表全过、版本状态行与
    当前发布口径一致。
 
 之后如需自定义域名：在仓库 Settings → Pages 配置并同步 CNAME 文件；**同时更新
