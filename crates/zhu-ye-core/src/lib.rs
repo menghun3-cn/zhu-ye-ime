@@ -28,6 +28,7 @@ pub mod manifest;
 pub mod mixed;
 pub mod pack_config;
 pub mod pinyin;
+pub mod spoken;
 pub mod suggestion;
 pub mod symbols;
 pub mod theme_file;
@@ -84,6 +85,7 @@ pub use pinyin::{
     fuzzy_variants, initial_syllables, segment_all, valid_prefix, FullPinyinScheme, PinyinScheme,
     SyllableTable,
 };
+pub use spoken::{spoken_overrides, SPOKEN_SUGGESTIONS};
 pub use suggestion::{
     suggest_phrases, suggest_words, suggestion_candidates, SUGGESTION_CAP, SUGGESTION_PHRASE_CAP,
     SUGGESTION_WORD_CAP,
