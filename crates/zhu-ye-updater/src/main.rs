@@ -26,9 +26,12 @@ use zhu_ye_core::pack_config::{load_config, plan_packs, ConfigFile, PACKS_DIR_NA
 use zhu_ye_core::update::{apply_release, find_outdated};
 use zhu_ye_core::UpdateStatus;
 
-/// 发布清单默认 URL；可用 `ZHU_YE_MANIFEST_URL` 覆盖（测试与私有渠道）。
+/// 发布清单默认 URL（T-098：镜像分发仓库 menghun3-cn/zhu-ye-updates；
+/// 该仓库 feed release 不带 prerelease 标记 → `releases/latest` 语义可用，
+/// 绕开主仓库 latest 拒绝 prerelease 的缺陷（T-096 文档 §21.1）。
+/// 可用 `ZHU_YE_MANIFEST_URL` 覆盖（测试与私有渠道）。
 const DEFAULT_MANIFEST_URL: &str =
-    "https://github.com/menghun3-cn/zhu-ye-ime/releases/latest/download/manifest.json";
+    "https://github.com/menghun3-cn/zhu-ye-updates/releases/latest/download/manifest.json";
 
 /// 内置发布公钥（十六进制）。发布私钥只在发布环境，绝不入库。
 ///

@@ -18,7 +18,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -187,6 +186,31 @@ struct EngineState {
     lang_bar: Option<LangBarHandle>,
 }
 
+/// T-046：跨线程共享的引擎状态（语言栏点击切换模式需要）。
+///
+/// `unsafe impl Send/Sync` 的安全论证：
+/// 1. **锁内访问**：`EngineState` 的全部非 `Send` 字段（COM 接口、
+///    候选窗裸指针）只在本锁持有期内被访问，`Mutex` 提供互斥——
+///    跨线程移动的只是锁拥有者，不是锁内数据的所有权；
+/// 2. **Drop 线程**：最后一个强引用只在文本服务键盘/激活线程释放
+///    （语言栏 `OnClick` 仅经 `upgrade` 产生临时强引用；按钮存活期间
+///    `self.state` 必有常驻强引用），与 Rc 时代的销毁线程一致，
+///    候选窗 `Drop` 中的 `DestroyWindow` 不会跨线程执行；
+/// 3. **COM 释放**：`IUnknown::Release` 线程无关，可在任意线程调用。
+struct SharedEngine(Mutex<EngineState>);
+
+impl SharedEngine {
+    /// 与 `Mutex::lock` 完全同语义（返回 `LockResult`，调用方沿用
+    /// `state.lock().unwrap()` / `.ok()?` 惯例）。
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, EngineState>> {
+        self.0.lock()
+    }
+}
+
+// 安全论证见类型注释：非 Send 字段全部锁内访问 + Drop/COM 释放线程无关。
+unsafe impl Send for SharedEngine {}
+unsafe impl Sync for SharedEngine {}
+
 /// 从配置解析候选窗主题偏好（FR-041，第八期设置窗口写入）。
 ///
 /// `Light` 映射为 `Auto`：保留 T-030 的"候选窗默认固定浅色、高对比度仍走系统配色"路径；
@@ -315,11 +339,11 @@ impl IClassFactory_Impl for ClassFactory_Impl {
 
 #[implement(ITfTextInputProcessorEx, ITfKeyEventSink, ITfCompositionSink)]
 struct TextService {
-    state: Rc<Mutex<EngineState>>,
+    state: Arc<SharedEngine>,
 }
 
 impl TextService {
-    fn state(&self) -> &Rc<Mutex<EngineState>> {
+    fn state(&self) -> &Arc<SharedEngine> {
         &self.state
     }
 }
@@ -363,7 +387,18 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
                 );
                 // T-046：注册语言栏中英模式图标。语言栏/ctfmon 不可用时
                 // 不阻断激活（图标属增强反馈，缺了不影响输入闭环）。
-                match LangBarHandle::register(&thread_mgr, state.engine.mode()) {
+                // 左键点击切换：注入只捕获状态弱引用的处理器——ctfmon 可能
+                // 经任意 RPC 线程回调 OnClick，切换在引擎锁内完成、图标通知
+                // 由处理器返回值触发（与 sync_engine::ToggleMode 同语义：
+                // 组合内容在切换时保留）。
+                let state_weak = Arc::downgrade(&self.state.clone());
+                let click_handler = Box::new(move || {
+                    let state = state_weak.upgrade()?;
+                    let mut guard = state.lock().ok()?;
+                    guard.engine.toggle_mode();
+                    Some(guard.engine.mode())
+                });
+                match LangBarHandle::register(&thread_mgr, state.engine.mode(), click_handler) {
                     Ok(handle) => {
                         state.lang_bar = Some(handle);
                         product_log(zhu_ye_core::LogLevel::Info, "zhu-ye: langbar added");
@@ -488,7 +523,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
 
         let tid = state_lock(self).tid;
         let sink = self.to_object().to_interface::<ITfCompositionSink>();
-        let state = Rc::clone(self.state());
+        let state = Arc::clone(self.state());
         let session_context = context.clone();
         let session: ITfEditSession = EditSession {
             callback: Mutex::new(Some(Box::new(move |ec| {
@@ -640,7 +675,7 @@ fn plan_action(
     lparam: LPARAM,
     modifier_held: bool,
     shift_held: bool,
-    state: &Rc<Mutex<EngineState>>,
+    state: &Arc<SharedEngine>,
 ) -> Option<KeyAction> {
     if modifier_held {
         return None;
@@ -659,8 +694,9 @@ fn plan_action(
 
     match action {
         KeyAction::Letter(c) if engine.v_active() => {
-            // FR-028：类型码（x/h）出对应符号组，其余字母（含 `v`/`i`）回退拼音。
-            if matches!(c, 'x' | 'h') {
+            // FR-028 + T-104：符号类型码（x/h）与单位键前缀字母进 v 模式
+            // （`vmi` 单位换算码），其余字母（含 `v`/`i`）回退拼音。
+            if engine.v_accepts(c) {
                 Some(KeyAction::VCode(c))
             } else {
                 Some(KeyAction::VConsume(c))
@@ -809,7 +845,7 @@ fn should_compose_digit(engine: &InputEngine, digit: char) -> bool {
 
 /// 应用一次输入动作：先写 TSF 组合/提交文本，再同步引擎状态。
 fn apply_action(
-    state: &Rc<Mutex<EngineState>>,
+    state: &Arc<SharedEngine>,
     context: &ITfContext,
     sink: &ITfCompositionSink,
     ec: u32,
@@ -919,7 +955,7 @@ fn replace_last_chars(context: &ITfContext, ec: u32, replace_len: usize, text: &
 }
 
 /// 计算下一次组合串文本；不修改引擎，真实状态在 TSF 写入完成后同步。
-fn compose_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
+fn compose_text(state: &Arc<SharedEngine>, action: KeyAction) -> String {
     let text = {
         let engine = &mut state.lock().unwrap().engine;
         match action {
@@ -939,7 +975,7 @@ fn compose_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
 }
 
 /// 计算本次提交文本；清空引擎状态交给 TSF 写入完成后的 `sync_engine`。
-fn commit_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
+fn commit_text(state: &Arc<SharedEngine>, action: KeyAction) -> String {
     let text = {
         let engine = &mut state.lock().unwrap().engine;
         match action {
@@ -960,7 +996,7 @@ fn commit_text(state: &Rc<Mutex<EngineState>>, action: KeyAction) -> String {
 }
 
 /// 将引擎状态推进到动作后的实际状态。
-fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
+fn sync_engine(state: &Arc<SharedEngine>, action: KeyAction) {
     // T-046：模式切换额外需要把新模式同步到语言栏图标。语言栏接口
     // 与引擎状态分属不同锁域，切换动作在锁内完成、通知在锁外发送，
     // 避免在 ctfmon 回调线程上持锁等待语言栏。
@@ -1056,7 +1092,7 @@ fn sync_engine(state: &Rc<Mutex<EngineState>>, action: KeyAction) {
 /// T-031：组合串非空即显示候选窗；无候选词时只画页眉条（组合串与拼音提示）。
 /// T-059：上屏联想态（组合串为空但联想 items 非空）也显示候选窗，定位在
 /// 文档插入点（selection 顶部）；仅当组合串为空且无任何候选时才隐藏窗口。
-fn refresh_candidate_window(state: &Rc<Mutex<EngineState>>, edit: Option<(&ITfContext, u32)>) {
+fn refresh_candidate_window(state: &Arc<SharedEngine>, edit: Option<(&ITfContext, u32)>) {
     let view = state.lock().unwrap().engine.candidate_ui_view();
     if view.composition.is_empty() && view.items.is_empty() {
         if should_log(zhu_ye_core::LogLevel::Debug) {
@@ -1086,7 +1122,7 @@ fn refresh_candidate_window(state: &Rc<Mutex<EngineState>>, edit: Option<(&ITfCo
 
 /// 编辑会话内取组合范围在屏幕上的底部坐标，用于候选窗定位。
 fn composition_placement(
-    state: &Rc<Mutex<EngineState>>,
+    state: &Arc<SharedEngine>,
     context: &ITfContext,
     ec: u32,
 ) -> Option<CandidateWindowPlacement> {
@@ -1133,7 +1169,7 @@ fn selection_placement(context: &ITfContext, ec: u32) -> Option<CandidateWindowP
 
 /// 更新组合文本：已有组合直接替换，否则插入文本并启动新组合。
 fn update_composition(
-    state: &Rc<Mutex<EngineState>>,
+    state: &Arc<SharedEngine>,
     context: &ITfContext,
     sink: &ITfCompositionSink,
     ec: u32,
@@ -1201,7 +1237,7 @@ fn update_composition(
 
 /// 结束组合并提交文本；空文本按取消处理，若原本没有组合则直接插入提交文本。
 fn finish_composition(
-    state: &Rc<Mutex<EngineState>>,
+    state: &Arc<SharedEngine>,
     context: &ITfContext,
     ec: u32,
     text: &str,
@@ -1501,6 +1537,9 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
         None => InputEngine::with_bigram(dictionary, bigram),
     };
     let engine = domain_engine(engine, &plan, config.enable_domain_boost);
+    // O-05 修订（T-103）：简拼与模糊音可配置关闭；默认开（ConfigFile 缺省 true）。
+    let engine = engine.with_abbreviation(config.enable_abbreviation);
+    let engine = engine.with_fuzzy(config.enable_fuzzy);
     let engine = contact_engine(engine, &config);
     let engine = if let Some(lexicon) = en_lexicon {
         engine.with_en_lexicon(lexicon)
@@ -1802,10 +1841,10 @@ fn create_class_factory(user_store: Option<UserDictStore>) -> IClassFactory {
 fn create_text_service(user_store: Option<UserDictStore>) -> IUnknown {
     object_created();
     TextService {
-        state: Rc::new(Mutex::new(EngineState::with_start_mode(
+        state: Arc::new(SharedEngine(Mutex::new(EngineState::with_start_mode(
             user_store,
             configured_default_mode(),
-        ))),
+        )))),
     }
     .into()
 }
@@ -1907,6 +1946,30 @@ mod tests {
     /// 生命周期计数是全局状态；测试并行运行时互斥，避免相互干扰。
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// T-046：共享引擎状态必须可跨线程迁移——语言栏/ctfmon 可能经任意
+    /// RPC 线程回调 `OnClick` 进入 `Arc<SharedEngine>` 切换模式。
+    #[test]
+    fn 引擎共享状态可跨线程迁移() {
+        fn assert_send<T: Send + Sync>() {}
+        assert_send::<SharedEngine>();
+    }
+
+    /// T-046：模式切换处理器闭包（Weak<…> 捕获）必须可跨线程。
+    #[test]
+    fn 语言栏点击处理器可跨线程() {
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
+        let weak = Arc::downgrade(&state);
+        let handler = move || {
+            let state = weak.upgrade()?;
+            let mut guard = state.lock().ok()?;
+            guard.engine.toggle_mode();
+            Some(guard.engine.mode())
+        };
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Box<dyn Fn() -> Option<crate::input::InputMode> + Send + Sync>>();
+        let _ = handler;
+    }
+
     #[test]
     fn 类工厂可创建文本服务() {
         let _guard = TEST_LOCK.lock().unwrap();
@@ -1986,7 +2049,7 @@ mod tests {
 
     #[test]
     fn 未激活组合时功能键放行字母进入引擎() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         assert_eq!(
             plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::Letter('a'))
@@ -2031,7 +2094,7 @@ mod tests {
     /// 空闲态数字进入数字格式模式（BufferDigit 边输边上屏，替代放行直出）。
     #[test]
     fn 数字键非缩写前缀时保持选词与直出语义() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         // 空组合、无候选：进入数字格式模式（FR-027，引擎替代宿主直出数字）。
         assert_eq!(
             plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
@@ -2062,7 +2125,7 @@ mod tests {
                 zhu_ye_core::DictionaryEntry::new("有一说一", "u1s1", 5000),
             ],
         )));
-        let state = Rc::new(Mutex::new(state));
+        let state = Arc::new(SharedEngine(Mutex::new(state)));
 
         // `9` 是 `996` 的前缀：进组合串而非选词。
         assert_eq!(
@@ -2084,7 +2147,7 @@ mod tests {
 
     #[test]
     fn ctrl或alt修饰键一律放行给宿主() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         assert_eq!(
             plan_action(WPARAM(VK_A.0 as usize), LPARAM(0), true, false, &state),
             None
@@ -2143,7 +2206,7 @@ mod tests {
 
     #[test]
     fn 引擎推进与组合文本预览一致() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         assert_eq!(compose_text(&state, KeyAction::Letter('n')), "n");
         sync_engine(&state, KeyAction::Letter('n'));
         assert_eq!(compose_text(&state, KeyAction::Letter('i')), "ni");
@@ -2213,7 +2276,7 @@ mod tests {
 
     #[test]
     fn shift与组合内功能键放行策略正确() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         assert_eq!(
             plan_action(WPARAM(VK_SHIFT.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::ToggleMode)
@@ -2277,7 +2340,7 @@ mod tests {
 
     #[test]
     fn 上下键推进页内选中行() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         sync_engine(&state, KeyAction::Letter('n'));
         sync_engine(&state, KeyAction::Letter('i'));
         sync_engine(&state, KeyAction::Letter('h'));
@@ -2291,7 +2354,7 @@ mod tests {
 
     #[test]
     fn 状态动作推进图层与页码() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         sync_engine(&state, KeyAction::Letter('n'));
         sync_engine(&state, KeyAction::Letter('i'));
         sync_engine(&state, KeyAction::ToggleLayer);
@@ -2308,7 +2371,7 @@ mod tests {
 
     #[test]
     fn 英文模式放行制表与翻页键给宿主() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         sync_engine(&state, KeyAction::Letter('n'));
         sync_engine(&state, KeyAction::ToggleMode);
         assert_eq!(state.lock().unwrap().engine.mode(), InputMode::English);
@@ -2331,8 +2394,8 @@ mod tests {
     // ---- 场景7（T-061）：数字格式模式 / v 模式 / emoji 的 TSF 键路 ----
 
     /// 构造进入数字格式模式（8 位日期串已累积）的 state。
-    fn digit_state() -> Rc<Mutex<EngineState>> {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+    fn digit_state() -> Arc<SharedEngine> {
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         for digit in "20260930".chars() {
             sync_engine(&state, KeyAction::BufferDigit(digit));
         }
@@ -2341,8 +2404,8 @@ mod tests {
     }
 
     /// 构造进入 v 模式且已输类型码（v1）的 state。
-    fn v_code_state() -> Rc<Mutex<EngineState>> {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+    fn v_code_state() -> Arc<SharedEngine> {
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         sync_engine(&state, KeyAction::VStart);
         sync_engine(&state, KeyAction::VCode('1'));
         assert!(state.lock().unwrap().engine.v_active());
@@ -2351,7 +2414,7 @@ mod tests {
 
     #[test]
     fn 空闲态数字启动数字格式模式() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         // 首数字键：启动数字模式并直插上屏（引擎累积），不再放行宿主。
         assert_eq!(
             plan_action(WPARAM(VK_1.0 as usize), LPARAM(0), false, false, &state),
@@ -2398,7 +2461,7 @@ mod tests {
 
     #[test]
     fn 数字模式小数点追加与退格() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         for digit in "12345".chars() {
             sync_engine(&state, KeyAction::BufferDigit(digit));
         }
@@ -2474,7 +2537,7 @@ mod tests {
 
     #[test]
     fn 空闲态v进入v模式组合态v走拼音() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         assert_eq!(
             plan_action(WPARAM(VK_V.0 as usize), LPARAM(0), false, false, &state),
             Some(KeyAction::VStart)
@@ -2483,7 +2546,7 @@ mod tests {
         assert!(state.lock().unwrap().engine.v_active());
         assert_eq!(state.lock().unwrap().engine.v_buffer_len(), 1);
         // 组合态（nv/lv）：v 是正常拼音字符，不进入 v 模式。
-        let nv = Rc::new(Mutex::new(EngineState::new()));
+        let nv = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         sync_engine(&nv, KeyAction::Letter('n'));
         sync_engine(&nv, KeyAction::Letter('v'));
         assert!(!nv.lock().unwrap().engine.v_active());
@@ -2491,7 +2554,7 @@ mod tests {
 
     #[test]
     fn v模式类型码与选择键() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         sync_engine(&state, KeyAction::VStart);
         // 等待类型码：`x` 出数学符号组。
         assert_eq!(
@@ -2588,7 +2651,7 @@ mod tests {
 
     #[test]
     fn 数字模式外小数点放行宿主() {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         assert_eq!(
             plan_action(
                 WPARAM(VK_OEM_PERIOD.0 as usize),
@@ -2604,8 +2667,8 @@ mod tests {
 
     /// 构造组合串为 `text` 的 state（T-066）：字母走 Letter、数字走 Digit、
     /// 其余（`@`/`.`/`/`/`:`）走 FormatChar。
-    fn format_state(text: &str) -> Rc<Mutex<EngineState>> {
-        let state = Rc::new(Mutex::new(EngineState::new()));
+    fn format_state(text: &str) -> Arc<SharedEngine> {
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         for c in text.chars() {
             let action = match c {
                 'a'..='z' => KeyAction::Letter(c),
@@ -2635,13 +2698,13 @@ mod tests {
             Some(KeyAction::FormatChar('@'))
         );
         // 空闲态：放行宿主（`@` 不冷启动组合，D-11）。
-        let idle = Rc::new(Mutex::new(EngineState::new()));
+        let idle = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         assert_eq!(
             plan_action(WPARAM(VK_2.0 as usize), LPARAM(0), false, true, &idle),
             None
         );
         // 英文模式：放行宿主。
-        let english = Rc::new(Mutex::new(EngineState::new()));
+        let english = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         sync_engine(&english, KeyAction::ToggleMode);
         assert_eq!(
             plan_action(WPARAM(VK_2.0 as usize), LPARAM(0), false, true, &english),

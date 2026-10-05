@@ -28,11 +28,13 @@ pub mod manifest;
 pub mod mixed;
 pub mod pack_config;
 pub mod pinyin;
+pub mod spoken;
 pub mod suggestion;
 pub mod symbols;
 pub mod theme_file;
 pub mod time;
 pub mod translate;
+pub mod units;
 pub mod update;
 pub mod update_status;
 pub mod user_dict;
@@ -83,6 +85,7 @@ pub use pinyin::{
     fuzzy_variants, initial_syllables, segment_all, valid_prefix, FullPinyinScheme, PinyinScheme,
     SyllableTable,
 };
+pub use spoken::{spoken_overrides, SPOKEN_SUGGESTIONS};
 pub use suggestion::{
     suggest_phrases, suggest_words, suggestion_candidates, SUGGESTION_CAP, SUGGESTION_PHRASE_CAP,
     SUGGESTION_WORD_CAP,
@@ -97,6 +100,7 @@ pub use theme_file::{
 };
 pub use time::{civil_from_days, format_date, today_compact};
 pub use translate::{InMemoryTranslator, TranslationDirection, Translator};
+pub use units::{unit_candidates, unit_key_prefix, UNIT_CONVERSIONS};
 pub use update::{
     apply_release, apply_staged, backup_path, clean_staging, find_outdated, rollback_pack,
     stage_packs, staging_dir, verify_installed, verify_release, ApplyOutcome, UpdateError,

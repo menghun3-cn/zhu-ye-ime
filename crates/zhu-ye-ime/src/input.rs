@@ -111,6 +111,14 @@ pub struct InputEngine {
     /// 英文词表文件（T-085，`en.zyen`，mmap）；`None` = 回退第五期内嵌静态表
     /// （`en_words.rs`，行为一致）。启动装配时由调用方挂载，加载失败不影响输入。
     en_lexicon: Option<zhu_ye_core::en_lexicon::EnLexicon>,
+    /// 简拼路径开关（FR-023；O-05 修订：原"不新增配置开关"扩展为可关闭）。
+    /// 默认开；关闭后主候选为空的 2-4 位不可切分字母走首字母展开（FR-023
+    /// 词典简拼）不介入。**边界**：联系人索引原生简拼键（FR-037）与网络语
+    /// 缩写路径（FR-016/FR-017）不随本开关变化。
+    enable_abbreviation: bool,
+    /// 模糊音与纠错开关（FR-024；O-05 修订）。默认开；关闭后纠错组
+    /// （模糊替换 + 少字母补全，`corrected_candidates`）不生成。
+    enable_fuzzy: bool,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -183,6 +191,8 @@ impl InputEngine {
             contacts: None,
             contact_cap: CONTACT_CANDIDATES_CAP,
             en_lexicon: None,
+            enable_abbreviation: true,
+            enable_fuzzy: true,
         }
     }
 
@@ -212,6 +222,24 @@ impl InputEngine {
     #[must_use]
     pub fn with_domain_boost(mut self, enabled: bool) -> Self {
         self.enable_domain_boost = enabled;
+        self
+    }
+
+    /// 设置简拼开关（FR-023；O-05 修订：原"不新增配置开关"扩展为可关闭）。
+    /// 默认开；关闭后主候选为空的 2-4 位不可切分字母不再走首字母展开。
+    /// **边界**：网络语缩写路径（FR-016/FR-017）与联系人索引原生简拼键
+    /// （FR-037）不随本开关变化。
+    #[must_use]
+    pub fn with_abbreviation(mut self, enabled: bool) -> Self {
+        self.enable_abbreviation = enabled;
+        self
+    }
+
+    /// 设置模糊音与纠错开关（FR-024；O-05 修订）。默认开；关闭后纠错组
+    /// （模糊替换 + 少字母补全，`corrected_candidates`）不生成，其余路径不变。
+    #[must_use]
+    pub fn with_fuzzy(mut self, enabled: bool) -> Self {
+        self.enable_fuzzy = enabled;
         self
     }
 
@@ -514,29 +542,79 @@ impl InputEngine {
         true
     }
 
-    /// v 模式输入类型码（`1-9`/`x`/`h`）：刷新符号组候选。
-    /// 非法类型码返回 `false`（调用方应回退拼音）。
+    /// v 模式输入类型码（`1-9`/`x`/`h` → 符号组；单位键前缀字母 → 单位换算码，
+    /// T-104）：刷新对应候选。
+    ///
+    /// 非法类型码返回 `false`（调用方应回退拼音）。已定符号码后不再收字母；
+    /// 单位码可持续追加字母直至完整键（见 [`Self::v_accepts`]）。
     pub fn v_code(&mut self, c: char) -> bool {
         if !self.v_active() {
             return false;
         }
-        if zhu_ye_core::symbol_group(c).is_none() {
+        let already = &self.v_buffer[1..];
+        // 符号类型码只在「等待类型码」时接受；单位码进行中（如 `vs` 后
+        // 的 `h` 构成 `sh`）字母一律走单位判定，不被 x/h 符号码拦截（T-104）。
+        if already.is_empty() && zhu_ye_core::symbol_group(c).is_some() {
+            self.v_buffer.push(c);
+            self.refresh_v_candidates();
+            return true;
+        }
+        if !c.is_ascii_lowercase() {
             return false;
         }
-        self.v_buffer.push(c);
-        self.refresh_symbol_candidates();
-        true
+        let mut key = String::with_capacity(already.len() + 1);
+        key.push_str(already);
+        key.push(c);
+        if zhu_ye_core::unit_key_prefix(&key) {
+            self.v_buffer.push(c);
+            self.refresh_v_candidates();
+            return true;
+        }
+        false
     }
 
-    /// v 模式输入非法字母（如 `vi` 的 `i`）：退出 v 模式并把 `v`+该字母
+    /// v 模式是否接受该字母键（T-104）：符号类型码（`1-9`/`x`/`h`，仅等待
+    /// 类型码时）或单位键前缀字母（`v` 后按 `m` 留在 v 模式等待 `vmi`）。
+    ///
+    /// 供 TSF 键路分派：接受则进 `VCode`，否则回退拼音（`vi` 原语义保持）。
+    #[must_use]
+    pub fn v_accepts(&self, c: char) -> bool {
+        if !self.v_active() {
+            return false;
+        }
+        let already = &self.v_buffer[1..];
+        if already.is_empty() && zhu_ye_core::symbol_group(c).is_some() {
+            return true;
+        }
+        if !c.is_ascii_lowercase() {
+            return false;
+        }
+        let mut key = String::with_capacity(already.len() + 1);
+        key.push_str(already);
+        key.push(c);
+        zhu_ye_core::unit_key_prefix(&key)
+    }
+
+    /// v 模式输入非法字母（如 `vi` 的 `i`）：退出 v 模式并把 `v`+已收码+该字母
     /// 交给正常拼音路径（`vi` 进入组合，行为与直接输 `vi` 一致）。
+    ///
+    /// 已收**单位码**（如 `vm`/`vmi`）会一并并入组合（T-104：`vm`+`x` 得到
+    /// `vmx`，不丢已收字母）；已定**符号码**（如 `v1`）按原语义丢弃（回退
+    /// 拼音即放弃符号模式，`v1`+`i` 得到 `vi`）。
     pub fn v_consume(&mut self, c: char) -> bool {
         if !self.v_active() {
             return false;
         }
+        let tail = &self.v_buffer[1..];
+        let keep_unit = !tail.is_empty() && zhu_ye_core::unit_key_prefix(tail);
+        let mut prefix = String::with_capacity(self.v_buffer.len() + 1);
+        prefix.push('v');
+        if keep_unit {
+            prefix.push_str(tail);
+        }
         self.v_buffer.clear();
         self.candidates.clear();
-        self.composing.push('v');
+        self.composing.push_str(&prefix);
         self.composing.push(c);
         self.refresh_candidates();
         self.suggestion.clear();
@@ -564,7 +642,7 @@ impl InputEngine {
         }
         if self.v_buffer_len() > 1 {
             self.v_buffer.pop();
-            self.refresh_symbol_candidates();
+            self.refresh_v_candidates();
         } else {
             self.v_exit();
         }
@@ -1117,26 +1195,57 @@ impl InputEngine {
         self.layer = CandidateLayer::Chinese;
     }
 
-    /// 按 v 模式类型码刷新符号候选（FR-028）：来源 `Symbol`，一页 9 项。
-    fn refresh_symbol_candidates(&mut self) {
-        let Some(code) = self.v_buffer.chars().last() else {
+    /// 按 v 模式类型码刷新候选（FR-028；T-104 增单位换算码）：
+    /// 符号码（`1-9`/`x`/`h`）→ `Symbol` 来源符号组；单位键 → 等值换算串候选，
+    /// 同样来源 `Symbol`（v 模式候选整体语义一致，一页 ≤9 项）。
+    fn refresh_v_candidates(&mut self) {
+        if !self.v_active() {
+            self.candidates.clear();
+            self.cached_translation_candidates.clear();
+            self.page = 0;
+            self.selected_on_page = 0;
+            self.layer = CandidateLayer::Chinese;
             return;
+        }
+        let code = &self.v_buffer[1..];
+        let mut chars = code.chars();
+        let is_symbol = code.len() == 1
+            && chars
+                .next()
+                .is_some_and(|c| zhu_ye_core::symbol_group(c).is_some());
+        self.candidates = if is_symbol {
+            zhu_ye_core::symbol_group(code.chars().next().unwrap())
+                .map(|group| {
+                    group
+                        .iter()
+                        .enumerate()
+                        .map(|(index, text)| Candidate {
+                            text: (*text).to_owned(),
+                            translation: None,
+                            pinyin: None,
+                            score: index as i64,
+                            source: zhu_ye_core::candidate::CandidateSource::Symbol,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            zhu_ye_core::unit_candidates(code)
+                .map(|texts| {
+                    texts
+                        .iter()
+                        .enumerate()
+                        .map(|(index, text)| Candidate {
+                            text: (*text).to_owned(),
+                            translation: None,
+                            pinyin: None,
+                            score: index as i64,
+                            source: zhu_ye_core::candidate::CandidateSource::Symbol,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
         };
-        self.candidates = zhu_ye_core::symbol_group(code)
-            .map(|group| {
-                group
-                    .iter()
-                    .enumerate()
-                    .map(|(index, text)| Candidate {
-                        text: (*text).to_owned(),
-                        translation: None,
-                        pinyin: None,
-                        score: index as i64,
-                        source: zhu_ye_core::candidate::CandidateSource::Symbol,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         self.cached_translation_candidates.clear();
         self.page = 0;
         self.selected_on_page = 0;
@@ -1318,16 +1427,25 @@ impl InputEngine {
                 }
                 // M7 纠错（FR-024）：无整词命中时追加「纠错组」（模糊替换/少字母补全），
                 // 置于主候选之后、缩写组之前；同文本主候选优先。
-                let corrected =
-                    zhu_ye_core::corrected_candidates(&self.table, dictionary.as_ref(), &composing);
-                if !corrected.is_empty() {
-                    main = append_group(main, corrected);
+                // O-05 修订（T-103）：可经 enable_fuzzy 关闭（模糊音与纠错组不生成）。
+                if self.enable_fuzzy {
+                    let corrected = zhu_ye_core::corrected_candidates(
+                        &self.table,
+                        dictionary.as_ref(),
+                        &composing,
+                    );
+                    if !corrected.is_empty() {
+                        main = append_group(main, corrected);
+                    }
                 }
             }
 
             // M7 简拼（FR-023）：输入不可切分、主候选仍为空且为 2-4 位纯字母时，
             // 按首字母展开整词作为主候选（防污染：仅此场景介入）。
-            if main.is_empty()
+            // O-05 修订（T-103）：可经 enable_abbreviation 关闭（词典简拼不介入；
+            // 网络语缩写与联系人简拼键边界不受影响）。
+            if self.enable_abbreviation
+                && main.is_empty()
                 && composing.chars().count() >= 2
                 && composing.chars().all(|c| c.is_ascii_lowercase())
                 && segment_all(&self.table, &composing).is_empty()
@@ -2373,6 +2491,85 @@ mod tests {
         );
     }
 
+    // ---- T-103（O-05 修订）：简拼/模糊音关闭开关 ----
+
+    #[test]
+    fn 简拼关闭后nh不展开() {
+        // 默认开（既有 2328 覆盖）；关闭后主候选为空的不可切分字母不再首字母展开。
+        let mut engine = m7_engine().with_abbreviation(false);
+        type_text(&mut engine, "nh");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(
+            !texts.contains(&"你好"),
+            "关闭简拼后 nh 不应出你好，实际: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 简拼关闭不影响整词候选() {
+        // 关闭简拼只关首字母展开路径：整词拼音候选与纠错路径行为不变。
+        let mut engine = m7_engine().with_abbreviation(false);
+        type_text(&mut engine, "nihao");
+        assert!(engine.candidates().iter().any(|c| c.text == "你好"));
+    }
+
+    #[test]
+    fn 模糊音关闭后zongguo不纠错() {
+        // 关闭模糊音与纠错：zongguo 不再经模糊替换出中国（无可切分则候选为空）。
+        let mut engine = m7_engine().with_fuzzy(false);
+        type_text(&mut engine, "zongguo");
+        let candidates = engine.candidates();
+        assert!(
+            candidates.iter().all(|c| c.text != "中国"
+                && c.source != zhu_ye_core::candidate::CandidateSource::Corrected),
+            "关闭模糊音后 zongguo 不应纠错出中国，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 模糊音关闭后niha不补全() {
+        // 少字母补全（B 类）随模糊音开关一并关闭：niha 不再出你好。
+        let mut engine = m7_engine().with_fuzzy(false);
+        type_text(&mut engine, "niha");
+        let candidates = engine.candidates();
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Corrected),
+            "关闭模糊音后 niha 不应出纠错候选，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 简拼关闭不影响联系人简拼键() {
+        // 索引原生简拼键（FR-037）不随 enable_abbreviation 变化：边界——
+        // zs → 张三 仍可达（直接命中联系人索引，不经词典首字母展开路径）。
+        let engine = InputEngine::with_m1_seed()
+            .with_abbreviation(false)
+            .with_contacts(zhu_ye_core::build_contact_index(&[
+                zhu_ye_core::VCardContact::new("张三"),
+            ]));
+        let mut engine = engine;
+        type_text(&mut engine, "zs");
+        assert!(
+            engine.candidates().iter().any(|c| c.text == "张三"
+                && c.source == zhu_ye_core::candidate::CandidateSource::Contact),
+            "关闭简拼后联系人简拼键仍应命中"
+        );
+    }
+
     #[test]
     fn 整句输入整句组居首() {
         let mut engine = m7_engine();
@@ -2567,6 +2764,109 @@ mod tests {
         assert!(eng.v_consume('i'));
         assert!(!eng.v_active(), "vi 应退出 v 模式");
         assert_eq!(eng.composing(), "vi", "v+i 交给拼音组合");
+    }
+
+    // ---- T-104（v 模式单位换算全量表）----
+
+    #[test]
+    fn v模式单位键前缀留在模式内() {
+        let mut eng = engine();
+        eng.v_start();
+        assert!(eng.v_accepts('m'), "m 是单位键前缀，应留在 v 模式");
+        assert!(eng.v_code('m'));
+        assert_eq!(eng.v_buffer_len(), 2);
+        // 前缀未完：候选为空但模式保持。
+        assert!(eng.candidates().is_empty());
+        assert!(eng.v_active());
+        assert!(eng.v_accepts('i'), "mi 完整键仍接受（等于前缀）");
+        assert!(eng.v_code('i'));
+        assert_eq!(eng.v_buffer_len(), 3);
+    }
+
+    #[test]
+    fn v模式单位键出换算候选() {
+        let mut eng = engine();
+        eng.v_start();
+        for c in "mi".chars() {
+            assert!(eng.v_code(c));
+        }
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts[0], "1 米 = 10 分米");
+        assert!(texts.contains(&"1 米 = 0.001 千米"));
+        assert_eq!(
+            eng.candidates()[0].source,
+            zhu_ye_core::candidate::CandidateSource::Symbol
+        );
+        assert!(eng.v_symbol_count() <= 9, "单位换算候选不超过一页");
+    }
+
+    #[test]
+    fn v模式市斤与温度键() {
+        let mut eng = engine();
+        eng.v_start();
+        for c in "jin".chars() {
+            eng.v_code(c);
+        }
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert!(texts.contains(&"1 市斤 = 500 克"));
+
+        eng.v_exit();
+        eng.v_start();
+        for c in "she".chars() {
+            eng.v_code(c);
+        }
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert!(texts.contains(&"0 摄氏度 = 32 华氏度 = 273.15 开尔文"));
+    }
+
+    #[test]
+    fn v模式前缀续输秒与回退() {
+        let mut eng = engine();
+        eng.v_start();
+        // vmi 完整键=米；继续 vmia/vmiao 得到秒键。
+        for c in "mia".chars() {
+            eng.v_code(c);
+        }
+        assert!(eng.v_active());
+        assert!(eng.candidates().is_empty(), "mia 未完成不出候选");
+        eng.v_code('o');
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert!(texts.contains(&"1 秒 = 1000 毫秒"));
+        // 退格返回 v，恢复等待类型码。
+        eng.v_backspace();
+        eng.v_backspace();
+        eng.v_backspace();
+        eng.v_backspace();
+        assert_eq!(eng.v_buffer_len(), 1, "退格逐步回到纯 v");
+        assert!(eng.candidates().is_empty(), "纯 v 无候选");
+    }
+
+    #[test]
+    fn v模式单位码后非法字母回退拼音() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('m');
+        // "vmx"：x 是符号码但不是 "mx" 前缀 → 回退拼音。
+        assert!(!eng.v_accepts('x') || !eng.v_active());
+        let mut eng2 = engine();
+        eng2.v_start();
+        for c in "m".chars() {
+            eng2.v_code(c);
+        }
+        assert!(eng2.v_consume('x'), "非前缀字母走 v_consume");
+        assert!(!eng2.v_active());
+        assert_eq!(eng2.composing(), "vmx");
+    }
+
+    #[test]
+    fn v模式符号码后不接受单位字母() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('1');
+        assert!(!eng.v_accepts('m'), "v1 已定符号码，不再收单位字母");
+        assert!(!eng.v_code('m'), "v_code 拒绝符号码后的单位字母");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts.len(), 9, "v1 候选保持序号组");
     }
 
     #[test]
@@ -3204,18 +3504,9 @@ mod tests {
     /// 内存构造联系人引擎：基础 = seed，联系人 = 张三/曾子/Alice。
     fn contact_engine() -> InputEngine {
         let contacts = vec![
-            zhu_ye_core::VCardContact {
-                name: "张三".to_owned(),
-                keys: Vec::new(),
-            },
-            zhu_ye_core::VCardContact {
-                name: "曾子".to_owned(),
-                keys: Vec::new(),
-            },
-            zhu_ye_core::VCardContact {
-                name: "Alice".to_owned(),
-                keys: Vec::new(),
-            },
+            zhu_ye_core::VCardContact::new("张三"),
+            zhu_ye_core::VCardContact::new("曾子"),
+            zhu_ye_core::VCardContact::new("Alice"),
         ];
         let index = zhu_ye_core::build_contact_index(&contacts);
         InputEngine::with_m1_seed().with_contacts(index)
@@ -3304,10 +3595,7 @@ mod tests {
         let mut baseline = InputEngine::with_m1_seed();
         let mut with_contacts =
             InputEngine::with_m1_seed().with_contacts(zhu_ye_core::build_contact_index(&[
-                zhu_ye_core::VCardContact {
-                    name: "欧阳锋".to_owned(),
-                    keys: Vec::new(),
-                },
+                zhu_ye_core::VCardContact::new("欧阳锋"),
             ]));
         // 无配置基线句柄模拟：引擎未挂联系人，输入与联系人无关的串。
         type_text(&mut with_contacts, "nihao");

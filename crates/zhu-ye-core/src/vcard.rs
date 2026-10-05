@@ -7,12 +7,14 @@
 //! - 行折叠：`\r\n` 后跟空格或制表符视为续行（RFC 2426 §2.4.1）；
 //! - 转义：`\\` `\,` `\;` `\n`（RFC 2426 §2.1.1）；
 //! - 姓名提取：`FN` 全名优先，无 `FN` 时用 `N` 结构姓名字段拼接（中文顺序：姓+名）；
-//! - 其余字段（`ORG`/`TEL`/`EMAIL`/`ADR` 等）忽略不报错（D-20 仅姓名建索引）；
+//! - 检索字段提取：`ORG`（组织）`EMAIL`（电邮）`ADR`（地址）非空值收集，
+//!   多值按出现顺序以 `; ` 拼接（D-20 扩展后的建键来源，见 contacts 索引）；
+//! - 其余字段（`TEL`/`NOTE` 等）忽略不报错；
 //! - 未知属性、组前缀（`item1.FN`）、显式 `CHARSET` 参数按规则处理；
 //! - 非 UTF-8 的 `CHARSET`（如 GB2312）不转码、跳过该卡（首批只保证 UTF-8，
 //!   见 docs/通讯录设计.md §8 风险记录）。
 //!
-//! 解析结果只含姓名，`keys`（拼音键集合）由 contacts 索引构建（T-071-2）填充。
+//! 解析结果只含姓名与检索字段，`keys`（拼音键集合）由 contacts 索引构建（T-071-2）填充。
 
 use std::fmt;
 
@@ -21,8 +23,28 @@ use std::fmt;
 pub struct VCardContact {
     /// 联系人姓名（`FN` 或 `N` 拼接结果；空名卡不产出）。
     pub name: String,
+    /// 组织（`ORG` 全部非空值按 `; ` 拼接；无则空串）。
+    pub org: String,
+    /// 电邮（`EMAIL` 全部非空值按 `; ` 拼接；无则空串）。
+    pub email: String,
+    /// 地址（`ADR` 全部非空值按 `; ` 拼接；无则空串）。
+    pub address: String,
     /// 检索键集合：解析阶段为空，由 `build_contact_index` 的注音回调填充。
     pub keys: Vec<String>,
+}
+
+impl VCardContact {
+    /// 仅姓名构造（测试与无附加字段场景用；keys/org/email/address 为空）。
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            org: String::new(),
+            email: String::new(),
+            address: String::new(),
+            keys: Vec::new(),
+        }
+    }
 }
 
 /// vCard 解析错误（结构损坏才报错；语义空白如空名卡按跳过处理）。
@@ -123,12 +145,8 @@ fn dispatch_line(
             return Err(VCardError::OrphanEnd(line_no));
         }
         *in_card = false;
-        let name = extract_name(card_lines);
-        if let Some(name) = name {
-            contacts.push(VCardContact {
-                name,
-                keys: Vec::new(),
-            });
+        if let Some(contact) = extract_contact(card_lines) {
+            contacts.push(contact);
         }
         card_lines.clear();
         return Ok(());
@@ -182,18 +200,24 @@ fn charset_is_non_utf8(params: &str) -> bool {
     })
 }
 
-/// 从卡内属性行提取姓名：`FN` 优先；无 `FN` 用 `N` 组件拼接（中文顺序：姓+名）。
-fn extract_name(card_lines: &[(usize, String)]) -> Option<String> {
+/// 从卡内属性行提取联系人：姓名（`FN` 优先；无 `FN` 用 `N` 组件拼接，中文顺序：姓+名）
+/// 与检索字段（`ORG`/`EMAIL`/`ADR` 全部非空值按出现顺序 `; ` 拼接）。
+fn extract_contact(card_lines: &[(usize, String)]) -> Option<VCardContact> {
     let mut family = String::new();
     let mut given = String::new();
     let mut has_n = false;
+    let mut fn_name: Option<String> = None;
+    let mut org = Vec::new();
+    let mut emails = Vec::new();
+    let mut addresses = Vec::new();
     for (_, line) in card_lines {
         let (attr, _, value) = split_property(line)?;
         match attr.as_str() {
             "fn" => {
+                // 只记录不早退：ORG/EMAIL/ADR 可能出现在 FN 之后（vCard 字段顺序无保证）。
                 let name = unescape(value);
                 if !name.trim().is_empty() {
-                    return Some(unescape(value.trim()));
+                    fn_name = Some(unescape(value.trim()));
                 }
             }
             "n" => {
@@ -203,36 +227,68 @@ fn extract_name(card_lines: &[(usize, String)]) -> Option<String> {
                 family = unescape(parts.next().unwrap_or("")).trim().to_owned();
                 given = unescape(parts.next().unwrap_or("")).trim().to_owned();
             }
+            "org" | "email" | "adr" => {
+                let item = unescape(value).trim().to_owned();
+                if !item.is_empty() {
+                    match attr.as_str() {
+                        "org" => org.push(item),
+                        "email" => emails.push(item),
+                        _ => addresses.push(item),
+                    }
+                }
+            }
             _ => {}
         }
     }
-    if !has_n {
-        return None;
-    }
-    // 中文字符直接拼接（姓+名）；否则以空格连接 Given Family（西式阅读序）。
-    let result = match (family.is_empty(), given.is_empty()) {
-        (true, true) => return None,
-        (false, true) => family,
-        (true, false) => given,
-        (false, false) => {
-            let chinese = family
-                .chars()
-                .all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
-                && given
+    if has_n {
+        // 中文字符直接拼接（姓+名）；否则以空格连接 Given Family（西式阅读序）。
+        // FN 已存在时（FN 与 N 并存）以 FN 为准，不覆盖。
+        match (family.is_empty(), given.is_empty()) {
+            (true, true) => {}
+            (false, true) => {
+                fn_name.get_or_insert(family);
+            }
+            (true, false) => {
+                fn_name.get_or_insert(given);
+            }
+            (false, false) => {
+                let chinese = family
                     .chars()
-                    .all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
-            if chinese {
-                format!("{family}{given}")
-            } else {
-                format!("{given} {family}")
+                    .all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+                    && given
+                        .chars()
+                        .all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+                let name = if chinese {
+                    format!("{family}{given}")
+                } else {
+                    format!("{given} {family}")
+                };
+                fn_name.get_or_insert(name);
             }
         }
-    };
-    let result = result.trim();
-    if result.is_empty() {
+    }
+    let name = fn_name?;
+    let name = name.trim();
+    if name.is_empty() {
         None
     } else {
-        Some(result.to_owned())
+        Some(finish_contact(name.to_owned(), org, emails, addresses))
+    }
+}
+
+/// 组装联系人：名字 + `; ` 拼接的检索字段（空列表 → 空串）。
+fn finish_contact(
+    name: String,
+    org: Vec<String>,
+    emails: Vec<String>,
+    addresses: Vec<String>,
+) -> VCardContact {
+    VCardContact {
+        name,
+        org: org.join("; "),
+        email: emails.join("; "),
+        address: addresses.join("; "),
+        keys: Vec::new(),
     }
 }
 
@@ -383,5 +439,68 @@ mod tests {
     fn 确定性两次解析逐位一致() {
         let input = "BEGIN:VCARD\nVERSION:3.0\nFN:张三\nN:张;三;;;\nEND:VCARD\n";
         assert_eq!(parse_vcard(input), parse_vcard(input));
+    }
+
+    // ---------- T-102：检索字段（ORG/EMAIL/ADR）提取 ----------
+
+    #[test]
+    fn 检索字段_org_email_adr_各自提取() {
+        let input = "BEGIN:VCARD\nVERSION:3.0\nFN:张三\nORG:竹叶科技\n\
+                     EMAIL:zhangsan@acme.com\nADR:;;北京市朝阳区;;;\nEND:VCARD\n";
+        let c = contact(input);
+        assert_eq!(c.name, "张三");
+        assert_eq!(c.org, "竹叶科技");
+        assert_eq!(c.email, "zhangsan@acme.com");
+        assert_eq!(c.address, ";;北京市朝阳区;;;");
+        assert!(c.keys.is_empty());
+    }
+
+    #[test]
+    fn 检索字段_缺省为空串() {
+        let input = "BEGIN:VCARD\nVERSION:3.0\nFN:李四\nEND:VCARD\n";
+        let c = contact(input);
+        assert_eq!(c.org, "");
+        assert_eq!(c.email, "");
+        assert_eq!(c.address, "");
+    }
+
+    #[test]
+    fn 检索字段_多值按序分号拼接() {
+        let input = "BEGIN:VCARD\nVERSION:3.0\nFN:王五\n\
+                     ORG:甲科技\nORG:乙集团\n\
+                     EMAIL:work@x.com\nEMAIL:home@y.com\n\
+                     ADR:;;a;;;\nADR:;;b;;;\nEND:VCARD\n";
+        let c = contact(input);
+        assert_eq!(c.org, "甲科技; 乙集团");
+        assert_eq!(c.email, "work@x.com; home@y.com");
+        assert_eq!(c.address, ";;a;;;; ;;b;;;");
+    }
+
+    #[test]
+    fn 检索字段_空值与参数样式_忽略空值() {
+        // ORG 空值不出拼接项；带参数的 EMAIL（TYPE=INTERNET）正常取值。
+        let input = "BEGIN:VCARD\nVERSION:3.0\nFN:赵六\nORG:\n\
+                     EMAIL;TYPE=INTERNET;TYPE=HOME:zhao@example.org\nEND:VCARD\n";
+        let c = contact(input);
+        assert_eq!(c.org, "");
+        assert_eq!(c.email, "zhao@example.org");
+    }
+
+    #[test]
+    fn 检索字段_fn_在_org_之后_仍收集() {
+        // vCard 字段顺序无保证：ORG/EMAIL 先于 FN 出现时不得丢失。
+        let input =
+            "BEGIN:VCARD\nVERSION:3.0\nORG:后置公司\nEMAIL:after@x.com\nFN:孙七\nEND:VCARD\n";
+        let c = contact(input);
+        assert_eq!(c.name, "孙七");
+        assert_eq!(c.org, "后置公司");
+        assert_eq!(c.email, "after@x.com");
+    }
+
+    #[test]
+    fn 检索字段_组前缀与转义() {
+        let input = "BEGIN:VCARD\nVERSION:3.0\nFN:周八\nitem1.ORG:研发\\,实验室\nEND:VCARD\n";
+        let c = contact(input);
+        assert_eq!(c.org, "研发,实验室");
     }
 }

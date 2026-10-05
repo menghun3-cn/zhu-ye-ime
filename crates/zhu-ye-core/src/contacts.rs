@@ -116,8 +116,11 @@ pub fn abbreviation_key(name_key: &str, table: &SyllableTable) -> Option<String>
     (abbr.bytes().all(|b| b.is_ascii_lowercase())).then_some(abbr)
 }
 
-/// 由 vCard 姓名建立联系人索引（T-071-2；keys 在此填充，超过
+/// 由 vCard 联系人建立联系人索引（T-071-2；keys 在此填充，超过
 /// [`CONTACT_INDEX_CAP`] 条按出现顺序截断）。
+///
+/// 建键来源（D-20 扩展，T-102）：姓名 + 组织（`ORG`）+ 地址（`ADR`）+ 电邮（`EMAIL`）
+/// 四者各自注音/归一生成键集，合并去重后索引同一联系人；命中任意来源均上屏姓名。
 #[must_use]
 pub fn build_contact_index(contacts: &[VCardContact]) -> ContactIndex {
     let table = SyllableTable::standard();
@@ -127,7 +130,7 @@ pub fn build_contact_index(contacts: &[VCardContact]) -> ContactIndex {
         if contact.name.is_empty() {
             continue;
         }
-        for key in annotate_name(&contact.name) {
+        for key in contact_keys(contact) {
             let names = by_key.entry(key.clone()).or_default();
             if !names.iter().any(|existing| existing == &contact.name) {
                 names.push(contact.name.clone());
@@ -147,6 +150,29 @@ pub fn build_contact_index(contacts: &[VCardContact]) -> ContactIndex {
             .map(|(key, names)| KeyEntry { key, names })
             .collect(),
     }
+}
+
+/// 单个联系人的全部检索键：姓名/组织/地址/电邮四源各自 [`annotate_name`] 后合并去重。
+///
+/// - 中文（公司名/地址）经注音建键：`北京朝阳` → `beijingchaoyang`，可拼音命中；
+/// - 电邮/ASCII 按原文归一（`@` `.` 等符号被跳过）：`zhangsan@acme.com` → `zhangsanacmecom`，
+///   输入 `zhangsan` 前缀即命中；
+/// - 同联系人跨源产生的同键只保留一次（确定性去重）。
+fn contact_keys(contact: &VCardContact) -> Vec<String> {
+    let mut keys = Vec::new();
+    keys.extend(annotate_name(&contact.name));
+    if !contact.org.is_empty() {
+        keys.extend(annotate_name(&contact.org));
+    }
+    if !contact.address.is_empty() {
+        keys.extend(annotate_name(&contact.address));
+    }
+    if !contact.email.is_empty() {
+        keys.extend(annotate_name(&contact.email));
+    }
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 /// 前缀查询：返回命中联系人候选（`CandidateSource::Contact`），按键序去重。
@@ -190,10 +216,7 @@ mod tests {
     use crate::vcard::VCardContact;
 
     fn contact(name: impl Into<String>) -> VCardContact {
-        VCardContact {
-            name: name.into(),
-            keys: Vec::new(),
-        }
+        VCardContact::new(name.into())
     }
 
     #[test]
@@ -320,5 +343,80 @@ mod tests {
             .collect();
         let index = build_contact_index(&contacts);
         assert!(index.len() <= 10_000);
+    }
+
+    // ---------- T-102：D-20 扩展——公司/地址/邮箱建索引 ----------
+
+    fn contact_with(org: &str, email: &str, address: &str) -> VCardContact {
+        VCardContact {
+            org: org.to_owned(),
+            email: email.to_owned(),
+            address: address.to_owned(),
+            ..VCardContact::new("王五")
+        }
+    }
+
+    #[test]
+    fn 公司名注音键命中() {
+        // ORG 为中文公司名 → 拼音前缀命中联系人（上屏姓名）。
+        let c = contact_with("竹叶科技", "", "");
+        let index = build_contact_index(&[c]);
+        let hits = contact_candidates(&index, "zhuye", 8);
+        assert_eq!(
+            hits.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["王五"]
+        );
+        assert_eq!(hits[0].source, CandidateSource::Contact);
+    }
+
+    #[test]
+    fn 公司名简拼键命中() {
+        // 中文公司名全拼键派生首字母键（竹叶科技 → zykj）。
+        let c = contact_with("竹叶科技", "", "");
+        let index = build_contact_index(&[c]);
+        assert_eq!(contact_candidates(&index, "zykj", 8)[0].text, "王五");
+    }
+
+    #[test]
+    fn 英文公司名原形键命中() {
+        let c = contact_with("Alice Tech", "", "");
+        let index = build_contact_index(&[c]);
+        assert_eq!(contact_candidates(&index, "alice", 8)[0].text, "王五");
+    }
+
+    #[test]
+    fn 邮箱前缀命中() {
+        // EMAIL 归一（符号跳过）后按前缀命中：`zhangsanacmecom`，「zhangsan」可及。
+        let c = contact_with("", "zhangsan@acme.com", "");
+        let index = build_contact_index(&[c]);
+        let hits = contact_candidates(&index, "zhangsan", 8);
+        assert_eq!(
+            hits.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["王五"]
+        );
+        // 邮箱尾巴不出键（符号之后的部分不被提取为独立键）。
+        assert!(contact_candidates(&index, "acmecom", 8).is_empty());
+    }
+
+    #[test]
+    fn 地址注音键命中() {
+        // ADR 中文地址 → 拼音前缀命中（地址组件分号被跳过 → 连续字符建键）。
+        let c = contact_with("", "", "北京市朝阳区;建国路 88 号");
+        let index = build_contact_index(&[c]);
+        assert_eq!(contact_candidates(&index, "beijing", 8)[0].text, "王五");
+    }
+
+    #[test]
+    fn 四源同键去重() {
+        // 姓名与公司命中同一键时只产生一条候选（去重保序）。
+        let c = VCardContact {
+            org: "张三工作室".to_owned(),
+            email: "zhangsan@x.com".to_owned(),
+            address: "".to_owned(),
+            ..VCardContact::new("张三")
+        };
+        let index = build_contact_index(&[c]);
+        let hits = contact_candidates(&index, "zhangsan", 8);
+        assert_eq!(hits.iter().filter(|c| c.text == "张三").count(), 1);
     }
 }

@@ -435,6 +435,30 @@ fn m7_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
         runner.fail("简拼候选确定性", "两次结果不一致");
     }
 
+    // ---- T-103（O-05 修订）：简拼/模糊音关闭开关 ----
+    let off_dict: Arc<dyn Dictionary> = Arc::new(InMemoryDictionary::from_entries(vec![
+        DictionaryEntry::new("你好", "nihao", 100),
+        DictionaryEntry::new("中国", "zhongguo", 92),
+    ]));
+    let mut off = InputEngine::with_bigram(off_dict.clone(), Arc::new(InMemoryBigramModel::new()))
+        .with_abbreviation(false)
+        .with_fuzzy(false);
+    off.handle_escape();
+    let off_nh = type_and(&mut off, "nh");
+    let off_zongguo = type_and(&mut off, "zongguo");
+    let off_clean = off_nh.iter().all(|(text, _)| text != "你好")
+        && off_zongguo
+            .iter()
+            .all(|(text, source)| text != "中国" && *source != CandidateSource::Corrected);
+    if off_clean {
+        runner.pass("关闭简拼与模糊音后 nh/zongguo 均不介入（T-103）");
+    } else {
+        runner.fail(
+            "关闭简拼与模糊音后 nh/zongguo 均不介入（T-103）",
+            &format!("nh={off_nh:?} zongguo={off_zongguo:?}"),
+        );
+    }
+
     // ---- FR-024 模糊音与纠错 ----
     let zongguo = type_and(&mut engine, "zongguo");
     match zongguo
@@ -732,11 +756,12 @@ fn m8_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     }
     runner.pass("上屏「今天」后进入联想态");
     let list: Vec<String> = engine.suggestion_list().to_vec();
-    // T-058 实测契约：今天→的/是/早上/我/在（整词），今日短语置后。
-    if list.first().map(String::as_str) == Some("的") {
-        runner.pass("联想首条为高频后继「的」");
+    // T-105 口语覆盖契约（T-058 数据项）：今天→天气/怎么样/下雨/忙/累
+    // （口语表整词替换新闻语体后继；bigram 短语仍置后）。
+    if list.first().map(String::as_str) == Some("天气") {
+        runner.pass("联想首条为口语覆盖后继「天气」");
     } else {
-        runner.fail("联想首条为高频后继「的」", &format!("实际: {list:?}"));
+        runner.fail("联想首条为口语覆盖后继「天气」", &format!("实际: {list:?}"));
     }
     let first_five = list.iter().take(5).collect::<Vec<_>>();
     if first_five.iter().all(|w| !w.starts_with("今天"))
@@ -747,6 +772,16 @@ fn m8_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
         runner.fail(
             "联想整词在前、短语（今天+后继）置后",
             &format!("实际: {list:?}"),
+        );
+    }
+    // T-105 口语覆盖表本身命中「天气」时同样替换整词区。
+    let spoken: Vec<String> = engine.suggestion_list().iter().take(5).cloned().collect();
+    if spoken[0] == "天气" {
+        runner.pass("T-105 口语覆盖命中「今天」，新闻语体后继被替换");
+    } else {
+        runner.fail(
+            "T-105 口语覆盖命中「今天」，新闻语体后继被替换",
+            &format!("实际: {spoken:?}"),
         );
     }
     // 联想态候选窗快照：组合串为空但 items 携带联想列表（TSF 显示依据）。
@@ -760,17 +795,17 @@ fn m8_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
         );
     }
 
-    // 数字选择第一条联想「的」上屏：作为新前词继续联想（连续联想）。
+    // 数字选择第一条联想「天气」上屏：作为新前词继续联想（连续联想）。
     let picked = engine.select_index(0);
-    if picked.as_deref() != Some("的") {
-        return Err(format!("选择联想首条未上屏「的」: {picked:?}"));
+    if picked.as_deref() != Some("天气") {
+        return Err(format!("选择联想首条未上屏「天气」: {picked:?}"));
     }
     if engine.suggestion_active() && !engine.suggestion_list().is_empty() {
-        runner.pass("选择联想词上屏并继续联想（前词更新为「的」）");
+        runner.pass("选择联想词上屏并继续联想（前词更新为「天气」）");
     } else {
         runner.fail(
-            "选择联想词上屏并继续联想（前词更新为「的」）",
-            "「的」的后继在真实语料中应非空",
+            "选择联想词上屏并继续联想（前词更新为「天气」）",
+            "「天气」覆盖词的后继应非空",
         );
     }
     // Esc 关闭联想窗。
@@ -964,6 +999,64 @@ fn m9_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
         runner.fail("vi 回退拼音组合（9.1-用例10）", "vi 未进入拼音组合");
     } else {
         runner.pass("vi 回退拼音组合（9.1-用例10）");
+    }
+
+    // ---- FR-028 扩展（T-104）：v 模式单位换算全量表 ----
+    // vmi → 米等值换算候选；vjin → 市斤；选择候选上屏换算串并退出 v 模式。
+    let mut vm = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    vm.v_start();
+    for c in "mi".chars() {
+        if !vm.v_code(c) {
+            runner.fail("vmi 单位码逐字母接受", "v_code 中途拒绝");
+            break;
+        }
+    }
+    let mi_texts: Vec<&str> = vm.candidates().iter().map(|c| c.text.as_str()).collect();
+    let mi_ok = mi_texts.contains(&"1 米 = 10 分米") && mi_texts.contains(&"1 米 = 0.001 千米");
+    if mi_ok {
+        runner.pass("vmi → 米等值换算候选一页（T-104）");
+    } else {
+        runner.fail(
+            "vmi → 米等值换算候选一页（T-104）",
+            &format!("实际: {mi_texts:?}"),
+        );
+    }
+    if vm.select_index(0).as_deref() == Some("1 米 = 10 分米") && !vm.v_active() {
+        runner.pass("v 单位候选选中上屏换算串（T-104）");
+    } else {
+        runner.fail("v 单位候选选中上屏换算串（T-104）", "选择异常");
+    }
+    let mut vjin = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    vjin.v_start();
+    for c in "jin".chars() {
+        if !vjin.v_code(c) {
+            runner.fail("vjin 单位码逐字母接受", "v_code 中途拒绝");
+            break;
+        }
+    }
+    if vjin
+        .candidates()
+        .iter()
+        .any(|c| c.text == "1 市斤 = 500 克")
+    {
+        runner.pass("vjin → 市斤换算候选（T-104）");
+    } else {
+        runner.fail("vjin → 市斤换算候选（T-104）", "市斤换算缺失");
+    }
+    // 符号码语义不回归：v1 后单位字母不收（v_accepts 拒绝），候选保持序号组。
+    let mut v1unit = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    v1unit.v_start();
+    v1unit.v_code('1');
+    if !v1unit.v_accepts('m') && v1unit.v_symbol_count() == 9 {
+        runner.pass("v1 符号码后单位字母被拒且序号组保持（T-104 边界）");
+    } else {
+        runner.fail(
+            "v1 符号码后单位字母被拒且序号组保持（T-104 边界）",
+            "v_accepts 异常",
+        );
     }
 
     // ---- FR-029：emoji 队尾追加 ----
@@ -1490,19 +1583,16 @@ fn m12_checks(path: Option<&Path>, runner: &mut Runner) -> Result<(), String> {
         DictionaryEntry::new("爱", "ai", 85),
     ]));
 
+    let contact_with = |name: &str, org: &str, email: &str, address: &str| VCardContact {
+        org: org.to_owned(),
+        email: email.to_owned(),
+        address: address.to_owned(),
+        ..VCardContact::new(name)
+    };
     let contacts = vec![
-        VCardContact {
-            name: "张三".to_owned(),
-            keys: Vec::new(),
-        },
-        VCardContact {
-            name: "曾子".to_owned(),
-            keys: Vec::new(),
-        },
-        VCardContact {
-            name: "Alice".to_owned(),
-            keys: Vec::new(),
-        },
+        contact_with("张三", "竹叶科技", "bob@acme.com", "北京市"),
+        VCardContact::new("曾子"),
+        VCardContact::new("Alice"),
     ];
     let index = build_contact_index(&contacts);
 
@@ -1611,6 +1701,56 @@ fn m12_checks(path: Option<&Path>, runner: &mut Runner) -> Result<(), String> {
         runner.fail(
             "无联系人命中时与无联系人引擎逐位一致（12.1-用例5）",
             &format!("boosted={boosted_texts:?} baseline={baseline_texts:?}"),
+        );
+    }
+
+    // ---- 12.1-用例7：公司名拼音命中（D-20 扩展，T-102）----
+    engine.handle_escape();
+    type_text(&mut engine, "zhuye");
+    let org_cands = snapshot(&mut engine);
+    if org_cands
+        .iter()
+        .any(|(t, s)| t == "张三" && *s == CandidateSource::Contact)
+    {
+        runner.pass("公司名拼音 zhuye 命中张三（12.1-用例7）");
+    } else {
+        runner.fail(
+            "公司名拼音 zhuye 命中张三（12.1-用例7）",
+            &format!("候选: {org_cands:?}"),
+        );
+    }
+
+    // ---- 12.1-用例8：邮箱前缀命中（D-20 扩展，T-102）----
+    // 邮箱归一为连续小写键（符号跳过）：bob@acme.com → bobacmecom；
+    // 输入邮箱用户名段前缀 bob 即命中（邮箱专属键，不与姓名/公司/地址键重叠）。
+    engine.handle_escape();
+    type_text(&mut engine, "bob");
+    let email_cands = snapshot(&mut engine);
+    if email_cands
+        .iter()
+        .any(|(t, s)| t == "张三" && *s == CandidateSource::Contact)
+    {
+        runner.pass("邮箱前缀 bob 命中张三（12.1-用例8）");
+    } else {
+        runner.fail(
+            "邮箱前缀 bob 命中张三（12.1-用例8）",
+            &format!("候选: {email_cands:?}"),
+        );
+    }
+
+    // ---- 12.1-用例9：地址拼音命中（D-20 扩展，T-102）----
+    engine.handle_escape();
+    type_text(&mut engine, "beijing");
+    let addr_cands = snapshot(&mut engine);
+    if addr_cands
+        .iter()
+        .any(|(t, s)| t == "张三" && *s == CandidateSource::Contact)
+    {
+        runner.pass("地址拼音 beijing 命中张三（12.1-用例9）");
+    } else {
+        runner.fail(
+            "地址拼音 beijing 命中张三（12.1-用例9）",
+            &format!("候选: {addr_cands:?}"),
         );
     }
 

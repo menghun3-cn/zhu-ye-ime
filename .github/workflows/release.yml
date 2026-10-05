@@ -74,6 +74,21 @@ jobs:
         shell: pwsh
         run: ./scripts/assemble-release.ps1
 
+      - name: Inno Setup 安装（构建 exe 安装包所需，T-097）
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: 构建 exe 安装包（Inno 外壳复用 install.ps1，载荷与 zip 同 staging；T-097）
+        shell: pwsh
+        run: |
+          $match = Select-String -LiteralPath 'Cargo.toml' -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if ($null -eq $match) { throw '无法读取 Cargo.toml version。' }
+          $version = $match.Matches[0].Groups[1].Value
+          $dir = "target/release-assets/$version"
+          ./scripts/build-setup.ps1 `
+            -OutputDir (Join-Path (Get-Location) $dir) `
+            -Sha256File (Join-Path (Get-Location) "$dir/SHA256SUMS.txt")
+
       - name: 端到端验证（apply 落地 / 哈希一致 / 篡改自愈 / 篡改 manifest 拒绝）
         shell: pwsh
         run: ./scripts/verify-release-e2e.ps1
@@ -93,6 +108,7 @@ jobs:
           $assets = @(
             "$dir/SHA256SUMS.txt",
             "$dir/ai-zhu-ye-ime-$version.zip",
+            "$dir/ai-zhu-ye-ime-setup-$version.exe",
             "$dir/packs/it.zyct",
             "$dir/packs/med.zyct",
             "$dir/packs/slang.zyct",
@@ -100,6 +116,36 @@ jobs:
           )
           $tag = "v$version"
           $prerelease = if ($version -match '-') { '--prerelease' } else { '' }
+          # 发布说明 = CHANGELOG 对应版本段的实际内容（不指向外部链接/占位）。
+          $notesFile = "$dir/RELEASE_NOTES.md"
+          & ./scripts/release-notes-from-changelog.ps1 -Version $version -NotesFile $notesFile
+          if ($LASTEXITCODE -ne 0) { throw "生成发布说明失败" }
           # Release 可能已存在（重跑幂等）；失败忽略后走 upload --clobber。
-          gh release create $tag --title $tag --notes "发布说明见 CHANGELOG [$version] 段（https://github.com/menghun3-cn/zhu-ye-ime/blob/main/CHANGELOG.md）" $prerelease --latest 2>$null
+          gh release create $tag --title $tag --notes-file $notesFile $prerelease --latest 2>$null
           gh release upload $tag @assets --clobber
+
+      - name: 发布更新源镜像（zhu-ye-updates，T-098）
+        if: github.event_name == 'push' || inputs.upload
+        shell: pwsh
+        env:
+          ZHU_YE_UPDATES_TOKEN: ${{ secrets.ZHU_YE_UPDATES_TOKEN }}
+        run: |
+          $version = "${{ github.ref_name }}"
+          if ($version -like 'v*') { $version = $version.Substring(1) }
+          $packsDir = "target/release-assets/$version/packs"
+          if (-not (Test-Path -LiteralPath "$packsDir\manifest.json" -PathType Leaf)) {
+            throw "feed 文件缺失: $packsDir\manifest.json"
+          }
+          $token = $env:ZHU_YE_UPDATES_TOKEN
+          if (-not $token) {
+            # GITHUB_TOKEN 不能跨仓库；未配置 PAT 时跳过并告警（不阻塞主发布）。
+            Write-Warning 'ZHU_YE_UPDATES_TOKEN 未配置（需要 zhu-ye-updates 的 contents:write 细粒度 PAT），跳过更新源镜像发布。'
+            exit 0
+          }
+          $env:GH_TOKEN = $token
+          $feedTag = "feed-v$version"
+          $sha = "${{ github.sha }}"
+          gh release create $feedTag --repo menghun3-cn/zhu-ye-updates --title $feedTag --notes "竹叶输入法更新源 feed v$version (commit $sha)" --target $sha 2>$null
+          gh release upload $feedTag --repo menghun3-cn/zhu-ye-updates `
+            "$packsDir\manifest.json" "$packsDir\it.zyct" "$packsDir\med.zyct" "$packsDir\slang.zyct" --clobber
+          Write-Host "更新源镜像已发布: https://github.com/menghun3-cn/zhu-ye-updates/releases/tag/$feedTag"
