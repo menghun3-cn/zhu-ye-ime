@@ -16,10 +16,13 @@
 //!   进程级静态缓存；图标位图与 HICON 同生命周期存活，避免
 //!   `CreateIconIndirect` 引用位图被提前释放。
 //!
-//! 点击语言栏按钮暂不切换模式（`OnClick` 返回成功但不动作）：
-//! 引擎状态是 `Rc<Mutex<EngineState>>`（非 `Send`），而 ctfmon 可能从任意
-//! RPC 线程进入项目方法，跨线程访问引擎不等价于现有线程模型的安全假设；
-//! 若后续要支持点击切换，需先把引擎状态迁到 `Arc<Mutex<… Send>>`。
+//! 点击语言栏按钮（左键）切换中英模式：`OnClick` 通过构造时注入的
+//! `click_handler` 闭包完成。ctfmon 可能从任意 RPC 线程进入 COM 方法，
+//! 因此闭包只捕获共享引擎状态的 `Weak` 引用（引擎状态已 Arc 化且
+//! `EngineState: Send`，见 tsf.rs T-046 注释），切换在引擎锁内完成、
+//! 图标通知在锁外发送，与 `sync_engine` 的 ToggleMode 分支语义一致
+//! （组合中的内容在切换时保留）；`upgrade` 失败（文本服务已停用）时
+//! 点击安全忽略。
 
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
@@ -49,6 +52,8 @@ pub const LANG_BAR_ITEM_GUID: GUID = GUID::from_u128(0x8C4E3F2A_1D9B_4E57_A6C0_2
 
 /// 语言栏图标物理尺寸（小图标，与 `SM_CXSMICON` 一致，不随 DPI 缩放）。
 const ICON_PX: i32 = 16;
+/// `TfLBIClick` 左键值（windows 0.61 未导出该公开常量，值来自 windows-sys）。
+const TF_LBI_CLK_LEFT: u32 = 1;
 /// 中文模式图标底色（品牌蓝 #1E88E5；32bpp 像素 0xAABBGGRR，最高字节 alpha=0xFF 不透明）。
 const BG_COLOR_CHINESE: u32 = 0xFFE5_881E;
 /// 英文模式图标底色（中性灰 #757575；同上，alpha=0xFF 不透明）。
@@ -366,13 +371,21 @@ fn render_mode_icon(bg_bgr: u32, glyph: &str) -> Result<ModeIcon> {
 pub struct LangBarModeButton {
     mode: Mutex<InputMode>,
     sink: Mutex<Option<ITfLangBarItemSink>>,
+    /// 左键点击处理：返回切换后的模式；`None` 表示忽略（引擎不可达等）。
+    /// 只捕获共享状态的 `Weak` 引用，保证 `Send + Sync`（CTF 可能经
+    /// 任意 RPC 线程调用 `OnClick`）。
+    click_handler: Box<dyn Fn() -> Option<InputMode> + Send + Sync>,
 }
 
 impl LangBarModeButton {
-    fn new(mode: InputMode) -> Self {
+    fn new(
+        mode: InputMode,
+        click_handler: Box<dyn Fn() -> Option<InputMode> + Send + Sync>,
+    ) -> Self {
         Self {
             mode: Mutex::new(mode),
             sink: Mutex::new(None),
+            click_handler,
         }
     }
 
@@ -454,9 +467,14 @@ unsafe fn write_lang_bar_info(pinfo: *mut TF_LANGBARITEMINFO, info: TF_LANGBARIT
 }
 
 impl ITfLangBarItemButton_Impl for LangBarModeButton_Impl {
-    fn OnClick(&self, _click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
-        // T-046：点击暂不切换模式（引擎状态非 Send，ctfmon 回调线程不可安全
-        // 进入；见模块注释与 Agent Note）。返回成功避免语言栏报错。
+    fn OnClick(&self, click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
+        // TF_LBI_CLK_LEFT（1）：切换中英模式并刷新图标（T-046）。
+        // 其他点击（如右击弹出菜单）当前不处理，返回成功避免语言栏报错。
+        if click == TfLBIClick(TF_LBI_CLK_LEFT as i32) {
+            if let Some(mode) = (self.click_handler)() {
+                self.set_mode(mode);
+            }
+        }
         Ok(())
     }
 
@@ -522,10 +540,18 @@ pub struct LangBarHandle {
 
 impl LangBarHandle {
     /// 在线程管理器上注册中英模式按钮；失败返回错误（调用方按非致命处理）。
-    pub fn register(thread_mgr: &ITfThreadMgr, mode: InputMode) -> Result<Self> {
+    ///
+    /// `click_handler` 供左键点击切换模式：只应捕获共享引擎状态的 `Weak`
+    /// 引用（`Send + Sync`），返回切换后的模式；`None` 表示忽略本次点击。
+    pub fn register(
+        thread_mgr: &ITfThreadMgr,
+        mode: InputMode,
+        click_handler: Box<dyn Fn() -> Option<InputMode> + Send + Sync>,
+    ) -> Result<Self> {
         // ITfLangBarItemMgr 不是 ITfThreadMgr 的父子接口，需要显式 QI。
         let mgr: ITfLangBarItemMgr = thread_mgr.cast()?;
-        let item: ComObject<LangBarModeButton> = ComObject::new(LangBarModeButton::new(mode));
+        let item: ComObject<LangBarModeButton> =
+            ComObject::new(LangBarModeButton::new(mode, click_handler));
         let item_lang: ITfLangBarItem = item.to_interface();
         unsafe { mgr.AddItem(&item_lang) }?;
         Ok(Self { mgr, item })
@@ -566,8 +592,13 @@ mod tests {
         }
     }
 
+    /// 默认无操作点击处理器（多数测试只关注图标/通知行为）。
+    fn noop_handler() -> Box<dyn Fn() -> Option<InputMode> + Send + Sync> {
+        Box::new(|| None)
+    }
+
     fn new_button(mode: InputMode) -> ComObject<LangBarModeButton> {
-        ComObject::new(LangBarModeButton::new(mode))
+        ComObject::new(LangBarModeButton::new(mode, noop_handler()))
     }
 
     /// 经 GetDIBits 把图标颜色位图按 32bpp 自顶向下回读为像素（0xAABBGGRR）。
@@ -777,13 +808,49 @@ mod tests {
         assert_eq!(unsafe { item.GetStatus() }.unwrap(), 0);
     }
 
-    /// 点击回调不报错（当前不切换模式，仅保证语言栏不因点击报错）。
+    /// 左键点击触发注入的处理器并刷新图标；返回的模式写入按钮状态。
     #[test]
-    fn 点击回调成功返回() {
+    fn 左键点击切换模式并通知() {
+        let button = ComObject::new(LangBarModeButton::new(
+            InputMode::Chinese,
+            Box::new(|| Some(InputMode::English)),
+        ));
+        let sink = advised_sink(&button);
+        let btn: ITfLangBarItemButton = button.to_interface();
+        let pt = POINT::default();
+        let rect = RECT::default();
+        assert!(unsafe { btn.OnClick(TfLBIClick(TF_LBI_CLK_LEFT as i32), pt, &rect) }.is_ok());
+        assert_eq!(button.current_mode(), InputMode::English);
+        // 左键点击必须触发 OnUpdate(TF_LBI_ICON) 通知语言栏刷新。
+        let updates = sink.updates.lock().unwrap();
+        assert!(
+            updates.contains(&TF_LBI_ICON),
+            "expected TF_LBI_ICON update, got {updates:?}"
+        );
+    }
+
+    /// 处理器返回 None（引擎不可达）时点击被安全忽略，模式不变。
+    #[test]
+    fn 左键点击处理器忽略则不切换() {
         let button = new_button(InputMode::Chinese);
         let btn: ITfLangBarItemButton = button.to_interface();
         let pt = POINT::default();
         let rect = RECT::default();
+        assert!(unsafe { btn.OnClick(TfLBIClick(TF_LBI_CLK_LEFT as i32), pt, &rect) }.is_ok());
+        assert_eq!(button.current_mode(), InputMode::Chinese);
+    }
+
+    /// 非左键点击（右击等）不触发切换，保证菜单类事件不被吞掉。
+    #[test]
+    fn 非左键点击不切换() {
+        let button = ComObject::new(LangBarModeButton::new(
+            InputMode::Chinese,
+            Box::new(|| panic!("handler must not run for non-left clicks")),
+        ));
+        let btn: ITfLangBarItemButton = button.to_interface();
+        let pt = POINT::default();
+        let rect = RECT::default();
         assert!(unsafe { btn.OnClick(TfLBIClick(2), pt, &rect) }.is_ok());
+        assert_eq!(button.current_mode(), InputMode::Chinese);
     }
 }
