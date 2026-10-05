@@ -756,11 +756,12 @@ fn m8_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     }
     runner.pass("上屏「今天」后进入联想态");
     let list: Vec<String> = engine.suggestion_list().to_vec();
-    // T-058 实测契约：今天→的/是/早上/我/在（整词），今日短语置后。
-    if list.first().map(String::as_str) == Some("的") {
-        runner.pass("联想首条为高频后继「的」");
+    // T-105 口语覆盖契约（T-058 数据项）：今天→天气/怎么样/下雨/忙/累
+    // （口语表整词替换新闻语体后继；bigram 短语仍置后）。
+    if list.first().map(String::as_str) == Some("天气") {
+        runner.pass("联想首条为口语覆盖后继「天气」");
     } else {
-        runner.fail("联想首条为高频后继「的」", &format!("实际: {list:?}"));
+        runner.fail("联想首条为口语覆盖后继「天气」", &format!("实际: {list:?}"));
     }
     let first_five = list.iter().take(5).collect::<Vec<_>>();
     if first_five.iter().all(|w| !w.starts_with("今天"))
@@ -771,6 +772,16 @@ fn m8_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
         runner.fail(
             "联想整词在前、短语（今天+后继）置后",
             &format!("实际: {list:?}"),
+        );
+    }
+    // T-105 口语覆盖表本身命中「天气」时同样替换整词区。
+    let spoken: Vec<String> = engine.suggestion_list().iter().take(5).cloned().collect();
+    if spoken[0] == "天气" {
+        runner.pass("T-105 口语覆盖命中「今天」，新闻语体后继被替换");
+    } else {
+        runner.fail(
+            "T-105 口语覆盖命中「今天」，新闻语体后继被替换",
+            &format!("实际: {spoken:?}"),
         );
     }
     // 联想态候选窗快照：组合串为空但 items 携带联想列表（TSF 显示依据）。
@@ -784,17 +795,17 @@ fn m8_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
         );
     }
 
-    // 数字选择第一条联想「的」上屏：作为新前词继续联想（连续联想）。
+    // 数字选择第一条联想「天气」上屏：作为新前词继续联想（连续联想）。
     let picked = engine.select_index(0);
-    if picked.as_deref() != Some("的") {
-        return Err(format!("选择联想首条未上屏「的」: {picked:?}"));
+    if picked.as_deref() != Some("天气") {
+        return Err(format!("选择联想首条未上屏「天气」: {picked:?}"));
     }
     if engine.suggestion_active() && !engine.suggestion_list().is_empty() {
-        runner.pass("选择联想词上屏并继续联想（前词更新为「的」）");
+        runner.pass("选择联想词上屏并继续联想（前词更新为「天气」）");
     } else {
         runner.fail(
-            "选择联想词上屏并继续联想（前词更新为「的」）",
-            "「的」的后继在真实语料中应非空",
+            "选择联想词上屏并继续联想（前词更新为「天气」）",
+            "「天气」覆盖词的后继应非空",
         );
     }
     // Esc 关闭联想窗。

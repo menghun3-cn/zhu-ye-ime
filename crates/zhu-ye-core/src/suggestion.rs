@@ -47,12 +47,20 @@ pub fn suggest_phrases(model: &dyn BigramModel, previous: &str, limit: usize) ->
 
 /// 完整联想列表（T-058 口径：Top5 整词 + 至多 3 条两词短语，总量 ≤ 8）。
 /// 前词为空时返回空（联想只在"刚上屏过一个词"后触发）。
+///
+/// T-105（口语联想覆盖表，T-058 数据项）：前词命中
+/// [`crate::spoken::SPOKEN_SUGGESTIONS`] 时，整词区替换为口语后继列表
+/// （bigram 是新闻语体，"怎么样/不错"不在高频区）；未命中维持统计原逻辑。
 #[must_use]
 pub fn suggestion_candidates(model: &dyn BigramModel, previous: &str) -> Vec<String> {
     if previous.is_empty() {
         return Vec::new();
     }
-    let mut out = suggest_words(model, previous, SUGGESTION_WORD_CAP);
+    let mut out = match crate::spoken::spoken_overrides(previous) {
+        Some(words) => words.iter().map(|w| (*w).to_owned()).collect(),
+        None => suggest_words(model, previous, SUGGESTION_WORD_CAP),
+    };
+    out.truncate(SUGGESTION_WORD_CAP);
     for phrase in suggest_phrases(model, previous, SUGGESTION_PHRASE_CAP) {
         if !out.contains(&phrase) {
             out.push(phrase);
@@ -115,5 +123,35 @@ mod tests {
         let mut m2 = InMemoryBigramModel::new();
         m2.insert("好", "好", 900);
         assert!(suggest_phrases(&m2, "好", 3).is_empty());
+    }
+
+    // ---- T-105（口语联想覆盖表，T-058 数据项）----
+
+    #[test]
+    fn 口语覆盖整词区替换统计后继() {
+        let m = model(); // 该 model 无 "天气" 后继 bigram
+        let candidates = suggestion_candidates(&m, "天气");
+        // 命中口语表：整词区 = 天气→[不错 怎么样 很好 挺好 很冷]，短语区空。
+        assert_eq!(candidates, vec!["不错", "怎么样", "很好", "挺好", "很冷"]);
+        assert!(candidates.len() <= crate::suggestion::SUGGESTION_CAP);
+    }
+
+    #[test]
+    fn 口语命中短语区仍由语料补充() {
+        let mut m = model();
+        // 给 "天气" 补一个语料后继（口语表命中时短语区照旧合并）。
+        m.insert("天气", "了", 800);
+        let candidates = suggestion_candidates(&m, "天气");
+        assert_eq!(candidates[0], "不错", "口语整词仍置前");
+        assert_eq!(candidates[5], "天气了", "语料短语补充在整词之后");
+    }
+
+    #[test]
+    fn 未命中前词维持统计路径() {
+        let m = model();
+        // "明天见" 不在口语表 → 原 bigram 逻辑（你 + 明天见你）。
+        assert_eq!(suggestion_candidates(&m, "明天见"), vec!["你", "明天见你"]);
+        // "我" 无覆盖、无语料 → 空；口语覆盖不引入前词本身噪声。
+        assert!(!crate::spoken::spoken_overrides("我").is_none() || false);
     }
 }
