@@ -64,8 +64,7 @@ foreach ($p in $pages) {
 if (-not (Check-Url -Url "$BaseUrl/download/index.html" -Contains 'exe')) { $fail++ }
 if (-not (Check-Url -Url "$BaseUrl/download/index.html" -Contains '更新源')) { $fail++ }
 
-# 3. 首页：AI 入口与路线图
-if (-not (Check-Url -Url "$BaseUrl/index.html" -Contains 'agents.txt')) { $fail++ }
+# 3. 首页：AI 入口（llms.txt 链接；agents.txt 供爬虫级访问，见第 4 项）
 if (-not (Check-Url -Url "$BaseUrl/index.html" -Contains 'llms.txt')) { $fail++ }
 
 # 4. AI 条目文件
