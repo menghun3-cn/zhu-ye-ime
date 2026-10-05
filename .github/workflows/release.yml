@@ -121,6 +121,11 @@ jobs:
           & ./scripts/release-notes-from-changelog.ps1 -Version $version -NotesFile $notesFile
           if ($LASTEXITCODE -ne 0) { throw "生成发布说明失败" }
           # Release 可能已存在（重跑幂等）；失败忽略后走 upload --clobber。
+          # 坑（2026-10-05 实测）：删除 tag 重打会使已发布的 release 被 GitHub
+          # 置为 untagged + draft（tag 删除行为），create 幂等失败不会自动恢复——
+          # 重打 tag 后必须手动 PATCH 恢复关联与发布状态：
+          #   gh api -X PATCH repos/<owner>/<repo>/releases/<id> \
+          #     -f tag_name=<tag> -F draft=false -F prerelease=false
           gh release create $tag --title $tag --notes-file $notesFile $prerelease --latest 2>$null
           gh release upload $tag @assets --clobber
 
