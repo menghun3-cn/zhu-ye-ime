@@ -1,4 +1,4 @@
-# check-site-structure.ps1
+﻿# check-site-structure.ps1
 # Structural + content-vocabulary assertions for site/ (acceptance 15.1/15.3).
 #
 # Usage:
@@ -84,7 +84,7 @@ foreach ($p in $pages) {
             $fail++
         }
     }
-    if ($c -notmatch 'M1–M14 核心能力已实现（自动化验证通过）· 部分真实环境交互验收收尾中') {
+    if ($c -notmatch 'M1–M15 发布收尾：更新源已开通 · exe 安装包 CI 已接入 · Pages 已上线') {
         Write-Host "FAIL $name : version-status line out of date"
         $fail++
     }
