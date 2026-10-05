@@ -990,6 +990,64 @@ fn m9_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
         runner.pass("vi 回退拼音组合（9.1-用例10）");
     }
 
+    // ---- FR-028 扩展（T-104）：v 模式单位换算全量表 ----
+    // vmi → 米等值换算候选；vjin → 市斤；选择候选上屏换算串并退出 v 模式。
+    let mut vm = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    vm.v_start();
+    for c in "mi".chars() {
+        if !vm.v_code(c) {
+            runner.fail("vmi 单位码逐字母接受", "v_code 中途拒绝");
+            break;
+        }
+    }
+    let mi_texts: Vec<&str> = vm.candidates().iter().map(|c| c.text.as_str()).collect();
+    let mi_ok = mi_texts.contains(&"1 米 = 10 分米") && mi_texts.contains(&"1 米 = 0.001 千米");
+    if mi_ok {
+        runner.pass("vmi → 米等值换算候选一页（T-104）");
+    } else {
+        runner.fail(
+            "vmi → 米等值换算候选一页（T-104）",
+            &format!("实际: {mi_texts:?}"),
+        );
+    }
+    if vm.select_index(0).as_deref() == Some("1 米 = 10 分米") && !vm.v_active() {
+        runner.pass("v 单位候选选中上屏换算串（T-104）");
+    } else {
+        runner.fail("v 单位候选选中上屏换算串（T-104）", "选择异常");
+    }
+    let mut vjin = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    vjin.v_start();
+    for c in "jin".chars() {
+        if !vjin.v_code(c) {
+            runner.fail("vjin 单位码逐字母接受", "v_code 中途拒绝");
+            break;
+        }
+    }
+    if vjin
+        .candidates()
+        .iter()
+        .any(|c| c.text == "1 市斤 = 500 克")
+    {
+        runner.pass("vjin → 市斤换算候选（T-104）");
+    } else {
+        runner.fail("vjin → 市斤换算候选（T-104）", "市斤换算缺失");
+    }
+    // 符号码语义不回归：v1 后单位字母不收（v_accepts 拒绝），候选保持序号组。
+    let mut v1unit = InputEngine::with_dictionary_file(path)
+        .map_err(|error| format!("InputEngine 创建失败: {error}"))?;
+    v1unit.v_start();
+    v1unit.v_code('1');
+    if !v1unit.v_accepts('m') && v1unit.v_symbol_count() == 9 {
+        runner.pass("v1 符号码后单位字母被拒且序号组保持（T-104 边界）");
+    } else {
+        runner.fail(
+            "v1 符号码后单位字母被拒且序号组保持（T-104 边界）",
+            "v_accepts 异常",
+        );
+    }
+
     // ---- FR-029：emoji 队尾追加 ----
     // 真实词典 xiao 有「小」；emoji 表别名 xiao → 😄 追候选尾部。
     let mut emoji_engine = InputEngine::with_dictionary_file(path)
