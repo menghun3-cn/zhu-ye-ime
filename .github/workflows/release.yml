@@ -100,6 +100,10 @@ jobs:
           )
           $tag = "v$version"
           $prerelease = if ($version -match '-') { '--prerelease' } else { '' }
+          # 发布说明 = CHANGELOG 对应版本段的实际内容（不指向外部链接/占位）。
+          $notesFile = "$dir/RELEASE_NOTES.md"
+          & ./scripts/release-notes-from-changelog.ps1 -Version $version -NotesFile $notesFile
+          if ($LASTEXITCODE -ne 0) { throw "生成发布说明失败" }
           # Release 可能已存在（重跑幂等）；失败忽略后走 upload --clobber。
-          gh release create $tag --title $tag --notes "发布说明见 CHANGELOG [$version] 段（https://github.com/menghun3-cn/zhu-ye-ime/blob/main/CHANGELOG.md）" $prerelease --latest 2>$null
+          gh release create $tag --title $tag --notes-file $notesFile $prerelease --latest 2>$null
           gh release upload $tag @assets --clobber
