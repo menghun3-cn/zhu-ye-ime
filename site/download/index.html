@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>下载 — 竹叶输入法</title>
-<meta name="description" content="竹叶输入法下载：Windows 10/11 x64。发行包（便携 zip；exe 安装包已接入 CI 构建，随正式发布提供）最先出现在 GitHub Releases；可由镜像更新源自动更新；内测阶段也可从源码构建。">
+<meta name="description" content="竹叶输入法下载：Windows 10/11 x64。正式版 v0.1.2（便携 zip 与 exe 安装包）经 GitHub Releases 提供直链；可由镜像更新源自动更新。">
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/site.css">
 </head>
@@ -32,35 +32,36 @@
   <h1>下载</h1>
 
   <div class="note">
-    <h3>发布状态：内测阶段</h3>
-    <p>竹叶输入法目前是 <strong>Windows 内测版（v0.1.2-alpha）</strong>。所有安装包都通过
+    <h3>发布状态：正式版 v0.1.2</h3>
+    <p>竹叶输入法当前为 <strong>正式版（v0.1.2，2026-10-05 发布）</strong>。发行包通过
     <a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases</a>
-    提供，本站不托管安装包；下载以 Releases 页实际发布为准。正式版发布前，也可按仓库
-    <a href="https://github.com/menghun3-cn/zhu-ye-ime" target="_blank" rel="noopener">README</a>
-    从源码自行构建。<strong>在线自动更新源已开通</strong>（镜像分发仓库
+    提供并附本站直链；<strong>在线自动更新源已开通</strong>（镜像分发仓库
     <a href="https://github.com/menghun3-cn/zhu-ye-updates" target="_blank" rel="noopener">zhu-ye-updates</a>，
-    在客户端设置中启用在线更新后自动获取；默认保持关闭、无任何网络请求）。Windows exe 安装包
-    已接入发布 CI 构建（Inno Setup），随正式发布作为 Releases 资产提供并放上直链。</p>
+    在客户端设置中启用在线更新后自动获取；默认保持关闭、无任何网络请求）。Windows
+    exe 安装包为 Releases 第 7 项资产，直链见下表。</p>
   </div>
 
   <h2>发行包</h2>
   <table class="docs">
-    <thead><tr><th>形态</th><th>状态</th><th>说明</th></tr></thead>
+    <thead><tr><th>形态</th><th>直链</th><th>说明</th></tr></thead>
     <tbody>
       <tr>
-        <td>便携 zip（<code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>）</td>
-        <td>内测期产物</td>
+        <td>Windows exe 安装包（<code>ai-zhu-ye-ime-setup-0.1.2.exe</code>，推荐）</td>
+        <td><span class="tag"><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases/download/v0.1.2/ai-zhu-ye-ime-setup-0.1.2.exe">下载 exe 安装包</a></span></td>
+        <td>Inno Setup 图形化安装包，安装/卸载复用发行包脚本语义（版本化 DLL、TSF 注册、预置领域包、
+        快捷方式；卸载保留 %APPDATA% 用户数据）</td>
+      </tr>
+      <tr>
+        <td>便携 zip（<code>ai-zhu-ye-ime-0.1.2.zip</code>）</td>
+        <td><span class="tag"><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases/download/v0.1.2/ai-zhu-ye-ime-0.1.2.zip">下载便携 zip</a></span></td>
         <td>含安装脚本、设置窗口、更新器与基础/领域词典；免安装 Rust，解压后以管理员运行
         <code>install.ps1</code> 即可安装</td>
       </tr>
-      <tr>
-        <td>Windows exe 安装包（<code>ai-zhu-ye-ime-setup-&lt;version&gt;.exe</code>）</td>
-        <td><span class="tag">CI 已接入</span></td>
-        <td>Inno Setup 图形化安装包，安装/卸载复用发行包脚本语义（版本化 DLL、TSF 注册、预置领域包、
-        快捷方式；卸载保留 %APPDATA% 用户数据）。随正式发布作为 Releases 第 7 项资产提供，届时本站放上直链</td>
-      </tr>
     </tbody>
   </table>
+  <p>校验值（SHA-256）见 Releases 资产的 <code>SHA256SUMS.txt</code>。全部资产以
+  <a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases</a>
+  实际发布为准；本站不托管安装包。</p>
 
   <h2>系统要求</h2>
   <table class="docs">
@@ -74,8 +75,8 @@
 
   <h2>安装</h2>
   <ol>
-    <li>从 <a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases</a>
-      取得当前发行包（内测期为 <code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>），解压到目标机
+    <li>从下表直链或 <a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">GitHub Releases</a>
+      取得当前发行包（正式版 v0.1.2；exe 安装包或便携 zip 二选一），exe 直接运行安装，zip 解压到目标机
       （无需安装 Rust）。</li>
     <li>右键「以管理员身份运行」PowerShell，执行包内脚本：<code>.\scripts\install.ps1</code>。</li>
     <li>进入系统设置
@@ -122,7 +123,7 @@
         <li><a href="https://github.com/menghun3-cn/zhu-ye-ime/releases" target="_blank" rel="noopener">Releases</a></li>
       </ul>
     </nav>
-    <div class="footer-status">Windows 内测版 · M1–M15 发布收尾：更新源已开通 · exe 安装包 CI 已接入 · Pages 已上线</div>
+    <div class="footer-status">Windows 10/11 x64 · v0.1.2 正式版 · 更新源已开通 · exe 安装包已发布 · Pages 已上线</div>
     <div class="footer-copy">© 2026 竹叶输入法 · 代码 MIT · 词典数据来源与许可证见仓库 docs/licenses.md · <a href="../llms.txt">llms.txt（AI 阅读版）</a></div>
   </div>
 </footer>
