@@ -31,7 +31,9 @@ Inno 安装语义（与验收标准 §17.1 对齐）：
 [CmdletBinding()]
 param(
     [string]$Version,
-    [string]$SignCommand
+    [string]$SignCommand,
+    [string]$OutputDir,
+    [string]$Sha256File
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,9 +64,14 @@ if (-not $iscc -or -not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
 }
 Write-Host "ISCC: $iscc"
 
+if (-not $OutputDir) {
+    $OutputDir = Join-Path $repoRoot 'target\portable'
+}
+$null = New-Item -ItemType Directory -Path $OutputDir -Force
+$OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 $portableRoot = Join-Path $repoRoot 'target\portable'
 $staging = Join-Path $portableRoot "ai-zhu-ye-ime-$Version-stage"
-$setupExe = Join-Path $portableRoot "ai-zhu-ye-ime-setup-$Version.exe"
+$setupExe = Join-Path $OutputDir "ai-zhu-ye-ime-setup-$Version.exe"
 $issPath = Join-Path $portableRoot "setup-$Version.iss"
 
 if (Test-Path -LiteralPath $staging) {
@@ -100,7 +107,7 @@ DisableDirPage=yes
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64compatible
-OutputDir=$portableRoot
+OutputDir=$OutputDir
 OutputBaseFilename=ai-zhu-ye-ime-setup-$Version
 Compression=lzma2
 SolidCompression=yes
@@ -150,4 +157,15 @@ $setupInfo = Get-Item -LiteralPath $setupExe
 $hash = (Get-FileHash -LiteralPath $setupExe -Algorithm SHA256).Hash
 Write-Host "安装包已生成: $setupExe（$([math]::Round($setupInfo.Length / 1MB, 2)) MB）"
 Write-Host "SHA-256: $hash"
+if ($Sha256File) {
+    # 追加到发布资产哈希清单（与 assemble-release 的 SHA256SUMS.txt 同格式：
+    # "<hash>  <相对或文件名>"，供发布校验与下载页提供校验值）
+    $line = "$hash  $(Split-Path -Leaf $setupExe)"
+    [System.IO.File]::AppendAllText(
+        $Sha256File,
+        $line + [Environment]::NewLine,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Write-Host "已追加哈希到: $Sha256File"
+}
 Write-Host '验收提示：干净机（或 VM 快照）以管理员运行，验证安装/覆盖/卸载闭环与 zip 载荷哈希一致（验收标准 §17.1）。'

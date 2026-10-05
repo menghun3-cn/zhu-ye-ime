@@ -74,6 +74,21 @@ jobs:
         shell: pwsh
         run: ./scripts/assemble-release.ps1
 
+      - name: Inno Setup 安装（构建 exe 安装包所需，T-097）
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: 构建 exe 安装包（Inno 外壳复用 install.ps1，载荷与 zip 同 staging；T-097）
+        shell: pwsh
+        run: |
+          $match = Select-String -LiteralPath 'Cargo.toml' -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if ($null -eq $match) { throw '无法读取 Cargo.toml version。' }
+          $version = $match.Matches[0].Groups[1].Value
+          $dir = "target/release-assets/$version"
+          ./scripts/build-setup.ps1 `
+            -OutputDir (Join-Path (Get-Location) $dir) `
+            -Sha256File (Join-Path (Get-Location) "$dir/SHA256SUMS.txt")
+
       - name: 端到端验证（apply 落地 / 哈希一致 / 篡改自愈 / 篡改 manifest 拒绝）
         shell: pwsh
         run: ./scripts/verify-release-e2e.ps1
@@ -93,6 +108,7 @@ jobs:
           $assets = @(
             "$dir/SHA256SUMS.txt",
             "$dir/ai-zhu-ye-ime-$version.zip",
+            "$dir/ai-zhu-ye-ime-setup-$version.exe",
             "$dir/packs/it.zyct",
             "$dir/packs/med.zyct",
             "$dir/packs/slang.zyct",
