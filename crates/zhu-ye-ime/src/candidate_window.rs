@@ -3,6 +3,7 @@
 //! 本模块负责把 `candidate_ui` 计算出的快照画出来，并提供 TSF 驱动的
 //! 受控窗口入口：同线程创建/更新/隐藏/销毁，不占用独立消息循环。
 
+use std::ffi::c_void;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -11,16 +12,17 @@ use std::sync::OnceLock;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetDIBits,
-    GetMonitorInfoW, GetStockObject, GetSysColor, InvalidateRect, MonitorFromWindow, ReleaseDC,
-    RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
-    COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET, DEFAULT_GUI_FONT,
-    DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, LOGFONTW, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY,
-    TRANSPARENT,
+    AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
+    CreateFontIndirectW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+    FillRect, GetCurrentObject, GetDC, GetDIBits, GetMonitorInfoW, GetObjectW, GetStockObject,
+    GetSysColor, InvalidateRect, MonitorFromWindow, ReleaseDC, RoundRect, SelectObject, SetBkMode,
+    SetTextColor, UpdateWindow, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_GRAYTEXT,
+    COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET,
+    DEFAULT_GUI_FONT, DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST, OBJ_FONT, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL,
+    PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -823,9 +825,24 @@ fn fill_round_rect(hdc: HDC, rect: RECT, color: UiColor, radius: i32) {
     }
 }
 
+/// T-074：含 emoji 的文本行经 DirectWrite 彩色路径渲染后预乘 alpha 合成。
+/// 字号取自绘制 DC 当前字体（与 GDI 候选行同尺寸）；失败回退 GDI。
 fn draw_text(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
     if text.is_empty() || rect.width() <= 0 || rect.height() <= 0 {
         return;
+    }
+    if crate::color_text::contains_color_glyph(text) {
+        let font_size = current_font_size(hdc);
+        if let Some(bmp) = crate::color_text::render_color_text(
+            text,
+            rect.width(),
+            rect.height(),
+            font_size,
+            color,
+        ) {
+            alpha_blend_bitmap(hdc, &to_win_rect(rect), &bmp);
+            return;
+        }
     }
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     let mut rect = to_win_rect(rect);
@@ -838,6 +855,87 @@ fn draw_text(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
             &mut rect,
             DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
+    }
+}
+
+/// 读取绘制 DC 当前字体逻辑尺寸（GDI 负 lfHeight ≈ 字符单元高，直接当
+/// DirectWrite 字号用；取不到时退 15px 保全路径）。
+fn current_font_size(hdc: HDC) -> f32 {
+    unsafe {
+        let hfont = GetCurrentObject(hdc, OBJ_FONT);
+        let mut lf = LOGFONTW::default();
+        if !hfont.is_invalid()
+            && GetObjectW(
+                HGDIOBJ(hfont.0),
+                std::mem::size_of::<LOGFONTW>() as i32,
+                Some(&mut lf as *mut _ as *mut c_void),
+            ) > 0
+            && lf.lfHeight != 0
+        {
+            return lf.lfHeight.unsigned_abs() as f32;
+        }
+        15.0
+    }
+}
+
+/// 把彩色位图（预乘 BGRA）经 `AlphaBlend(AC_SRC_ALPHA)` 合成到目标 DC。
+fn alpha_blend_bitmap(hdc: HDC, rect: &RECT, bmp: &crate::color_text::ColorBitmap) {
+    unsafe {
+        let width = bmp.width;
+        let height = bmp.height;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let src_dc = CreateCompatibleDC(Some(hdc));
+        if src_dc.is_invalid() {
+            return;
+        }
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // 自上而下
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let dib = match CreateDIBSection(
+            Some(src_dc),
+            &info,
+            DIB_RGB_COLORS,
+            &mut bits as *mut *mut c_void,
+            None,
+            0,
+        ) {
+            Ok(d) => d,
+            Err(_) => {
+                let _ = DeleteDC(src_dc);
+                return;
+            }
+        };
+        if bits.is_null() {
+            let _ = DeleteObject(dib.into());
+            let _ = DeleteDC(src_dc);
+            return;
+        }
+        let old = SelectObject(src_dc, dib.into());
+        std::ptr::copy_nonoverlapping(bmp.pixels.as_ptr(), bits as *mut u8, bmp.pixels.len());
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let _ = AlphaBlend(
+            hdc, rect.left, rect.top, width, height, src_dc, 0, 0, width, height, blend,
+        );
+        SelectObject(src_dc, old);
+        let _ = DeleteObject(dib.into());
+        let _ = DeleteDC(src_dc);
     }
 }
 

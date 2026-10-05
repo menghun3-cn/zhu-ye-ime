@@ -20,6 +20,9 @@ mod candidate_ui;
 #[path = "../candidate_window.rs"]
 mod candidate_window;
 
+#[path = "../color_text.rs"]
+mod color_text;
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("候选窗演示失败: {error}");
@@ -34,6 +37,7 @@ fn run() -> Result<(), String> {
     let mut seconds = None;
     let mut shot_path = None;
     let mut translation_mode = false;
+    let mut emoji_row = false;
 
     let mut index = 0usize;
     while index < args.len() {
@@ -63,10 +67,11 @@ fn run() -> Result<(), String> {
                 shot_path = Some(PathBuf::from(value));
             }
             "--translation-mode" => translation_mode = true,
+            "--emoji" => emoji_row = true,
             "--help" | "-h" => {
                 println!(
                     "用法: candidate-demo [--theme auto|light|dark|high-contrast] \
-                     [--dpi <px>] [--seconds <s>] [--shot <bmp>] [--translation-mode]"
+                     [--dpi <px>] [--seconds <s>] [--shot <bmp>] [--translation-mode] [--emoji]"
                 );
                 return Ok(());
             }
@@ -82,7 +87,7 @@ fn run() -> Result<(), String> {
         shot_path,
         custom_theme: None,
     };
-    run_candidate_demo(demo_view(translation_mode), &options)
+    run_candidate_demo(demo_view(translation_mode, emoji_row), &options)
 }
 
 fn take_value(args: &[String], index: &mut usize, arg: &str) -> Result<String, String> {
@@ -104,7 +109,25 @@ fn parse_theme(value: &str) -> Result<ThemePreference, String> {
     }
 }
 
-fn demo_view(translation_mode: bool) -> CandidateUiView {
+fn demo_view(translation_mode: bool, emoji_row: bool) -> CandidateUiView {
+    let mut items = vec![
+        item("你好", "Hello", CandidateSource::Static),
+        item("你们好", "Hello everyone", CandidateSource::Static),
+        item("你好呀", "Hi there", CandidateSource::User),
+        item("耐火", "Fire-resistant", CandidateSource::Static),
+        item("拟稿", "Draft", CandidateSource::Static),
+    ];
+    if emoji_row {
+        // T-074：注入彩色 emoji 候选行供截图验收（其余行保持 GDI 基线）。
+        items.insert(2, item("😂 笑声😀 开心", "", CandidateSource::Static));
+        items.push(item("完成 🚀", "", CandidateSource::Static));
+    }
+    items.extend([
+        item("溺爱", "Dote on", CandidateSource::Static),
+        item("逆光", "Backlight", CandidateSource::Static),
+        item("泥泞", "Muddy", CandidateSource::Static),
+        item("妮好", "", CandidateSource::Static),
+    ]);
     CandidateUiView {
         composition: "ni hao".to_owned(),
         pinyin_hint: "ni hao".to_owned(),
@@ -113,17 +136,7 @@ fn demo_view(translation_mode: bool) -> CandidateUiView {
         page_count: 1,
         selected: 0,
         translation_mode,
-        items: vec![
-            item("你好", "Hello", CandidateSource::Static),
-            item("你们好", "Hello everyone", CandidateSource::Static),
-            item("你好呀", "Hi there", CandidateSource::User),
-            item("耐火", "Fire-resistant", CandidateSource::Static),
-            item("拟稿", "Draft", CandidateSource::Static),
-            item("溺爱", "Dote on", CandidateSource::Static),
-            item("逆光", "Backlight", CandidateSource::Static),
-            item("泥泞", "Muddy", CandidateSource::Static),
-            item("妮好", "", CandidateSource::Static),
-        ],
+        items,
     }
 }
 
