@@ -123,3 +123,29 @@ jobs:
           # Release 可能已存在（重跑幂等）；失败忽略后走 upload --clobber。
           gh release create $tag --title $tag --notes-file $notesFile $prerelease --latest 2>$null
           gh release upload $tag @assets --clobber
+
+      - name: 发布更新源镜像（zhu-ye-updates，T-098）
+        if: github.event_name == 'push' || inputs.upload
+        shell: pwsh
+        env:
+          ZHU_YE_UPDATES_TOKEN: ${{ secrets.ZHU_YE_UPDATES_TOKEN }}
+        run: |
+          $version = "${{ github.ref_name }}"
+          if ($version -like 'v*') { $version = $version.Substring(1) }
+          $packsDir = "target/release-assets/$version/packs"
+          if (-not (Test-Path -LiteralPath "$packsDir\manifest.json" -PathType Leaf)) {
+            throw "feed 文件缺失: $packsDir\manifest.json"
+          }
+          $token = $env:ZHU_YE_UPDATES_TOKEN
+          if (-not $token) {
+            # GITHUB_TOKEN 不能跨仓库；未配置 PAT 时跳过并告警（不阻塞主发布）。
+            Write-Warning 'ZHU_YE_UPDATES_TOKEN 未配置（需要 zhu-ye-updates 的 contents:write 细粒度 PAT），跳过更新源镜像发布。'
+            exit 0
+          }
+          $env:GH_TOKEN = $token
+          $feedTag = "feed-v$version"
+          $sha = "${{ github.sha }}"
+          gh release create $feedTag --repo menghun3-cn/zhu-ye-updates --title $feedTag --notes "竹叶输入法更新源 feed v$version (commit $sha)" --target $sha 2>$null
+          gh release upload $feedTag --repo menghun3-cn/zhu-ye-updates `
+            "$packsDir\manifest.json" "$packsDir\it.zyct" "$packsDir\med.zyct" "$packsDir\slang.zyct" --clobber
+          Write-Host "更新源镜像已发布: https://github.com/menghun3-cn/zhu-ye-updates/releases/tag/$feedTag"
