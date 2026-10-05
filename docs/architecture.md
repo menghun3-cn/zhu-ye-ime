@@ -283,6 +283,31 @@ raw 数据（CC-CEDICT/FrequencyWords/GlobalVoices 等）
 - 其余增量字段（`theme` / `default_mode` 等）见设置窗口设计 §5.1，
   反序列化宽松原则（T-073）同 `log_level`。
 
+### 10.2 更新器会话常量与分发协议（T-098 修订）
+
+更新器（`crates/zhu-ye-updater`，P-03 默认关闭零网络）会话常量与协议
+唯一定义于 `main.rs`：
+
+- `DEFAULT_MANIFEST_URL` = 镜像分发仓库 `menghun3-cn/zhu-ye-updates` 的
+  `releases/latest/download/manifest.json`。镜像仓的 feed release 不带
+  prerelease 标记（tag 含 `-alpha` 不改变 latest 语义），绕开主仓 latest
+  拒绝 prerelease 的缺陷（T-096 §21.1）。可用环境变量 `ZHU_YE_MANIFEST_URL`
+  覆盖（测试/私有渠道/本地验收演练通道，见 Agent Note
+  `2026-10-05-updater-e2e-sandbox`）。
+- `BUILTIN_PUBLIC_KEY` = 构建期 `option_env!("ZHU_YE_RELEASE_PUBLIC_KEY")`；
+  未注入时更新器拒绝任何 manifest（信任锚不可缺失）。
+- 会话配置（`config.json` 增量字段）：`online_update`（默认 `false` →
+  零网络零 spawn）、`last_check`（check-once 天级节流 `CHECK_INTERVAL_DAYS`，
+  状态写入 `update_status.json` 供关于页显示）。
+- 校验与落地：manifest ed25519 签名 + 逐包 SHA-256
+  （`verify_pack_contents`）；staging → rename **原子替换**，旧版保留
+  `<id>.zyct.bak`（`rollback_pack` 回滚储备；损坏包重新 apply 自动备份+恢复）。
+- 更新范围仅 `DISTRIBUTABLE_PACK_IDS`（it/med/slang）：base.zyct 随安装包
+  只读交付、en.zyen 为引擎资产，都不进更新源。
+- feed 发布来源：release workflow `publish-updates` 步骤
+  （`ZHU_YE_UPDATES_TOKEN` 细粒度 PAT；未配跳过不阻塞主发布），见
+  [发布流程.md](./发布流程.md) 步骤 3.5。
+
 ## 11. 构建与验证规范
 
 ```bash
