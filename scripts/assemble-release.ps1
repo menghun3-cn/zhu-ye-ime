@@ -13,7 +13,7 @@
   4. 按输出的 SHA256SUMS.txt 上传 GitHub Releases 资产（zip + 各包 + manifest.json）。
 
 产物布局（release-assets/<version>/）：
-  ai-zhu-ye-ime-<version>.zip   安装/便携包（含 base.zyct、en.zyen、DLL、两个 exe）
+  zhu-ye-ime-<version>.zip     安装/便携包（含 base.zyct、en.zyen、DLL、两个 exe；命名见 T-108）
   packs/it.zyct med.zyct slang.zyct   可分发的领域包（DISTRIBUTABLE_PACK_IDS）
   manifest.json                 签名 manifest（schema 1，ed25519）
   SHA256SUMS.txt                上传核对清单
@@ -122,7 +122,7 @@ $portableZip = Join-Path $repoRoot "target\portable\ai-zhu-ye-ime-$Version-test.
 if (-not (Test-Path -LiteralPath $portableZip -PathType Leaf)) {
     throw "便携包未生成：$portableZip"
 }
-$zipDest = Join-Path $relDir "ai-zhu-ye-ime-$Version.zip"
+$zipDest = Join-Path $relDir "zhu-ye-ime-$Version.zip"
 Copy-Item -LiteralPath $portableZip -Destination $zipDest -Force
 
 # ---- 7. 上传核对清单 ----

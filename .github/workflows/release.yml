@@ -110,7 +110,7 @@ jobs:
           }
           $assets = @(
             "$dir/SHA256SUMS.txt",
-            "$dir/ai-zhu-ye-ime-$version.zip",
+            "$dir/zhu-ye-ime-$version.zip",
             "$dir/ai-zhu-ye-ime-setup-$version.exe",
             "$dir/packs/it.zyct",
             "$dir/packs/med.zyct",

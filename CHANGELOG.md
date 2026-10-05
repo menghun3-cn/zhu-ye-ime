@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### 变更
+
+- 发布命名：便携 zip 由 `ai-zhu-ye-ime-<v>.zip` 更名为 `zhu-ye-ime-<v>.zip`（exe、安装目录
+  `Program Files\ai-zhu-ye-ime` 与数据目录 `%APPDATA%\ai-zhu-ye-ime` 均不变；旧名资产在
+  v0.1.2 release 保留兼容）（T-108）
+
 ## [0.1.2] - 2026-10-05
 
 ### 新增
