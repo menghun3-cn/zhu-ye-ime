@@ -84,7 +84,10 @@ foreach ($p in $pages) {
             $fail++
         }
     }
-    if ($c -notmatch 'M1–M15 发布收尾：更新源已开通 · exe 安装包 CI 已接入 · Pages 已上线') {
+    # footer-status 必须携带当前发布口径：`Windows 10/11 x64 · v<版本> 正式版 · 更新源已开通
+    # · exe 安装包已发布 · Pages 已上线`（v0.1.2 release（718224d）起统一文案；版本号用
+    # 正则容错，避免每次发版改断言）。
+    if ($c -notmatch 'Windows 10/11 x64 · v\d+\.\d+\.\d+ 正式版 · 更新源已开通 · exe 安装包已发布 · Pages 已上线') {
         Write-Host "FAIL $name : version-status line out of date"
         $fail++
     }
