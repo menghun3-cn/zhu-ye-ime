@@ -542,29 +542,79 @@ impl InputEngine {
         true
     }
 
-    /// v 模式输入类型码（`1-9`/`x`/`h`）：刷新符号组候选。
-    /// 非法类型码返回 `false`（调用方应回退拼音）。
+    /// v 模式输入类型码（`1-9`/`x`/`h` → 符号组；单位键前缀字母 → 单位换算码，
+    /// T-104）：刷新对应候选。
+    ///
+    /// 非法类型码返回 `false`（调用方应回退拼音）。已定符号码后不再收字母；
+    /// 单位码可持续追加字母直至完整键（见 [`Self::v_accepts`]）。
     pub fn v_code(&mut self, c: char) -> bool {
         if !self.v_active() {
             return false;
         }
-        if zhu_ye_core::symbol_group(c).is_none() {
+        let already = &self.v_buffer[1..];
+        // 符号类型码只在「等待类型码」时接受；单位码进行中（如 `vs` 后
+        // 的 `h` 构成 `sh`）字母一律走单位判定，不被 x/h 符号码拦截（T-104）。
+        if already.is_empty() && zhu_ye_core::symbol_group(c).is_some() {
+            self.v_buffer.push(c);
+            self.refresh_v_candidates();
+            return true;
+        }
+        if !c.is_ascii_lowercase() {
             return false;
         }
-        self.v_buffer.push(c);
-        self.refresh_symbol_candidates();
-        true
+        let mut key = String::with_capacity(already.len() + 1);
+        key.push_str(already);
+        key.push(c);
+        if zhu_ye_core::unit_key_prefix(&key) {
+            self.v_buffer.push(c);
+            self.refresh_v_candidates();
+            return true;
+        }
+        false
     }
 
-    /// v 模式输入非法字母（如 `vi` 的 `i`）：退出 v 模式并把 `v`+该字母
+    /// v 模式是否接受该字母键（T-104）：符号类型码（`1-9`/`x`/`h`，仅等待
+    /// 类型码时）或单位键前缀字母（`v` 后按 `m` 留在 v 模式等待 `vmi`）。
+    ///
+    /// 供 TSF 键路分派：接受则进 `VCode`，否则回退拼音（`vi` 原语义保持）。
+    #[must_use]
+    pub fn v_accepts(&self, c: char) -> bool {
+        if !self.v_active() {
+            return false;
+        }
+        let already = &self.v_buffer[1..];
+        if already.is_empty() && zhu_ye_core::symbol_group(c).is_some() {
+            return true;
+        }
+        if !c.is_ascii_lowercase() {
+            return false;
+        }
+        let mut key = String::with_capacity(already.len() + 1);
+        key.push_str(already);
+        key.push(c);
+        zhu_ye_core::unit_key_prefix(&key)
+    }
+
+    /// v 模式输入非法字母（如 `vi` 的 `i`）：退出 v 模式并把 `v`+已收码+该字母
     /// 交给正常拼音路径（`vi` 进入组合，行为与直接输 `vi` 一致）。
+    ///
+    /// 已收**单位码**（如 `vm`/`vmi`）会一并并入组合（T-104：`vm`+`x` 得到
+    /// `vmx`，不丢已收字母）；已定**符号码**（如 `v1`）按原语义丢弃（回退
+    /// 拼音即放弃符号模式，`v1`+`i` 得到 `vi`）。
     pub fn v_consume(&mut self, c: char) -> bool {
         if !self.v_active() {
             return false;
         }
+        let tail = &self.v_buffer[1..];
+        let keep_unit = !tail.is_empty() && zhu_ye_core::unit_key_prefix(tail);
+        let mut prefix = String::with_capacity(self.v_buffer.len() + 1);
+        prefix.push('v');
+        if keep_unit {
+            prefix.push_str(tail);
+        }
         self.v_buffer.clear();
         self.candidates.clear();
-        self.composing.push('v');
+        self.composing.push_str(&prefix);
         self.composing.push(c);
         self.refresh_candidates();
         self.suggestion.clear();
@@ -592,7 +642,7 @@ impl InputEngine {
         }
         if self.v_buffer_len() > 1 {
             self.v_buffer.pop();
-            self.refresh_symbol_candidates();
+            self.refresh_v_candidates();
         } else {
             self.v_exit();
         }
@@ -1145,26 +1195,57 @@ impl InputEngine {
         self.layer = CandidateLayer::Chinese;
     }
 
-    /// 按 v 模式类型码刷新符号候选（FR-028）：来源 `Symbol`，一页 9 项。
-    fn refresh_symbol_candidates(&mut self) {
-        let Some(code) = self.v_buffer.chars().last() else {
+    /// 按 v 模式类型码刷新候选（FR-028；T-104 增单位换算码）：
+    /// 符号码（`1-9`/`x`/`h`）→ `Symbol` 来源符号组；单位键 → 等值换算串候选，
+    /// 同样来源 `Symbol`（v 模式候选整体语义一致，一页 ≤9 项）。
+    fn refresh_v_candidates(&mut self) {
+        if !self.v_active() {
+            self.candidates.clear();
+            self.cached_translation_candidates.clear();
+            self.page = 0;
+            self.selected_on_page = 0;
+            self.layer = CandidateLayer::Chinese;
             return;
+        }
+        let code = &self.v_buffer[1..];
+        let mut chars = code.chars();
+        let is_symbol = code.len() == 1
+            && chars
+                .next()
+                .is_some_and(|c| zhu_ye_core::symbol_group(c).is_some());
+        self.candidates = if is_symbol {
+            zhu_ye_core::symbol_group(code.chars().next().unwrap())
+                .map(|group| {
+                    group
+                        .iter()
+                        .enumerate()
+                        .map(|(index, text)| Candidate {
+                            text: (*text).to_owned(),
+                            translation: None,
+                            pinyin: None,
+                            score: index as i64,
+                            source: zhu_ye_core::candidate::CandidateSource::Symbol,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            zhu_ye_core::unit_candidates(code)
+                .map(|texts| {
+                    texts
+                        .iter()
+                        .enumerate()
+                        .map(|(index, text)| Candidate {
+                            text: (*text).to_owned(),
+                            translation: None,
+                            pinyin: None,
+                            score: index as i64,
+                            source: zhu_ye_core::candidate::CandidateSource::Symbol,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
         };
-        self.candidates = zhu_ye_core::symbol_group(code)
-            .map(|group| {
-                group
-                    .iter()
-                    .enumerate()
-                    .map(|(index, text)| Candidate {
-                        text: (*text).to_owned(),
-                        translation: None,
-                        pinyin: None,
-                        score: index as i64,
-                        source: zhu_ye_core::candidate::CandidateSource::Symbol,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         self.cached_translation_candidates.clear();
         self.page = 0;
         self.selected_on_page = 0;
@@ -2683,6 +2764,109 @@ mod tests {
         assert!(eng.v_consume('i'));
         assert!(!eng.v_active(), "vi 应退出 v 模式");
         assert_eq!(eng.composing(), "vi", "v+i 交给拼音组合");
+    }
+
+    // ---- T-104（v 模式单位换算全量表）----
+
+    #[test]
+    fn v模式单位键前缀留在模式内() {
+        let mut eng = engine();
+        eng.v_start();
+        assert!(eng.v_accepts('m'), "m 是单位键前缀，应留在 v 模式");
+        assert!(eng.v_code('m'));
+        assert_eq!(eng.v_buffer_len(), 2);
+        // 前缀未完：候选为空但模式保持。
+        assert!(eng.candidates().is_empty());
+        assert!(eng.v_active());
+        assert!(eng.v_accepts('i'), "mi 完整键仍接受（等于前缀）");
+        assert!(eng.v_code('i'));
+        assert_eq!(eng.v_buffer_len(), 3);
+    }
+
+    #[test]
+    fn v模式单位键出换算候选() {
+        let mut eng = engine();
+        eng.v_start();
+        for c in "mi".chars() {
+            assert!(eng.v_code(c));
+        }
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts[0], "1 米 = 10 分米");
+        assert!(texts.contains(&"1 米 = 0.001 千米"));
+        assert_eq!(
+            eng.candidates()[0].source,
+            zhu_ye_core::candidate::CandidateSource::Symbol
+        );
+        assert!(eng.v_symbol_count() <= 9, "单位换算候选不超过一页");
+    }
+
+    #[test]
+    fn v模式市斤与温度键() {
+        let mut eng = engine();
+        eng.v_start();
+        for c in "jin".chars() {
+            eng.v_code(c);
+        }
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert!(texts.contains(&"1 市斤 = 500 克"));
+
+        eng.v_exit();
+        eng.v_start();
+        for c in "she".chars() {
+            eng.v_code(c);
+        }
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert!(texts.contains(&"0 摄氏度 = 32 华氏度 = 273.15 开尔文"));
+    }
+
+    #[test]
+    fn v模式前缀续输秒与回退() {
+        let mut eng = engine();
+        eng.v_start();
+        // vmi 完整键=米；继续 vmia/vmiao 得到秒键。
+        for c in "mia".chars() {
+            eng.v_code(c);
+        }
+        assert!(eng.v_active());
+        assert!(eng.candidates().is_empty(), "mia 未完成不出候选");
+        eng.v_code('o');
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert!(texts.contains(&"1 秒 = 1000 毫秒"));
+        // 退格返回 v，恢复等待类型码。
+        eng.v_backspace();
+        eng.v_backspace();
+        eng.v_backspace();
+        eng.v_backspace();
+        assert_eq!(eng.v_buffer_len(), 1, "退格逐步回到纯 v");
+        assert!(eng.candidates().is_empty(), "纯 v 无候选");
+    }
+
+    #[test]
+    fn v模式单位码后非法字母回退拼音() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('m');
+        // "vmx"：x 是符号码但不是 "mx" 前缀 → 回退拼音。
+        assert!(!eng.v_accepts('x') || !eng.v_active());
+        let mut eng2 = engine();
+        eng2.v_start();
+        for c in "m".chars() {
+            eng2.v_code(c);
+        }
+        assert!(eng2.v_consume('x'), "非前缀字母走 v_consume");
+        assert!(!eng2.v_active());
+        assert_eq!(eng2.composing(), "vmx");
+    }
+
+    #[test]
+    fn v模式符号码后不接受单位字母() {
+        let mut eng = engine();
+        eng.v_start();
+        eng.v_code('1');
+        assert!(!eng.v_accepts('m'), "v1 已定符号码，不再收单位字母");
+        assert!(!eng.v_code('m'), "v_code 拒绝符号码后的单位字母");
+        let texts: Vec<&str> = eng.candidates().iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts.len(), 9, "v1 候选保持序号组");
     }
 
     #[test]

@@ -694,8 +694,9 @@ fn plan_action(
 
     match action {
         KeyAction::Letter(c) if engine.v_active() => {
-            // FR-028：类型码（x/h）出对应符号组，其余字母（含 `v`/`i`）回退拼音。
-            if matches!(c, 'x' | 'h') {
+            // FR-028 + T-104：符号类型码（x/h）与单位键前缀字母进 v 模式
+            // （`vmi` 单位换算码），其余字母（含 `v`/`i`）回退拼音。
+            if engine.v_accepts(c) {
                 Some(KeyAction::VCode(c))
             } else {
                 Some(KeyAction::VConsume(c))
