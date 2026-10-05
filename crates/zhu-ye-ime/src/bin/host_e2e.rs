@@ -1490,19 +1490,16 @@ fn m12_checks(path: Option<&Path>, runner: &mut Runner) -> Result<(), String> {
         DictionaryEntry::new("爱", "ai", 85),
     ]));
 
+    let contact_with = |name: &str, org: &str, email: &str, address: &str| VCardContact {
+        org: org.to_owned(),
+        email: email.to_owned(),
+        address: address.to_owned(),
+        ..VCardContact::new(name)
+    };
     let contacts = vec![
-        VCardContact {
-            name: "张三".to_owned(),
-            keys: Vec::new(),
-        },
-        VCardContact {
-            name: "曾子".to_owned(),
-            keys: Vec::new(),
-        },
-        VCardContact {
-            name: "Alice".to_owned(),
-            keys: Vec::new(),
-        },
+        contact_with("张三", "竹叶科技", "bob@acme.com", "北京市"),
+        VCardContact::new("曾子"),
+        VCardContact::new("Alice"),
     ];
     let index = build_contact_index(&contacts);
 
@@ -1611,6 +1608,56 @@ fn m12_checks(path: Option<&Path>, runner: &mut Runner) -> Result<(), String> {
         runner.fail(
             "无联系人命中时与无联系人引擎逐位一致（12.1-用例5）",
             &format!("boosted={boosted_texts:?} baseline={baseline_texts:?}"),
+        );
+    }
+
+    // ---- 12.1-用例7：公司名拼音命中（D-20 扩展，T-102）----
+    engine.handle_escape();
+    type_text(&mut engine, "zhuye");
+    let org_cands = snapshot(&mut engine);
+    if org_cands
+        .iter()
+        .any(|(t, s)| t == "张三" && *s == CandidateSource::Contact)
+    {
+        runner.pass("公司名拼音 zhuye 命中张三（12.1-用例7）");
+    } else {
+        runner.fail(
+            "公司名拼音 zhuye 命中张三（12.1-用例7）",
+            &format!("候选: {org_cands:?}"),
+        );
+    }
+
+    // ---- 12.1-用例8：邮箱前缀命中（D-20 扩展，T-102）----
+    // 邮箱归一为连续小写键（符号跳过）：bob@acme.com → bobacmecom；
+    // 输入邮箱用户名段前缀 bob 即命中（邮箱专属键，不与姓名/公司/地址键重叠）。
+    engine.handle_escape();
+    type_text(&mut engine, "bob");
+    let email_cands = snapshot(&mut engine);
+    if email_cands
+        .iter()
+        .any(|(t, s)| t == "张三" && *s == CandidateSource::Contact)
+    {
+        runner.pass("邮箱前缀 bob 命中张三（12.1-用例8）");
+    } else {
+        runner.fail(
+            "邮箱前缀 bob 命中张三（12.1-用例8）",
+            &format!("候选: {email_cands:?}"),
+        );
+    }
+
+    // ---- 12.1-用例9：地址拼音命中（D-20 扩展，T-102）----
+    engine.handle_escape();
+    type_text(&mut engine, "beijing");
+    let addr_cands = snapshot(&mut engine);
+    if addr_cands
+        .iter()
+        .any(|(t, s)| t == "张三" && *s == CandidateSource::Contact)
+    {
+        runner.pass("地址拼音 beijing 命中张三（12.1-用例9）");
+    } else {
+        runner.fail(
+            "地址拼音 beijing 命中张三（12.1-用例9）",
+            &format!("候选: {addr_cands:?}"),
         );
     }
 
