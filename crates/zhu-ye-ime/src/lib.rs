@@ -8,6 +8,7 @@
 
 pub mod candidate_ui;
 pub mod candidate_window;
+pub mod color_text;
 pub mod input;
 pub mod lang_bar;
 pub mod tsf;

@@ -1240,6 +1240,7 @@ version = "0.1.2-alpha"
 dependencies = [
  "windows",
  "windows-core",
+ "windows-numerics",
  "zhu-ye-core",
  "zhu-ye-ui",
 ]
