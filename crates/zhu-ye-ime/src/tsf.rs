@@ -41,10 +41,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
-    ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfKeyEventSink,
-    ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
-    ITfTextInputProcessor_Impl, ITfThreadMgr, TfAnchor, TF_AE_END, TF_DEFAULT_SELECTION,
-    TF_ES_READWRITE, TF_ES_SYNC, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
+    ITfEditSession, ITfEditSession_Impl, ITfFnConfigure, ITfFnConfigure_Impl, ITfFunction,
+    ITfFunction_Impl, ITfInsertAtSelection, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr,
+    ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl,
+    ITfThreadMgr, TfAnchor, TF_AE_END, TF_DEFAULT_SELECTION, TF_ES_READWRITE, TF_ES_SYNC,
+    TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
 };
 use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
@@ -337,7 +338,13 @@ impl IClassFactory_Impl for ClassFactory_Impl {
     }
 }
 
-#[implement(ITfTextInputProcessorEx, ITfKeyEventSink, ITfCompositionSink)]
+#[implement(
+    ITfTextInputProcessorEx,
+    ITfKeyEventSink,
+    ITfCompositionSink,
+    ITfFunction,
+    ITfFnConfigure
+)]
 struct TextService {
     state: Arc<SharedEngine>,
 }
@@ -351,6 +358,26 @@ impl TextService {
 impl Drop for TextService {
     fn drop(&mut self) {
         object_released();
+    }
+}
+
+impl ITfFunction_Impl for TextService_Impl {
+    // T-114：系统输入法设置入口显示名（Win10 语言栏/Win11 输入法设置菜单）。
+    fn GetDisplayName(&self) -> windows::core::Result<windows::core::BSTR> {
+        Ok(windows::core::BSTR::from("竹叶输入法 设置"))
+    }
+}
+
+impl ITfFnConfigure_Impl for TextService_Impl {
+    // T-114：系统调用本节打开设置窗口（D-26 规划入口之一）。
+    fn Show(
+        &self,
+        _hwndparent: windows::Win32::Foundation::HWND,
+        _langid: u16,
+        _pguidprofile: *const windows::core::GUID,
+    ) -> windows::core::Result<()> {
+        crate::lang_bar::launch_settings();
+        Ok(())
     }
 }
 
@@ -930,7 +957,7 @@ fn replace_last_chars(context: &ITfContext, ec: u32, replace_len: usize, text: &
             }
         }
     }
-    let wide = to_wide(text);
+    let wide = to_wide_no_term(text);
     unsafe {
         range.SetText(ec, 0, &wide)?;
     }
@@ -1175,7 +1202,7 @@ fn update_composition(
     ec: u32,
     text: &str,
 ) -> Result<()> {
-    let wide = to_wide(text);
+    let wide = to_wide_no_term(text);
     let existing = state.lock().unwrap().composition.clone();
     match existing {
         Some(composition) => {
@@ -1195,18 +1222,16 @@ fn update_composition(
             // 已验证。改为 QUERYONLY 取得插入点 range，再由
             // StartComposition + range.SetText 写入（组合范围会覆盖新文本，
             // 探针已用 GetText 逐键验证）。
-            let wide_text = &wide[..wide.len() - 1];
-            let range =
-                match unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, wide_text) } {
-                    Ok(range) => {
-                        debug_log("zhu-ye: comp-insert-ok");
-                        range
-                    }
-                    Err(err) => {
-                        debug_log(&format!("zhu-ye: comp-insert-err {err:?}"));
-                        return Err(err);
-                    }
-                };
+            let range = match unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &wide) } {
+                Ok(range) => {
+                    debug_log("zhu-ye: comp-insert-ok");
+                    range
+                }
+                Err(err) => {
+                    debug_log(&format!("zhu-ye: comp-insert-err {err:?}"));
+                    return Err(err);
+                }
+            };
             debug_log("zhu-ye: comp-ccomp-begin");
             let composition_services = context.cast::<ITfContextComposition>()?;
             debug_log("zhu-ye: comp-ccomp-cast-ok");
@@ -1221,7 +1246,7 @@ fn update_composition(
                         return Err(err);
                     }
                 };
-            if let Err(err) = unsafe { range.SetText(ec, 0, wide_text) } {
+            if let Err(err) = unsafe { range.SetText(ec, 0, &wide) } {
                 debug_log(&format!("zhu-ye: comp-settext-err {err:?}"));
                 // 组合已启动但写入失败：立即结束空组合，避免悬挂。
                 let _ = unsafe { composition.EndComposition(ec) };
@@ -1248,7 +1273,7 @@ fn finish_composition(
             let wide: Vec<u16> = if text.is_empty() {
                 Vec::new()
             } else {
-                to_wide(text)
+                to_wide_no_term(text)
             };
             let range = unsafe { composition.GetRange() }?;
             unsafe { range.SetText(ec, 0, &wide) }?;
@@ -1263,11 +1288,10 @@ fn finish_composition(
         }
         None if !text.is_empty() => {
             let insert = context.cast::<ITfInsertAtSelection>()?;
-            let wide = to_wide(text);
-            let wide_text = &wide[..wide.len() - 1];
+            let wide = to_wide_no_term(text);
             // 同 update_composition：QUERYONLY + SetText 绕过崩溃的写入分支。
-            let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, wide_text) }?;
-            unsafe { range.SetText(ec, 0, wide_text) }?;
+            let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &wide) }?;
+            unsafe { range.SetText(ec, 0, &wide) }?;
             debug_log(&format!("zhu-ye: commit-no-comp {text:?}"));
         }
         None => {
@@ -1277,9 +1301,17 @@ fn finish_composition(
     Ok(())
 }
 
-/// 将 UTF-8 文本转为以空字符结尾的 UTF-16 序列。
+/// 将 UTF-8 文本转为以空字符结尾的 UTF-16 序列（供 PCWSTR 类 API 使用）。
 fn to_wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 将 UTF-8 文本转为**不含**空结尾的 UTF-16 序列。
+///
+/// `ITfRange::SetText` 按 slice 长度写入文档，尾随 NUL 会作为 U+0000
+/// 上屏（2026-10-06 实地验收：部分输入框上屏文本段间出现 NUL，T-113）。
+fn to_wide_no_term(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
 }
 
 /// 输出调试日志（第十一期 FR-060，T-091 分级后的 debug 级入口）：
@@ -1288,7 +1320,7 @@ fn to_wide(text: &str) -> Vec<u16> {
 /// （VM 取证零改动），否则按产品轨级别门写用户目录日志。调用点默认包
 /// `should_log` 前置守卫（热路径构造前短路）。
 #[inline]
-fn debug_log(message: &str) {
+pub(crate) fn debug_log(message: &str) {
     product_log(zhu_ye_core::LogLevel::Debug, message);
 }
 
@@ -1954,6 +1986,16 @@ mod tests {
         assert_send::<SharedEngine>();
     }
 
+    /// T-113：SetText 使用的 UTF-16 序列不得携带空结尾（否则以 U+0000 上屏）。
+    #[test]
+    fn to_wide_no_term不携带空结尾() {
+        assert_eq!(to_wide_no_term("你好"), vec![0x4F60, 0x597D]);
+        assert_eq!(to_wide_no_term("ab"), vec![b'a' as u16, b'b' as u16]);
+        assert!(to_wide_no_term("").is_empty());
+        // 对照：PCWSTR 用的 to_wide 必须带空结尾（供指针类 API 消费）。
+        assert_eq!(to_wide("你好").pop(), Some(0));
+    }
+
     /// T-046：模式切换处理器闭包（Weak<…> 捕获）必须可跨线程。
     #[test]
     fn 语言栏点击处理器可跨线程() {
@@ -2363,8 +2405,12 @@ mod tests {
             crate::input::CandidateLayer::Translation
         );
         let before = state.lock().unwrap().engine.page();
+        let pages = state.lock().unwrap().engine.page_count();
         sync_engine(&state, KeyAction::PageDown);
-        assert_eq!(state.lock().unwrap().engine.page(), before);
+        // 译文层与中文层翻页语义一致（next_page：下翻一页、末页回卷）。
+        // 对齐 T-013 旧断言与 input.rs 演进的漂移（2026-10-06 回归基线修复）。
+        let after = if before + 1 < pages { before + 1 } else { 0 };
+        assert_eq!(state.lock().unwrap().engine.page(), after);
         sync_engine(&state, KeyAction::ToggleMode);
         assert_eq!(state.lock().unwrap().engine.mode(), InputMode::English);
     }
