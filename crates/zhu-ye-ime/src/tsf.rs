@@ -1536,6 +1536,9 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
         None => InputEngine::with_bigram(dictionary, bigram),
     };
     let engine = domain_engine(engine, &plan, config.enable_domain_boost);
+    // O-05 修订（T-103）：简拼与模糊音可配置关闭；默认开（ConfigFile 缺省 true）。
+    let engine = engine.with_abbreviation(config.enable_abbreviation);
+    let engine = engine.with_fuzzy(config.enable_fuzzy);
     let engine = contact_engine(engine, &config);
     let engine = if let Some(lexicon) = en_lexicon {
         engine.with_en_lexicon(lexicon)

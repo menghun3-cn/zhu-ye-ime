@@ -435,6 +435,30 @@ fn m7_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
         runner.fail("简拼候选确定性", "两次结果不一致");
     }
 
+    // ---- T-103（O-05 修订）：简拼/模糊音关闭开关 ----
+    let off_dict: Arc<dyn Dictionary> = Arc::new(InMemoryDictionary::from_entries(vec![
+        DictionaryEntry::new("你好", "nihao", 100),
+        DictionaryEntry::new("中国", "zhongguo", 92),
+    ]));
+    let mut off = InputEngine::with_bigram(off_dict.clone(), Arc::new(InMemoryBigramModel::new()))
+        .with_abbreviation(false)
+        .with_fuzzy(false);
+    off.handle_escape();
+    let off_nh = type_and(&mut off, "nh");
+    let off_zongguo = type_and(&mut off, "zongguo");
+    let off_clean = off_nh.iter().all(|(text, _)| text != "你好")
+        && off_zongguo
+            .iter()
+            .all(|(text, source)| text != "中国" && *source != CandidateSource::Corrected);
+    if off_clean {
+        runner.pass("关闭简拼与模糊音后 nh/zongguo 均不介入（T-103）");
+    } else {
+        runner.fail(
+            "关闭简拼与模糊音后 nh/zongguo 均不介入（T-103）",
+            &format!("nh={off_nh:?} zongguo={off_zongguo:?}"),
+        );
+    }
+
     // ---- FR-024 模糊音与纠错 ----
     let zongguo = type_and(&mut engine, "zongguo");
     match zongguo

@@ -226,6 +226,16 @@ pub struct ConfigFile {
     /// 关闭后领域候选恢复既有追加语义（T-050 基线，不做位次上移）。
     #[serde(default = "default_domain_boost")]
     pub enable_domain_boost: bool,
+    /// 简拼输入开关（FR-023；O-05 修订，T-103）；默认 `true`。
+    /// 关闭后 2-4 位不可切分字母的首字母展开（词典简拼）不介入；
+    /// **边界**：网络语缩写路径（FR-016/FR-017）与联系人索引原生简拼键
+    /// （FR-037）不随本开关变化。
+    #[serde(default = "default_enable_abbreviation")]
+    pub enable_abbreviation: bool,
+    /// 模糊音与纠错开关（FR-024；O-05 修订，T-103）；默认 `true`。
+    /// 关闭后纠错组（模糊替换 + 少字母补全）不生成，其余路径不变。
+    #[serde(default = "default_enable_fuzzy")]
+    pub enable_fuzzy: bool,
     /// 通讯录 vCard 文件路径列表（FR-038，场景9；D-19 配置触发导入）。
     /// 为空 = 不导入、无联系人候选（清单与现版逐位一致，T-050 基线不漂移）。
     #[serde(default)]
@@ -251,6 +261,14 @@ fn default_domain_boost() -> bool {
     true
 }
 
+fn default_enable_abbreviation() -> bool {
+    true
+}
+
+fn default_enable_fuzzy() -> bool {
+    true
+}
+
 impl Default for ConfigFile {
     fn default() -> Self {
         Self {
@@ -259,6 +277,8 @@ impl Default for ConfigFile {
             online_update: false,
             last_check: None,
             enable_domain_boost: true,
+            enable_abbreviation: true,
+            enable_fuzzy: true,
             contact_vcards: Vec::new(),
             theme: ThemeChoice::Light,
             default_mode: ModeChoice::Chinese,
@@ -645,6 +665,24 @@ mod tests {
         // 旧配置文件（无该字段）加载时默认开。
         let legacy = ConfigFile::from_json(r#"{"enabled_packs": ["it"]}"#).unwrap();
         assert!(legacy.enable_domain_boost);
+    }
+
+    #[test]
+    fn 简拼与模糊音开关默认开且可关闭往返() {
+        // O-05 修订（T-103）：新字段默认 true（旧配置无字段按默认）。
+        let config = ConfigFile::default();
+        assert!(config.enable_abbreviation && config.enable_fuzzy);
+        let legacy = ConfigFile::from_json(r#"{"enabled_packs": ["it"]}"#).unwrap();
+        assert!(legacy.enable_abbreviation && legacy.enable_fuzzy);
+        // 显式关闭序列化往返一致。
+        let off = ConfigFile::from_json(r#"{"enable_abbreviation": false, "enable_fuzzy": false}"#)
+            .unwrap();
+        assert!(!off.enable_abbreviation && !off.enable_fuzzy);
+        let text = off.to_json().unwrap();
+        assert_eq!(ConfigFile::from_json(&text).unwrap(), off);
+        // 单开关独立生效。
+        let only_fuzzy = ConfigFile::from_json(r#"{"enable_fuzzy": false}"#).unwrap();
+        assert!(only_fuzzy.enable_abbreviation && !only_fuzzy.enable_fuzzy);
     }
 
     #[test]
