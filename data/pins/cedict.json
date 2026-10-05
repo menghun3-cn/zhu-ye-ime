@@ -8,8 +8,8 @@
   "cache_file": "cedict.ts.gz",
   "license": "CC BY-SA 4.0",
   "license_note": "派生词典数据文件按 CC BY-SA 4.0 发布",
-  "sha256": "FD16B26F991724564037D7EB19105397C5F1B17938EBDA95BBBE67D642CF5FDA",
-  "size": 3978521,
+  "sha256": "545476AF88E2D11B8697CA53B6249F3186F0A8D1540A4572DDDA898065EB3AE2",
+  "size": 3978669,
   "fetched_at": "2026-10-05",
-  "note": "第一期已入库基线源（数据清单 D-001）；pin 用于统一核对，缓存路径沿用 data/raw（M6-P 迁移后统一入 data/cache）。2026-10-05 源更新重锁（CC-CEDICT 月度更新，CI 试跑 T-095 拦截旧锁漂移；新内容 gzip 完整、抽查含内卷/躺平等新增词条）"
+  "note": "第一期已入库基线源（数据清单 D-001）；pin 用于统一核对，缓存路径沿用 data/raw（M6-P 迁移后统一入 data/cache）。2026-10-05 源更新重锁（CC-CEDICT 月度更新，CI 试跑 T-095 拦截旧锁漂移；新内容 gzip 完整、抽查含内卷/躺平等新增词条）；2026-10-05 二次重锁（正式发布 v0.1.2 的 release.yml run 37289789026 拦截；人工审查：解压 125,223 行、头部 License 注释正常、抽查含躺平/元宇宙等近年新词条、无异常字节）"
 }
