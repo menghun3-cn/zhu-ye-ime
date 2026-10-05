@@ -16,14 +16,16 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $chgPath = Join-Path $root 'CHANGELOG.md'
 if (-not (Test-Path -LiteralPath $chgPath -PathType Leaf)) {
-    throw "缺少 CHANGELOG.md：$chgPath"
+    Write-Error "缺少 CHANGELOG.md：$chgPath"
+    exit 1
 }
 $chg = Get-Content -LiteralPath $chgPath -Raw -Encoding UTF8
 
 # 标题行 `## [0.1.2-alpha] - 2026-10-04`（独立匹配标题行，避免组合正则的行尾陷阱）
 $hdr = [regex]::Match($chg, "(?m)^## \[$([regex]::Escape($Version))\] - .*$")
 if (-not $hdr.Success) {
-    throw "CHANGELOG 中未找到版本段：$Version"
+    Write-Error "CHANGELOG 中未找到版本段：$Version"
+    exit 1
 }
 $tail = $chg.Substring($hdr.Index + $hdr.Length)
 $nxt = [regex]::Match($tail, "(?m)^## ")
@@ -41,3 +43,6 @@ if ($NotesFile) {
 } else {
     Write-Output $body
 }
+# 显式成功退出码：避免调用方读取 $LASTEXITCODE 时沿用上个 native 命令的残留值
+# （发布 CI 曾因此误判「生成发布说明失败」，见 T-097 正式发布 v0.1.2 run 37290578197）
+exit 0
