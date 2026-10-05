@@ -99,8 +99,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = "${{ github.ref_name }}"
-          if ($version -like 'v*') { $version = $version.Substring(1) }
+          # 版本唯一源 = Cargo.toml workspace.package.version（与构建步骤一致）；
+          # 不能用 github.ref_name——workflow_dispatch 时 ref_name 是 default 分支名。
+          $match = Select-String -LiteralPath 'Cargo.toml' -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if ($null -eq $match) { throw '无法读取 Cargo.toml version。' }
+          $version = $match.Matches[0].Groups[1].Value
           $dir = "target/release-assets/$version"
           if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
             throw "发布资产目录缺失: $dir"
@@ -135,8 +138,10 @@ jobs:
         env:
           ZHU_YE_UPDATES_TOKEN: ${{ secrets.ZHU_YE_UPDATES_TOKEN }}
         run: |
-          $version = "${{ github.ref_name }}"
-          if ($version -like 'v*') { $version = $version.Substring(1) }
+          # 版本统一读 Cargo.toml（同上传步骤；dispatch 时 ref_name 是分支名）。
+          $match = Select-String -LiteralPath 'Cargo.toml' -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if ($null -eq $match) { throw '无法读取 Cargo.toml version。' }
+          $version = $match.Matches[0].Groups[1].Value
           $packsDir = "target/release-assets/$version/packs"
           if (-not (Test-Path -LiteralPath "$packsDir\manifest.json" -PathType Leaf)) {
             throw "feed 文件缺失: $packsDir\manifest.json"
@@ -149,8 +154,9 @@ jobs:
           }
           $env:GH_TOKEN = $token
           $feedTag = "feed-v$version"
-          $sha = "${{ github.sha }}"
-          gh release create $feedTag --repo menghun3-cn/zhu-ye-updates --title $feedTag --notes "竹叶输入法更新源 feed v$version (commit $sha)" --target $sha 2>$null
+          # 不带 --target：主仓 commit 不是镜像仓对象，create 会 404 且被吞导致
+          # upload 报 release not found（2026-10-05 修复）；默认落到镜像仓 main tip。
+          gh release create $feedTag --repo menghun3-cn/zhu-ye-updates --title $feedTag --notes "竹叶输入法更新源 feed v$version (commit ${{ github.sha }})" 2>$null
           gh release upload $feedTag --repo menghun3-cn/zhu-ye-updates `
             "$packsDir\manifest.json" "$packsDir\it.zyct" "$packsDir\med.zyct" "$packsDir\slang.zyct" --clobber
           Write-Host "更新源镜像已发布: https://github.com/menghun3-cn/zhu-ye-updates/releases/tag/$feedTag"
