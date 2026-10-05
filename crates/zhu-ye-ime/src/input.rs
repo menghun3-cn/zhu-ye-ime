@@ -3204,18 +3204,9 @@ mod tests {
     /// 内存构造联系人引擎：基础 = seed，联系人 = 张三/曾子/Alice。
     fn contact_engine() -> InputEngine {
         let contacts = vec![
-            zhu_ye_core::VCardContact {
-                name: "张三".to_owned(),
-                keys: Vec::new(),
-            },
-            zhu_ye_core::VCardContact {
-                name: "曾子".to_owned(),
-                keys: Vec::new(),
-            },
-            zhu_ye_core::VCardContact {
-                name: "Alice".to_owned(),
-                keys: Vec::new(),
-            },
+            zhu_ye_core::VCardContact::new("张三"),
+            zhu_ye_core::VCardContact::new("曾子"),
+            zhu_ye_core::VCardContact::new("Alice"),
         ];
         let index = zhu_ye_core::build_contact_index(&contacts);
         InputEngine::with_m1_seed().with_contacts(index)
@@ -3304,10 +3295,7 @@ mod tests {
         let mut baseline = InputEngine::with_m1_seed();
         let mut with_contacts =
             InputEngine::with_m1_seed().with_contacts(zhu_ye_core::build_contact_index(&[
-                zhu_ye_core::VCardContact {
-                    name: "欧阳锋".to_owned(),
-                    keys: Vec::new(),
-                },
+                zhu_ye_core::VCardContact::new("欧阳锋"),
             ]));
         // 无配置基线句柄模拟：引擎未挂联系人，输入与联系人无关的串。
         type_text(&mut with_contacts, "nihao");
