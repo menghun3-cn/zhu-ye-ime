@@ -277,6 +277,9 @@ raw 数据（CC-CEDICT/FrequencyWords/GlobalVoices 等）
   按该级别门写 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`（1 MiB 轮转，
   见[诊断产品化设计.md](./诊断产品化设计.md)）；`warn` 为默认时热路径
   零文件 IO（D-72）。
+- `enable_abbreviation` / `enable_fuzzy`（FR-023/FR-024，O-05 修订 T-103）：
+  简拼首字母展开与模糊音/纠错组的开关，缺省 `true`（旧配置无字段按默认）。
+  关闭后对应的候选生成路径不介入（见方案设计 §12.3.4）。
 - 其余增量字段（`theme` / `default_mode` 等）见设置窗口设计 §5.1，
   反序列化宽松原则（T-073）同 `log_level`。
 

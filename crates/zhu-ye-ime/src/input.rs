@@ -111,6 +111,14 @@ pub struct InputEngine {
     /// 英文词表文件（T-085，`en.zyen`，mmap）；`None` = 回退第五期内嵌静态表
     /// （`en_words.rs`，行为一致）。启动装配时由调用方挂载，加载失败不影响输入。
     en_lexicon: Option<zhu_ye_core::en_lexicon::EnLexicon>,
+    /// 简拼路径开关（FR-023；O-05 修订：原"不新增配置开关"扩展为可关闭）。
+    /// 默认开；关闭后主候选为空的 2-4 位不可切分字母走首字母展开（FR-023
+    /// 词典简拼）不介入。**边界**：联系人索引原生简拼键（FR-037）与网络语
+    /// 缩写路径（FR-016/FR-017）不随本开关变化。
+    enable_abbreviation: bool,
+    /// 模糊音与纠错开关（FR-024；O-05 修订）。默认开；关闭后纠错组
+    /// （模糊替换 + 少字母补全，`corrected_candidates`）不生成。
+    enable_fuzzy: bool,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -183,6 +191,8 @@ impl InputEngine {
             contacts: None,
             contact_cap: CONTACT_CANDIDATES_CAP,
             en_lexicon: None,
+            enable_abbreviation: true,
+            enable_fuzzy: true,
         }
     }
 
@@ -212,6 +222,24 @@ impl InputEngine {
     #[must_use]
     pub fn with_domain_boost(mut self, enabled: bool) -> Self {
         self.enable_domain_boost = enabled;
+        self
+    }
+
+    /// 设置简拼开关（FR-023；O-05 修订：原"不新增配置开关"扩展为可关闭）。
+    /// 默认开；关闭后主候选为空的 2-4 位不可切分字母不再走首字母展开。
+    /// **边界**：网络语缩写路径（FR-016/FR-017）与联系人索引原生简拼键
+    /// （FR-037）不随本开关变化。
+    #[must_use]
+    pub fn with_abbreviation(mut self, enabled: bool) -> Self {
+        self.enable_abbreviation = enabled;
+        self
+    }
+
+    /// 设置模糊音与纠错开关（FR-024；O-05 修订）。默认开；关闭后纠错组
+    /// （模糊替换 + 少字母补全，`corrected_candidates`）不生成，其余路径不变。
+    #[must_use]
+    pub fn with_fuzzy(mut self, enabled: bool) -> Self {
+        self.enable_fuzzy = enabled;
         self
     }
 
@@ -1318,16 +1346,25 @@ impl InputEngine {
                 }
                 // M7 纠错（FR-024）：无整词命中时追加「纠错组」（模糊替换/少字母补全），
                 // 置于主候选之后、缩写组之前；同文本主候选优先。
-                let corrected =
-                    zhu_ye_core::corrected_candidates(&self.table, dictionary.as_ref(), &composing);
-                if !corrected.is_empty() {
-                    main = append_group(main, corrected);
+                // O-05 修订（T-103）：可经 enable_fuzzy 关闭（模糊音与纠错组不生成）。
+                if self.enable_fuzzy {
+                    let corrected = zhu_ye_core::corrected_candidates(
+                        &self.table,
+                        dictionary.as_ref(),
+                        &composing,
+                    );
+                    if !corrected.is_empty() {
+                        main = append_group(main, corrected);
+                    }
                 }
             }
 
             // M7 简拼（FR-023）：输入不可切分、主候选仍为空且为 2-4 位纯字母时，
             // 按首字母展开整词作为主候选（防污染：仅此场景介入）。
-            if main.is_empty()
+            // O-05 修订（T-103）：可经 enable_abbreviation 关闭（词典简拼不介入；
+            // 网络语缩写与联系人简拼键边界不受影响）。
+            if self.enable_abbreviation
+                && main.is_empty()
                 && composing.chars().count() >= 2
                 && composing.chars().all(|c| c.is_ascii_lowercase())
                 && segment_all(&self.table, &composing).is_empty()
@@ -2370,6 +2407,85 @@ mod tests {
                 .iter()
                 .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Corrected),
             "nihao 整词命中不应出现纠错候选"
+        );
+    }
+
+    // ---- T-103（O-05 修订）：简拼/模糊音关闭开关 ----
+
+    #[test]
+    fn 简拼关闭后nh不展开() {
+        // 默认开（既有 2328 覆盖）；关闭后主候选为空的不可切分字母不再首字母展开。
+        let mut engine = m7_engine().with_abbreviation(false);
+        type_text(&mut engine, "nh");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(
+            !texts.contains(&"你好"),
+            "关闭简拼后 nh 不应出你好，实际: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 简拼关闭不影响整词候选() {
+        // 关闭简拼只关首字母展开路径：整词拼音候选与纠错路径行为不变。
+        let mut engine = m7_engine().with_abbreviation(false);
+        type_text(&mut engine, "nihao");
+        assert!(engine.candidates().iter().any(|c| c.text == "你好"));
+    }
+
+    #[test]
+    fn 模糊音关闭后zongguo不纠错() {
+        // 关闭模糊音与纠错：zongguo 不再经模糊替换出中国（无可切分则候选为空）。
+        let mut engine = m7_engine().with_fuzzy(false);
+        type_text(&mut engine, "zongguo");
+        let candidates = engine.candidates();
+        assert!(
+            candidates.iter().all(|c| c.text != "中国"
+                && c.source != zhu_ye_core::candidate::CandidateSource::Corrected),
+            "关闭模糊音后 zongguo 不应纠错出中国，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 模糊音关闭后niha不补全() {
+        // 少字母补全（B 类）随模糊音开关一并关闭：niha 不再出你好。
+        let mut engine = m7_engine().with_fuzzy(false);
+        type_text(&mut engine, "niha");
+        let candidates = engine.candidates();
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Corrected),
+            "关闭模糊音后 niha 不应出纠错候选，实际: {:?}",
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 简拼关闭不影响联系人简拼键() {
+        // 索引原生简拼键（FR-037）不随 enable_abbreviation 变化：边界——
+        // zs → 张三 仍可达（直接命中联系人索引，不经词典首字母展开路径）。
+        let engine = InputEngine::with_m1_seed()
+            .with_abbreviation(false)
+            .with_contacts(zhu_ye_core::build_contact_index(&[
+                zhu_ye_core::VCardContact::new("张三"),
+            ]));
+        let mut engine = engine;
+        type_text(&mut engine, "zs");
+        assert!(
+            engine.candidates().iter().any(|c| c.text == "张三"
+                && c.source == zhu_ye_core::candidate::CandidateSource::Contact),
+            "关闭简拼后联系人简拼键仍应命中"
         );
     }
 
