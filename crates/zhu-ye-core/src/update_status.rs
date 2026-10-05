@@ -1,7 +1,7 @@
 //! 更新状态文件（T-088，FR-048 启动时异步检查一次）。
 //!
 //! 启动异步检查的结果只写状态文件（无 UI、无弹窗，方案设计 §14.5.4），供关于页
-//! 顺带展示。文件为 `%APPDATA%\ai-zhu-ye-ime\update_status.json`：
+//! 顺带展示。文件为 `%APPDATA%\zhu-ye-ime\update_status.json`：
 //!
 //! ```json
 //! {
@@ -23,7 +23,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// 更新状态文件名（在 `%APPDATA%\ai-zhu-ye-ime` 目录下）。
+/// 更新状态文件名（在 `%APPDATA%\zhu-ye-ime` 目录下）。
 pub const UPDATE_STATUS_FILE_NAME: &str = "update_status.json";
 /// 状态文件格式标识。
 pub const UPDATE_STATUS_FORMAT: &str = "zhu-ye-update-status";

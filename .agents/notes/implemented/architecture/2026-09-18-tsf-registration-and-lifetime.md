@@ -42,7 +42,7 @@ aggregation is not supported because this text service has no control-unknown
 semantics; a null outer pointer is accepted as normal COM non-aggregated creation.
 
 The install target is x64-only process-in-COM under HKLM; the DLL is deployed to
-`C:\Program Files\ai-zhu-ye-ime\tsf\zhu-ye-ime.dll`. M1 does not implement key
+`C:\Program Files\zhu-ye-ime\tsf\zhu-ye-ime.dll`. M1 does not implement key
 processing, composition, display attributes, or candidate windows; those enter with
 T-011 and T-012.
 

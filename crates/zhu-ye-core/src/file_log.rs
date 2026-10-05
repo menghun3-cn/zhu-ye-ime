@@ -27,7 +27,7 @@ const ROTATED_FILE_NAME: &str = "ime.1.log";
 pub struct FileLogger {
     /// 当前级别（config 解析结果）。
     level: LogLevel,
-    /// 产品日志主文件路径（`%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`）。
+    /// 产品日志主文件路径（`%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log`）。
     path: PathBuf,
     /// 大小上限；0 = 不限（测试注入）。
     size_limit: u64,

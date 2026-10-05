@@ -36,7 +36,7 @@ pub const TSF_LANGUAGE_ID_HEX: &str = "0x00000804";
 /// 安装目录相对 `Program Files` 的路径段，与 `scripts/ime-identity.ps1` 的
 /// `Get-TsfInstallDir` 保持一致；二级修复在读不到 `InProcServer32` 时用它在
 /// 自身安装目录下推导 DLL 搜索位置。
-pub const TSF_INSTALL_DIR_RELATIVE: &str = "ai-zhu-ye-ime\\tsf";
+pub const TSF_INSTALL_DIR_RELATIVE: &str = "zhu-ye-ime\\tsf";
 
 /// GUID 的标准大括号文本（与 `ime-identity.ps1` 常量格式一致，全大写）。
 #[must_use]
@@ -93,6 +93,6 @@ mod tests {
         assert_eq!(DICTIONARY_FILE_NAME, "dictionary.zyct");
         assert_eq!(EN_WORDBOOK_FILE_NAME, "en.zyen");
         assert_eq!(TSF_LANGUAGE_ID_HEX, "0x00000804");
-        assert_eq!(TSF_INSTALL_DIR_RELATIVE, "ai-zhu-ye-ime\\tsf");
+        assert_eq!(TSF_INSTALL_DIR_RELATIVE, "zhu-ye-ime\\tsf");
     }
 }

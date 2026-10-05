@@ -53,7 +53,7 @@ lookup went from 9.69 µs to 2.30 µs per query after adding this path, against
 
 ### Configuration
 
-`zhu_ye_core::pack_config` parses `%APPDATA%\ai-zhu-ye-ime\config.json`:
+`zhu_ye_core::pack_config` parses `%APPDATA%\zhu-ye-ime\config.json`:
 
 ```json
 { "version": 1, "enabled_packs": ["it","med","slang"],

@@ -65,7 +65,7 @@ Verification (2026-10-04): after adding `main` to the branch policy,
 `gh workflow run pages.yml --ref main` succeeded (deploy-pages
 completed|success); `https://menghun3-cn.github.io/zhu-ye-ime/` returns 200 with
 hero-note and download page showing v0.1.1-alpha, `llms.txt` consistent;
-Release v0.1.1-alpha carries `ai-zhu-ye-ime-0.1.1-alpha-test.zip` (18.56 MB).
+Release v0.1.1-alpha carries `zhu-ye-ime-0.1.1-alpha-test.zip` (18.56 MB).
 
 Related records (kept active, cross-linked):
 [official-website-and-brand-assets

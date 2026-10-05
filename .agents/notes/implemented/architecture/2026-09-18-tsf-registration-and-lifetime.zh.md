@@ -18,7 +18,7 @@ TIP 身份固定：CLSID 为 `{E54D6682-8650-40E7-A9EE-6FD1137849AE}`，zh-CN �
 
 COM 生命周期显式管理：类工厂实现 `IClassFactory`，通过 `CLASS_E_NOAGGREGATION` 拒绝聚合；仅当活动对象数与 `LockServer` 计数同时为零时，`DllCanUnloadNow` 才返回 `S_OK`。由于文本服务没有 control-unknown 语义，不提供聚合；空的 outer 指针按 COM 非聚合创建正常接受。
 
-M1 仅面向 x64 的 HKLM 进程内 COM，DLL 部署到 `C:\Program Files\ai-zhu-ye-ime\tsf\zhu-ye-ime.dll`。M1 不实现按键处理、组合、显示属性或候选窗；这些由 T-011、T-012 接入。
+M1 仅面向 x64 的 HKLM 进程内 COM，DLL 部署到 `C:\Program Files\zhu-ye-ime\tsf\zhu-ye-ime.dll`。M1 不实现按键处理、组合、显示属性或候选窗；这些由 T-011、T-012 接入。
 
 ## 注册契约
 

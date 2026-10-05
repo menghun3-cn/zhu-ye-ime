@@ -54,9 +54,9 @@ $appData = Join-Path $repoRoot 'target\tmp-e2e-appdata'
 if (-not $KeepAppData -and (Test-Path -LiteralPath $appData)) {
     Remove-Item -LiteralPath $appData -Recurse -Force
 }
-$null = New-Item -ItemType Directory -Path (Join-Path $appData 'ai-zhu-ye-ime') -Force
+$null = New-Item -ItemType Directory -Path (Join-Path $appData 'zhu-ye-ime') -Force
 $env:APPDATA = (Resolve-Path $appData).Path
-$configPath = Join-Path $appData 'ai-zhu-ye-ime\config.json'
+$configPath = Join-Path $appData 'zhu-ye-ime\config.json'
 Set-Content -LiteralPath $configPath -Value '{"online_update": true}' -Encoding utf8
 
 $manifestUrl = 'file:///' + $packsDir.Replace('\', '/') + '/manifest.json'
@@ -84,7 +84,7 @@ Write-Host '== 2/4 落地包与 manifest 哈希/大小一致 =='
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $installedOk = $true
 foreach ($pack in $manifest.packs) {
-    $file = Join-Path $appData "ai-zhu-ye-ime\packs\$($pack.file)"
+    $file = Join-Path $appData "zhu-ye-ime\packs\$($pack.file)"
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { $installedOk = $false; continue }
     $len = (Get-Item -LiteralPath $file).Length
     $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -98,7 +98,7 @@ if ($installedOk) {
 
 Write-Host '== 3/4 篡改落地包：应被检测并自愈 =='
 $first = $manifest.packs[0]
-$packFile = Join-Path $appData "ai-zhu-ye-ime\packs\$($first.file)"
+$packFile = Join-Path $appData "zhu-ye-ime\packs\$($first.file)"
 $bytes = [System.IO.File]::ReadAllBytes($packFile)
 $bytes[0] = $bytes[0] -bxor 0xFF
 [System.IO.File]::WriteAllBytes($packFile, $bytes)

@@ -47,8 +47,8 @@ TSF 安装/卸载脚本（需要管理员 PowerShell）：
 ```
 
 > 发行包安装（T-078）：`install.ps1` 从包内 `bin\`/`packs\` 取文件，不再从源码树构建；设置窗口
-> （`zhu-ye-settings.exe`）与更新器（`zhu-ye-updater.exe`）随安装部署到 `Program Files\ai-zhu-ye-ime\bin\`，
-> 三个领域包预置到 `%APPDATA%\ai-zhu-ye-ime\packs\`，并创建开始菜单快捷方式。
+> （`zhu-ye-settings.exe`）与更新器（`zhu-ye-updater.exe`）随安装部署到 `Program Files\zhu-ye-ime\bin\`，
+> 三个领域包预置到 `%APPDATA%\zhu-ye-ime\packs\`，并创建开始菜单快捷方式。
 
 无需管理员即可校验 DLL 导出：
 

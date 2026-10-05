@@ -6,7 +6,7 @@
 .DESCRIPTION
 发行包布局（可在无源码树与无 Rust 工具链的机器上直接安装）：
 
-    ai-zhu-ye-ime-<version>-test/
+    zhu-ye-ime-<version>-test/
       bin/zhu_ye_ime.dll             TSF 服务 DLL
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
@@ -70,7 +70,7 @@ foreach ($artifact in $needed) {
 }
 
 $portableRoot = Join-Path $repoRoot 'target\portable'
-$packageName = "ai-zhu-ye-ime-$Version-test"
+$packageName = "zhu-ye-ime-$Version-test"
 $staging = Join-Path $portableRoot $packageName
 $zipPath = Join-Path $portableRoot "$packageName.zip"
 

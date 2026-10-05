@@ -1,6 +1,6 @@
 //! 自定义主题文件（T-088，FR-048 主题文件/自定义主题）。
 //!
-//! 主题文件存于 `%APPDATA%\ai-zhu-ye-ime\themes\<名称>.json`，一份文件同时描述候选窗
+//! 主题文件存于 `%APPDATA%\zhu-ye-ime\themes\<名称>.json`，一份文件同时描述候选窗
 //! 与设置窗口两组配色（"候选窗与设置窗口同源读取"，S-2），键集分别对齐
 //! `CandidateUiTheme`（7 键）与 `SettingsTheme`（15 键）：
 //!

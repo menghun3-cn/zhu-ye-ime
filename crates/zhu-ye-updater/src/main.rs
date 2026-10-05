@@ -72,10 +72,10 @@ fn print_usage() {
     println!("  zhu-ye-updater check-once   启动时静默检查一次（结果写 update_status.json）");
 }
 
-/// `%APPDATA%\ai-zhu-ye-ime`。
+/// `%APPDATA%\zhu-ye-ime`。
 fn appdata_root() -> Result<PathBuf, String> {
     std::env::var_os("APPDATA")
-        .map(|root| PathBuf::from(root).join("ai-zhu-ye-ime"))
+        .map(|root| PathBuf::from(root).join("zhu-ye-ime"))
         .ok_or_else(|| "未设置 APPDATA，无法定位配置目录".to_owned())
 }
 

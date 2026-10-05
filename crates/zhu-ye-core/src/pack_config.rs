@@ -1,6 +1,6 @@
 //! 词典包运行时配置：`config.json` 解析与包路径解析（M6-R，FR-015/FR-022）。
 //!
-//! 配置与用户词库同目录（`%APPDATA%\ai-zhu-ye-ime\config.json`）：
+//! 配置与用户词库同目录（`%APPDATA%\zhu-ye-ime\config.json`）：
 //!
 //! ```json
 //! { "enabled_packs": ["it","med","slang"], "online_update": false, "last_check": null, "theme": "light" }
@@ -22,7 +22,7 @@ pub const CONFIG_FORMAT_VERSION: u32 = 1;
 /// 基础包文件名（随安装只读，DLL 同目录）。
 pub const BASE_PACK_FILE_NAME: &str = "dictionary.zyct";
 
-/// 领域包目录名（`%APPDATA%\ai-zhu-ye-ime\packs`）。
+/// 领域包目录名（`%APPDATA%\zhu-ye-ime\packs`）。
 pub const PACKS_DIR_NAME: &str = "packs";
 
 /// 已知领域包 id（用于过滤未知 id；新增包需同步此处与文档）。
@@ -97,7 +97,7 @@ pub fn pack_display(pack_id: &str) -> Option<PackDisplay> {
 /// 候选窗主题选择（第八期设置窗口写入，FR-041；T-088 扩展自定义主题文件）。
 ///
 /// 只提供浅色与深色两个预置：高对比度由系统接管，不作为可选值（D-31）。
-/// `Custom` 携带主题文件名（不含 `.json` 扩展），对应 `%APPDATA%\ai-zhu-ye-ime\
+/// `Custom` 携带主题文件名（不含 `.json` 扩展），对应 `%APPDATA%\zhu-ye-ime\
 /// themes\<name>.json`；文件缺失或解析失败时渲染回退浅色（配置本身不失败）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ThemeChoice {
@@ -354,7 +354,7 @@ impl PackPlan {
 }
 
 /// 计算装配计划：`base_dir` 放基础包（DLL 同目录/安装目录），
-/// `packs_dir` 放领域包（`%APPDATA%\ai-zhu-ye-ime\packs`）。
+/// `packs_dir` 放领域包（`%APPDATA%\zhu-ye-ime\packs`）。
 ///
 /// 缺失与未知的包只记录不报错，保证输入法始终能启动。
 #[must_use]

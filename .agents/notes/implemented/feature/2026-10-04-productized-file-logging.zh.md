@@ -38,7 +38,7 @@ FR-060 要求产品级诊断日志。验收期文件日志（`C:\zhu-ye-test\tsf
      保持旧签名并映射为 `LogLevel::Debug`）；
   2. 否则 → 对 `config.log_level` 走级别门，再经
      `static PRODUCT_LOGGER: Mutex<Option<FileLogger>>` 惰性装配的
-     `FileLogger` 写 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`
+     `FileLogger` 写 `%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log`
      （1 MiB 轮转）。`LOCALAPPDATA` 缺失 → 跳过文件写，仅保留
      `OutputDebugStringW`。53 个调用点已分级（8 error / 7 warn / 14
      info / 24 debug；见《诊断产品化设计》§4.1 表）；error/warn/info
@@ -52,7 +52,7 @@ FR-060 要求产品级诊断日志。验收期文件日志（`C:\zhu-ye-test\tsf
   `if should_log(LogLevel::Debug)`，配置级别为 `Warn` 时按键路径上不构造
   `format!` 字符串。
 - **settings（window/shell/model/config）：** `acceptance_log_dir` 变为
-  `product_log_dir() -> Option<PathBuf>` = `%LOCALAPPDATA%\ai-zhu-ye-ime\logs`
+  `product_log_dir() -> Option<PathBuf>` = `%LOCALAPPDATA%\zhu-ye-ime\logs`
   （与 `data_dir` 同机制）；诊断行与「打开日志目录」动作改为产品文案，
   打开动作先幂等创建目录（设置进程可能在 TSF 写出首行日志之前就打开它）。
 
@@ -82,7 +82,7 @@ FR-060 要求产品级诊断日志。验收期文件日志（`C:\zhu-ye-test\tsf
 
 - 默认安装（无 `log_level` 键）：除非触发 `Warn`/`Error`，零文件写、
   零目录系统调用；每条 `Error`/`Warn` 落盘
-  `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`，1 MiB 轮转。
+  `%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log`，1 MiB 轮转。
 - 哨兵文件存在时按构造不可能出验收回归：该分支复用旧格式与旧路径
   原样。
 - `debug` 消息在任何级别都继续流向 `OutputDebugStringW`（对调试器辅助

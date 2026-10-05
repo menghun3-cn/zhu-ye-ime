@@ -59,7 +59,7 @@ _避免_：自定义词、记忆词
 _避免_：联想、补全、智能组词（均指其它机制）
 
 **产品日志目录**：
-`%LOCALAPPDATA%\ai-zhu-ye-ime\logs\`——产品化文件日志的位置，与验收期哨兵日志
+`%LOCALAPPDATA%\zhu-ye-ime\logs\`——产品化文件日志的位置，与验收期哨兵日志
 （`C:\zhu-ye-test\tsf-debug.log`）并存。
 _避免_：调试日志目录、验收日志目录
 

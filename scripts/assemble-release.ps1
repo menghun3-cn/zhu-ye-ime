@@ -118,7 +118,7 @@ if ($LASTEXITCODE -ne 0) { throw 'verify-manifest 失败（内容哈希与 manif
 # ---- 6. 安装/便携 zip（复用 package-portable，产物已构建则自动跳过构建） ----
 & (Join-Path $repoRoot 'scripts\package-portable.ps1') -Version $Version
 if ($LASTEXITCODE -ne 0) { throw 'package-portable 失败。' }
-$portableZip = Join-Path $repoRoot "target\portable\ai-zhu-ye-ime-$Version-test.zip"
+$portableZip = Join-Path $repoRoot "target\portable\zhu-ye-ime-$Version-test.zip"
 if (-not (Test-Path -LiteralPath $portableZip -PathType Leaf)) {
     throw "便携包未生成：$portableZip"
 }

@@ -28,7 +28,7 @@ $script:TsfIdentity = [ordered]@{
 }
 
 function Get-TsfInstallDir {
-    return (Join-Path ${env:ProgramFiles} 'ai-zhu-ye-ime\tsf')
+    return (Join-Path ${env:ProgramFiles} 'zhu-ye-ime\tsf')
 }
 
 function Get-TsfDictionaryPath {

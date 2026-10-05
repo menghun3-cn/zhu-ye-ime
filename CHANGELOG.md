@@ -7,9 +7,12 @@
 
 ### 变更
 
-- 发布命名：便携 zip 由 `ai-zhu-ye-ime-<v>.zip` 更名为 `zhu-ye-ime-<v>.zip`（exe、安装目录
-  `Program Files\ai-zhu-ye-ime` 与数据目录 `%APPDATA%\ai-zhu-ye-ime` 均不变；旧名资产在
-  v0.1.2 release 保留兼容）（T-108）
+- 命名规范（T-108/T-109）：便携 zip 与全部产品目录去除 `ai-` 前缀——发布 zip
+  `zhu-ye-ime-<v>.zip`、安装目录 `Program Files\zhu-ye-ime`、数据目录 `%APPDATA%\zhu-ye-ime`、
+  日志目录 `%LOCALAPPDATA%\zhu-ye-ime\logs`、TSF 安装目录 `zhu-ye-ime\tsf`、便携包内顶层目录
+  `zhu-ye-ime-<v>-test/`；exe 文件名（`ai-zhu-ye-ime-setup-<v>.exe`）与产品名不变。**升级不兼容**：
+  v0.1.2 安装用户需卸载重装，旧 `ai-zhu-ye-ime` 目录不迁移不保留；v0.1.2 release 旧名 zip 资产
+  已删除（同日补发新名资产）
 
 ## [0.1.2] - 2026-10-05
 

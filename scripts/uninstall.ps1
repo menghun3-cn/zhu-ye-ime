@@ -11,7 +11,7 @@
 4. 删除安装目录中的词典（占用时同样延迟清理）
 5. 删除 bin 下的 zhu-ye-settings.exe 与 zhu-ye-updater.exe（占用时延迟清理）
 6. 删除开始菜单快捷方式
-7. 目录为空时一并移除；**用户数据目录（%APPDATA%\ai-zhu-ye-ime）保留**——
+7. 目录为空时一并移除；**用户数据目录（%APPDATA%\zhu-ye-ime）保留**——
    配置、领域包与用户词库属用户数据，卸载程序文件不动数据（口径见 T-078）
 
 重复执行安全；需要管理员权限。
@@ -20,7 +20,7 @@
 .\scripts\uninstall.ps1
 
 .EXAMPLE
-.\scripts\uninstall.ps1 -InstallDir C:\Program Files\ai-zhu-ye-ime\tsf
+.\scripts\uninstall.ps1 -InstallDir C:\Program Files\zhu-ye-ime\tsf
 #>
 [CmdletBinding()]
 param(
@@ -128,4 +128,4 @@ if (Test-Path -LiteralPath $appRoot -PathType Container) {
 }
 
 Write-Host '卸载完成：TSF 注册、全部版本化 DLL、词典、设置窗口与快捷方式均已清理。'
-Write-Host '说明：%APPDATA%\ai-zhu-ye-ime（配置、领域包、用户词库）为用户数据，卸载不删除。'
+Write-Host '说明：%APPDATA%\zhu-ye-ime（配置、领域包、用户词库）为用户数据，卸载不删除。'

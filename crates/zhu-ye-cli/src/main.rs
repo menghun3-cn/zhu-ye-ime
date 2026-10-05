@@ -490,7 +490,7 @@ fn dict_command(args: Vec<String>) {
 fn user_words_path() -> PathBuf {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
-        .map(|root| root.join("ai-zhu-ye-ime").join("user_words.json"))
+        .map(|root| root.join("zhu-ye-ime").join("user_words.json"))
         .unwrap_or_else(|| PathBuf::from("user_words.json"))
 }
 

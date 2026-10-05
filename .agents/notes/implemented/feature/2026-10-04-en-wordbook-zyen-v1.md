@@ -65,7 +65,7 @@ the IME engine as a drop-in upgrade over the static table.
   `std::thread::scope` chunks (no rayon, no Windows API — core stays portable); the
   cross-chunk ascending chain is re-checked sequentially.
 - Resolution order at engine start (`tsf.rs`): `en.zyen` next to the DLL, else
-  `%APPDATA%\ai-zhu-ye-ime\en.zyen`; load failure logs via `debug_log` and falls
+  `%APPDATA%\zhu-ye-ime\en.zyen`; load failure logs via `debug_log` and falls
   back to the M9 static table; neither present → `None` silently (FR-030 behaves
   exactly as before T-085).
 - `input.rs` FR-030 branch: `en_word_candidates_from(lexicon, ...)` when the lexicon

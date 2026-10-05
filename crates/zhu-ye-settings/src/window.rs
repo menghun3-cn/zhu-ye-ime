@@ -960,7 +960,7 @@ fn scan_repair_now(state: &mut WindowState) -> RepairScan {
     )
 }
 
-/// 领域包目录：`%APPDATA%\ai-zhu-ye-ime\packs`（与清单/导入同口径）。
+/// 领域包目录：`%APPDATA%\zhu-ye-ime\packs`（与清单/导入同口径）。
 fn repair_packs_dir(config_path: Option<&std::path::Path>) -> std::path::PathBuf {
     let _ = config_path; // 清单另有用途；检测直接以数据目录为准。
     config::data_dir()
@@ -968,7 +968,7 @@ fn repair_packs_dir(config_path: Option<&std::path::Path>) -> std::path::PathBuf
         .unwrap_or_else(|| std::path::PathBuf::from("packs"))
 }
 
-/// 用户词库路径：`%APPDATA%\ai-zhu-ye-ime\user_words.json`（与 TSF 侧同口径）。
+/// 用户词库路径：`%APPDATA%\zhu-ye-ime\user_words.json`（与 TSF 侧同口径）。
 fn repair_user_words_path() -> std::path::PathBuf {
     config::data_dir()
         .map(|dir| dir.join("user_words.json"))
@@ -1344,7 +1344,7 @@ fn pick_zyct_file(hwnd: HWND) -> Option<PathBuf> {
 // T-088 / FR-048：用户词表、通讯录、自定义主题三子视图
 // ---------------------------------------------------------------------------
 
-/// themes 目录：`%APPDATA%\ai-zhu-ye-ime\themes`。
+/// themes 目录：`%APPDATA%\zhu-ye-ime\themes`。
 fn themes_dir(config_path: Option<&std::path::Path>) -> Option<PathBuf> {
     let data_dir = config_path?.parent()?;
     Some(data_dir.join("themes"))
@@ -1942,7 +1942,7 @@ unsafe fn draw_themes(
     let layout = layout::themes_layout(metrics, client, state.theme_files.len());
     draw_text(
         hdc,
-        "主题文件位于 %APPDATA%\\ai-zhu-ye-ime\\themes\\*.json，每文件一个主题",
+        "主题文件位于 %APPDATA%\\zhu-ye-ime\\themes\\*.json，每文件一个主题",
         layout.info,
         theme.item_text,
         state.fonts.small,
