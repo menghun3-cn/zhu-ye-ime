@@ -51,7 +51,7 @@ SHA-256 锁定）：
   （边界、norm 全小写 ASCII、严格升序、rank<count、锚单调且桶首一致）；布局校验
   用 `std::thread::scope` 分块并行（无 rayon、无 Windows API——core 保持可移植），
   跨块升序衔接链顺序复检。
-- 引擎装配解析顺序（`tsf.rs`）：DLL 同目录 `en.zyen`，否则 `%APPDATA%\ai-zhu-ye-ime\en.zyen`；
+- 引擎装配解析顺序（`tsf.rs`）：DLL 同目录 `en.zyen`，否则 `%APPDATA%\zhu-ye-ime\en.zyen`；
   加载失败 `debug_log` 并回退 M9 静态表；两者皆无 → 静默 `None`（FR-030 与 T-085 前行为一致）。
 - `input.rs` FR-030 分支：有词典走 `en_word_candidates_from(lexicon, ...)`，否则
   `en_word_candidates(...)`（静态表）——同一映射（`score=-(rank as i64)`、`pinyin=None`、

@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object README.md
 #   git hash-object README.zh.md
-2026-10-04-github-pages-first-enable.md: c2f0df54bd2dea7a9dd7bf7db34ffe587d1547cb
-2026-10-04-github-pages-first-enable.zh.md: 5e675d1c2b1a7fc82fd27085d1c3cadc395a5f0b
+2026-10-04-github-pages-first-enable.md: 5c401e127e60aad8f98391fbe3f9069ec798c988
+2026-10-04-github-pages-first-enable.zh.md: a22670cd754957d94a96a6709d553f917873a72c

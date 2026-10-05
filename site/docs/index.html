@@ -58,12 +58,12 @@
 
   <h2 id="install">安装</h2>
   <p>从 <a href="../download/index.html">下载页</a> 或发布渠道取得发行包
-  <code>ai-zhu-ye-ime-&lt;version&gt;-test.zip</code>，解压到目标机后以<strong>管理员身份</strong>
+  <code>zhu-ye-ime-&lt;version&gt;-test.zip</code>，解压到目标机后以<strong>管理员身份</strong>
   打开 PowerShell，运行包内脚本：</p>
   <pre><code>.\scripts\install.ps1</code></pre>
   <p>发行包模式不依赖源码树与 Rust 工具链：脚本从包内 <code>bin\</code> 取 TSF 输入法 DLL、设置窗口、
   更新器与基础词典，从 <code>packs\</code> 预置三个领域包（<code>it</code>/<code>med</code>/
-  <code>slang</code>）到 <code>%APPDATA%\ai-zhu-ye-ime\packs\</code>，并创建开始菜单快捷方式。</p>
+  <code>slang</code>）到 <code>%APPDATA%\zhu-ye-ime\packs\</code>，并创建开始菜单快捷方式。</p>
   <p>重复安装安全：每次安装先清理旧注册再重建，不会产生重复路径；旧版本 DLL 由系统重启后延迟清理。
   升级为同名覆盖，保持幂等。</p>
 
@@ -101,7 +101,7 @@
 
   <h2 id="userwords">用户词</h2>
   <p>选择过的中文词会记录到本地用户词库，并在后续排序中提升权重。用户词库路径：
-  <code>%APPDATA%\ai-zhu-ye-ime\user_words.json</code>。文件损坏时输入法会自动备份为
+  <code>%APPDATA%\zhu-ye-ime\user_words.json</code>。文件损坏时输入法会自动备份为
   <code>.bak</code> 并重建空库，不影响静态词典。</p>
 
   <h2 id="upgrade">升级与卸载</h2>
@@ -117,7 +117,7 @@
   <p>以管理员身份运行 <code>.\scripts\uninstall.ps1</code>：删除 TSF 与 CLSID 注册表树、安装目录
   中的 DLL、设置窗口与更新器、开始菜单快捷方式，并校验注册表无残留；重复执行安全。DLL 或 exe
   被占用时会改为重启后延迟清理，不中止卸载。</p>
-  <p>用户词库、配置与领域包位于 <code>%APPDATA%\ai-zhu-ye-ime</code>，<strong>卸载默认保留</strong>
+  <p>用户词库、配置与领域包位于 <code>%APPDATA%\zhu-ye-ime</code>，<strong>卸载默认保留</strong>
   （属用户数据）；确认不再需要时手动删除该目录。</p>
 
   <h2 id="troubleshoot">故障排查</h2>
@@ -129,7 +129,7 @@
       <tr><td>输入法不在系统列表</td><td>检查「键盘」设置是否已启用；重新运行 install.ps1</td></tr>
       <tr><td>切到竹叶输入法后无候选</td><td>确认已通过系统切换键激活；重启应用后再试</td></tr>
       <tr><td>候选窗错位/模糊</td><td>确认系统缩放为受支持的 DPI；重启应用</td></tr>
-      <tr><td>用户词异常</td><td>检查 <code>%APPDATA%\ai-zhu-ye-ime</code>，必要时删除或重置用户词库</td></tr>
+      <tr><td>用户词异常</td><td>检查 <code>%APPDATA%\zhu-ye-ime</code>，必要时删除或重置用户词库</td></tr>
     </tbody>
   </table>
 

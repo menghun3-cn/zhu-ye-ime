@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object README.md
 #   git hash-object README.zh.md
-2026-10-04-en-wordbook-zyen-v1.md: 6b7ce7589c9e85c621771abd1f29cf96443e6712
-2026-10-04-en-wordbook-zyen-v1.zh.md: 9fe20049398e20bb118f7e1f75d4a79218a7135f
+2026-10-04-en-wordbook-zyen-v1.md: b4543015ea029e8eb90bf96d36683fa8b0e690b5
+2026-10-04-en-wordbook-zyen-v1.zh.md: 6ce49891b9e1e0e994f9fed1226b89402cd1f630

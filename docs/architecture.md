@@ -172,7 +172,7 @@ ITfKeyEventSink 收到按键 -> KeyAction 分类
 - 中文到译文索引按中文词排序，英文反查索引按归一化英文键排序；`DictionaryFile` 实现 `Translator`，`zh_to_en` 与 `en_to_zh` 均走二分查询
 - 构建产物确定：相同输入与版本生成相同字节序列；`zhu-ye-dict` 提供 `build`、`import`、`inspect`、`verify` 四个命令，译文与反查会同步校验
 - `data/artifacts/seed.zyct` 由自建演示种子构建（20 词条 + 10 bigram + 19 译文），用于 CI 与离线演示；真实词库由 `zhu-ye-dict import` 生成 `data/artifacts/real.zyct`，数据声明见 `docs/数据清单.md` 与 `docs/licenses.md`
-- 安装/便携包把选中的 v2 词典复制为安装目录内 `dictionary.zyct`；TSF 运行时解析顺序：`ZHU_YE_DICT_PATH` > DLL 同目录 > `%APPDATA%\ai-zhu-ye-ime\dictionary.zyct` > 工作目录回退
+- 安装/便携包把选中的 v2 词典复制为安装目录内 `dictionary.zyct`；TSF 运行时解析顺序：`ZHU_YE_DICT_PATH` > DLL 同目录 > `%APPDATA%\zhu-ye-ime\dictionary.zyct` > 工作目录回退
 ## 6. 拼音切分设计
 
 - 音节表：`STANDARD_SYLLABLES` 收录 410 个标准无调全拼音节（T-007）；T-006 真实数据导入已用 CC-CEDICT 12.5 万行拼音做完整性校验（318,015 个音节，其中 894 个非标准音节被清洗丢弃）
@@ -202,7 +202,7 @@ score = static_score(word) × unigram_weight
 ### 用户词持久化（T-009）
 
 - 选择即记忆：`InputEngine` 在空格/数字选择真实候选时记录词与拼音并同步落盘；回车与拼音原文回退不学习
-- 存储：IME 使用 `%APPDATA%\ai-zhu-ye-ime\user_words.json`；CLI 与测试注入独立路径，核心库不依赖 Windows API
+- 存储：IME 使用 `%APPDATA%\zhu-ye-ime\user_words.json`；CLI 与测试注入独立路径，核心库不依赖 Windows API
 - 文件格式：版本化 JSON `{ "version": 1, "entries": [...] }`，条目含词、拼音、词频与最近选择时间；`words_sorted` 确定性排序保证写入稳定
 - 写入：`UserDictStore::save` 先写同目录临时文件并 `sync_all`，再原子替换目标；失败时清理临时文件、不破坏原文件
 - 损坏恢复：`load` 遇到解析失败或低版本时先备份为 `.bak` 再重建空库；高于当前版本时拒绝打开并保留原文件，避免软件降级破坏用户数据
@@ -274,7 +274,7 @@ raw 数据（CC-CEDICT/FrequencyWords/GlobalVoices 等）
 
 - `log_level`（FR-060，T-091）：`error` / `warn` / `info` / `debug`
   （大小写不敏感），缺失/非字符串/未知值回退 `warn`。TSF 侧产品日志
-  按该级别门写 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`（1 MiB 轮转，
+  按该级别门写 `%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log`（1 MiB 轮转，
   见[诊断产品化设计.md](./诊断产品化设计.md)）；`warn` 为默认时热路径
   零文件 IO（D-72）。
 - `enable_abbreviation` / `enable_fuzzy`（FR-023/FR-024，O-05 修订 T-103）：

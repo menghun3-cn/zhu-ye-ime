@@ -93,7 +93,7 @@ impl ItemState {
 pub enum OpenTarget {
     /// 配置文件 `config.json`。
     ConfigFile,
-    /// 数据目录 `%APPDATA%\ai-zhu-ye-ime`。
+    /// 数据目录 `%APPDATA%\zhu-ye-ime`。
     DataDir,
     /// 文件日志所在目录。
     LogDir,

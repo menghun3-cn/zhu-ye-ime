@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use zhu_ye_core::{load_config, save_config, ConfigFile, ModeChoice, ThemeChoice};
 
 /// `%APPDATA%` 下的数据目录名。
-const APPDATA_DIR: &str = "ai-zhu-ye-ime";
+const APPDATA_DIR: &str = "zhu-ye-ime";
 /// 配置文件名。
 const CONFIG_FILE: &str = "config.json";
 
-/// 用户数据目录：`%APPDATA%\ai-zhu-ye-ime`（与 TSF 侧、更新器同口径）。
+/// 用户数据目录：`%APPDATA%\zhu-ye-ime`（与 TSF 侧、更新器同口径）。
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|root| PathBuf::from(root).join(APPDATA_DIR))
@@ -25,7 +25,7 @@ pub fn config_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join(CONFIG_FILE))
 }
 
-/// 产品日志目录（FR-060，T-091）：`%LOCALAPPDATA%\ai-zhu-ye-ime\logs`。
+/// 产品日志目录（FR-060，T-091）：`%LOCALAPPDATA%\zhu-ye-ime\logs`。
 ///
 /// TSF 侧产品模式把文件日志写到该目录（`ime.log`，默认 warn 级别，1 MiB
 /// 轮转；见 `crates/zhu-ye-ime/src/tsf.rs` 的 `product_log`）。设置窗口独立
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn 产品日志目录按本地应用数据目录解析且缺失时为空() {
-        // T-091（FR-060）：`%LOCALAPPDATA%\ai-zhu-ye-ime\logs`，与 TSF 侧
+        // T-091（FR-060）：`%LOCALAPPDATA%\zhu-ye-ime\logs`，与 TSF 侧
         // 产品轨 `ime.log` 路径同源。环境变量在单个测试内串行覆盖/恢复，
         // 规避并行线程互相覆盖。
         let original = std::env::var_os("LOCALAPPDATA");
@@ -442,7 +442,7 @@ mod tests {
         std::env::set_var("LOCALAPPDATA", &dir);
         assert_eq!(
             super::product_log_dir(),
-            Some(dir.join("ai-zhu-ye-ime").join("logs"))
+            Some(dir.join("zhu-ye-ime").join("logs"))
         );
         std::env::remove_var("LOCALAPPDATA");
         assert_eq!(super::product_log_dir(), None);

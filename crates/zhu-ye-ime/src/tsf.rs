@@ -232,7 +232,7 @@ fn configured_theme_preference() -> ThemePreference {
 
 /// 读取配置里的自定义主题文件（T-088 / FR-048）。
 ///
-/// `config.theme` 为 `Custom(name)` 时从 `%APPDATA%\ai-zhu-ye-ime\themes\<name>.json`
+/// `config.theme` 为 `Custom(name)` 时从 `%APPDATA%\zhu-ye-ime\themes\<name>.json`
 /// 读取并解析；名称不合法（见 `zhu_ye_core::is_safe_theme_name`，防目录逃逸）、文件
 /// 缺失或损坏 → `None`，候选窗回退浅色基底（与设置窗口口径一致，配置不失败）。
 fn configured_custom_theme() -> Option<zhu_ye_core::ThemeFile> {
@@ -1296,7 +1296,7 @@ fn debug_log(message: &str) {
 /// - 哨兵 `C:\zhu-ye-test\tsf-debug.enable` 存在 → 全量写原路径（格式不变，
 ///   vm-accept-sop 零改动）；
 /// - 否则 → 产品轨：级别门（config `log_level`，默认 warn，D-72）短路后
-///   `FileLogger` 写 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`（1 MiB 轮转）。
+///   `FileLogger` 写 `%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log`（1 MiB 轮转）。
 ///
 /// 目录创建与文件写只发生在达到级别的消息上（热路径由调用点守卫短路）。
 fn product_log(level: zhu_ye_core::LogLevel, message: &str) {
@@ -1349,13 +1349,13 @@ fn should_log(level: zhu_ye_core::LogLevel) -> bool {
     file_log_enabled() || level <= product_log_level()
 }
 
-/// 产品日志主文件路径：`%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`
+/// 产品日志主文件路径：`%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log`
 /// （与设置窗口 `product_log_dir` 同源；`%LOCALAPPDATA%` 缺失返回 `None`）。
 fn product_log_path() -> Option<PathBuf> {
     let root = std::env::var_os("LOCALAPPDATA")?;
     Some(
         PathBuf::from(root)
-            .join("ai-zhu-ye-ime")
+            .join("zhu-ye-ime")
             .join("logs")
             .join("ime.log"),
     )
@@ -1430,7 +1430,7 @@ mod log_tests {
         let original = std::env::var_os("LOCALAPPDATA");
         let dir = temp_dir();
         std::env::set_var("LOCALAPPDATA", &dir);
-        let expected = dir.join("ai-zhu-ye-ime").join("logs").join("ime.log");
+        let expected = dir.join("zhu-ye-ime").join("logs").join("ime.log");
         assert_eq!(product_log_path(), Some(expected));
         std::env::remove_var("LOCALAPPDATA");
         assert_eq!(product_log_path(), None);
@@ -1454,8 +1454,8 @@ mod log_tests {
 ///
 /// 装配顺序（方案设计 11.3）：
 /// 1. 基础包：`ZHU_YE_DICT_PATH` 覆盖 > DLL 同目录 `dictionary.zyct` > `%APPDATA%`；
-/// 2. 读 `%APPDATA%\ai-zhu-ye-ime\config.json` 的 `enabled_packs`，在
-///    `%APPDATA%\ai-zhu-ye-ime\packs\` 下按 `<id>.zyct` 解析领域包；
+/// 2. 读 `%APPDATA%\zhu-ye-ime\config.json` 的 `enabled_packs`，在
+///    `%APPDATA%\zhu-ye-ime\packs\` 下按 `<id>.zyct` 解析领域包；
 /// 3. 全部包合并为 `CompositeDictionary`（词频取 max）；
 /// 4. 网络语包单独挂到引擎上，供缩写路径（FR-016/FR-017）查询。
 ///
@@ -1696,12 +1696,12 @@ fn slang_pack(plan: &zhu_ye_core::PackPlan) -> Option<Arc<dyn Dictionary>> {
     }
 }
 
-/// 配置目录：`%APPDATA%\ai-zhu-ye-ime`。
+/// 配置目录：`%APPDATA%\zhu-ye-ime`。
 fn appdata_root() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|root| PathBuf::from(root).join("ai-zhu-ye-ime"))
+    std::env::var_os("APPDATA").map(|root| PathBuf::from(root).join("zhu-ye-ime"))
 }
 
-/// 配置文件路径：`%APPDATA%\ai-zhu-ye-ime\config.json`。
+/// 配置文件路径：`%APPDATA%\zhu-ye-ime\config.json`。
 fn config_path() -> PathBuf {
     appdata_root()
         .map(|root| root.join("config.json"))
@@ -1777,7 +1777,7 @@ fn installed_module_file(name: &str) -> Option<PathBuf> {
     }
 }
 
-/// 装载英文词表（T-085）：DLL 同目录 `en.zyen` > `%APPDATA%\ai-zhu-ye-ime\en.zyen`。
+/// 装载英文词表（T-085）：DLL 同目录 `en.zyen` > `%APPDATA%\zhu-ye-ime\en.zyen`。
 ///
 /// 任一候选存在但加载/校验失败 → `debug_log` 记录并回退（引擎侧走内嵌静态表）；
 /// 都不存在 → 静默 `None`（与词典包打开失败同策略：绝不阻断输入）。
@@ -1809,11 +1809,11 @@ fn en_lexicon() -> Option<zhu_ye_core::EnLexicon> {
     None
 }
 
-/// 用户词库 JSON 路径：`%APPDATA%\ai-zhu-ye-ime\user_words.json`。
+/// 用户词库 JSON 路径：`%APPDATA%\zhu-ye-ime\user_words.json`。
 fn user_words_path() -> PathBuf {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
-        .map(|root| root.join("ai-zhu-ye-ime").join("user_words.json"))
+        .map(|root| root.join("zhu-ye-ime").join("user_words.json"))
         .unwrap_or_else(|| PathBuf::from("user_words.json"))
 }
 
@@ -2181,9 +2181,9 @@ mod tests {
     fn 基础包目录优先环境变量再安装目录再用户目录() {
         let override_path = Some(PathBuf::from("D:\\custom\\my.zyct"));
         let installed = Some(PathBuf::from(
-            "C:\\Program Files\\ai-zhu-ye-ime\\tsf\\dictionary.zyct",
+            "C:\\Program Files\\zhu-ye-ime\\tsf\\dictionary.zyct",
         ));
-        let appdata = Some(PathBuf::from("%APPDATA%\\ai-zhu-ye-ime"));
+        let appdata = Some(PathBuf::from("%APPDATA%\\zhu-ye-ime"));
 
         // 环境变量优先，取其父目录（VM 逐包切换测试依赖此语义）。
         assert_eq!(
@@ -2193,7 +2193,7 @@ mod tests {
         // 其次 DLL 同目录。
         assert_eq!(
             resolve_base_dir(None, installed.clone(), appdata.clone()),
-            PathBuf::from("C:\\Program Files\\ai-zhu-ye-ime\\tsf")
+            PathBuf::from("C:\\Program Files\\zhu-ye-ime\\tsf")
         );
         // 再次用户数据目录。
         assert_eq!(

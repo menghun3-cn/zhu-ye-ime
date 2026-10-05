@@ -18,9 +18,9 @@ either complete the visual acceptance or prove the exact blocking conditions.
 TSF text input processors can also be registered per-user. Mirror the HKLM layout under
 HKCU (no elevated rights needed):
 
-- DLL and dictionary in the user's own dirs: `%LOCALAPPDATA%\ai-zhu-ye-ime\tsf\`
+- DLL and dictionary in the user's own dirs: `%LOCALAPPDATA%\zhu-ye-ime\tsf\`
   (versioned `zhu-ye-ime-<sha8>.dll` + `dictionary.zyct`); the base-dir resolver
-  (`tsf.rs resolve_base_dir`) falls back to `%APPDATA%\ai-zhu-ye-ime` for packs, so
+  (`tsf.rs resolve_base_dir`) falls back to `%APPDATA%\zhu-ye-ime` for packs, so
   `en.zyen`/extra packs go there.
 - `HKCU\SOFTWARE\Microsoft\CTF\TIP\{TipClsid}` with the same sub-trees as HKLM:
   `Category\Category\{KeyboardCategoryGuid}\{TipClsid}` (empty key),
@@ -29,9 +29,9 @@ HKCU (no elevated rights needed):
   Description` / `Enable` (DWORD 1) / `IconFile` = DLL / `IconIndex` (DWORD 0).
 - `HKCU\SOFTWARE\Classes\CLSID\{TipClsid}` (default = display name) +
   `\InprocServer32` (default = DLL path, `ThreadingModel` = `Apartment`).
-- Forensics without admin: `config.json` under `%APPDATA%\ai-zhu-ye-ime` with
+- Forensics without admin: `config.json` under `%APPDATA%\zhu-ye-ime` with
   `log_level: "debug"` turns on the product log track
-  (`%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`), since the `C:\zhu-ye-test` sentinel
+  (`%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log`), since the `C:\zhu-ye-test` sentinel
   path needs an admin writable root.
 - Verify the registration is genuinely accepted by the system, without any window
   focus, through the TSF COM API: get the profiles object from

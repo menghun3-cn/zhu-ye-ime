@@ -43,7 +43,7 @@ FR-016/FR-017（网络语词与字母串缩写）、FR-022（配置驱动的包�
 
 ### 配置
 
-`zhu_ye_core::pack_config` 解析 `%APPDATA%\ai-zhu-ye-ime\config.json`：
+`zhu_ye_core::pack_config` 解析 `%APPDATA%\zhu-ye-ime\config.json`：
 
 ```json
 { "version": 1, "enabled_packs": ["it","med","slang"],

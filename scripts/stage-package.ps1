@@ -119,7 +119,7 @@ $testGuide = @'
 
 ## 测试步骤
 
-1. 解压本包到测试机，例如 `C:\ai-zhu-ye-ime-0.1.0-test`。
+1. 解压本包到测试机，例如 `C:\zhu-ye-ime-0.1.0-test`。
 2. 推荐先创建系统还原点或虚拟机快照，便于反复执行安装/卸载。
 3. 以管理员身份打开 PowerShell。
 4. 执行安装：`.\scripts\install.ps1`
@@ -137,7 +137,7 @@ $testGuide = @'
 - DLL 导出由 `.\scripts\verify-tsf-dll.ps1 -DllPath .\bin\zhu_ye_ime.dll` 校验。
 - 标识常量由 `.\scripts\verify-tsf-identity.ps1` 交叉比对（7 项）。
 - 安装器会把 `bin\dictionary.zyct` 与 `bin\en.zyen` 复制到 DLL 同目录，并把三个领域包预置到
-  `%APPDATA%\ai-zhu-ye-ime\packs\`；卸载清理程序文件但保留用户数据目录。
+  `%APPDATA%\zhu-ye-ime\packs\`；卸载清理程序文件但保留用户数据目录。
 - 本包不包含 Rust 工具链；请勿在包内运行 cargo 类命令。
 - 词典数据来源与许可证见包内 `docs/licenses.md` 与 `docs/数据清单.md`。
 '@

@@ -53,7 +53,7 @@ blob 缺失，`error: null`——job 在分配到 runner 之前就被拒绝。
 成功（deploy-pages completed|success）；线上验证
 `https://menghun3-cn.github.io/zhu-ye-ime/` 返回 200，首页 hero-note 与
 download 页显示 v0.1.1-alpha，`llms.txt` 同口径；Release v0.1.1-alpha 含
-`ai-zhu-ye-ime-0.1.1-alpha-test.zip`（18.56 MB）。
+`zhu-ye-ime-0.1.1-alpha-test.zip`（18.56 MB）。
 
 相关记录（交叉链接）：[官网与品牌资产
 （architecture/2026-10-03-official-website-and-brand-assets.zh.md）](../../implemented/architecture/2026-10-03-official-website-and-brand-assets.zh.md)

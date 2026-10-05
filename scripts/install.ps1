@@ -6,7 +6,7 @@
 .DESCRIPTION
 发行包布局（由 package-portable.ps1 生成，见 docs/安装与使用.md）：
 
-    ai-zhu-ye-ime-<version>/
+    zhu-ye-ime-<version>/
       bin/zhu_ye_ime.dll             TSF 服务 DLL（版本化复制到安装目录）
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
@@ -20,8 +20,8 @@
 1. 从发行包 bin\ 读取文件，不再依赖源码树与 cargo（T-078）
 2. 版本化复制 zhu-ye-ime.dll 到安装目录并校验导出（沿用原事务与失败回滚）
 3. 复制基础词典与英文词表（en.zyen，T-085）
-4. 安装 zhu-ye-settings.exe / zhu-ye-updater.exe 到 Program Files\ai-zhu-ye-ime\bin
-5. 预置三个领域包到 %APPDATA%\ai-zhu-ye-ime\packs\（不覆盖用户已有包以外的动作：
+4. 安装 zhu-ye-settings.exe / zhu-ye-updater.exe 到 Program Files\zhu-ye-ime\bin
+5. 预置三个领域包到 %APPDATA%\zhu-ye-ime\packs\（不覆盖用户已有包以外的动作：
    同名覆盖，保证幂等）
 6. 注册 HKLM TSF TIP/Category/LanguageProfile/CLSID 树并校验（失败回滚，沿用原逻辑）
 7. 创建开始菜单快捷方式（D-26 唤起入口之一）
@@ -33,7 +33,7 @@
 .\scripts\install.ps1
 
 .EXAMPLE
-.\scripts\install.ps1 -PackageRoot C:\ai-zhu-ye-ime-0.1.0 -InstallDir "C:\Program Files\ai-zhu-ye-ime\tsf"
+.\scripts\install.ps1 -PackageRoot C:\zhu-ye-ime-0.1.0 -InstallDir "C:\Program Files\zhu-ye-ime\tsf"
 
 .EXAMPLE
 .\scripts\install.ps1 -SkipRegistration -InstallDir C:\tmp\install-test -AppDataRoot C:\tmp\appdata-test
@@ -90,7 +90,7 @@ if (-not $InstallDir) {
     $InstallDir = Get-TsfInstallDir
 }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
-$appRoot = Split-Path -Parent $InstallDir    # ...\ai-zhu-ye-ime（DLL 的 tsf 子目录的上级）
+$appRoot = Split-Path -Parent $InstallDir    # ...\zhu-ye-ime（DLL 的 tsf 子目录的上级）
 $exeDir = Join-Path $appRoot 'bin'
 
 if (-not $AppDataRoot) {
@@ -99,7 +99,7 @@ if (-not $AppDataRoot) {
         throw '未设置 APPDATA，无法定位数据目录。'
     }
 }
-$dataRoot = (Join-Path ([System.IO.Path]::GetFullPath($AppDataRoot)) 'ai-zhu-ye-ime')
+$dataRoot = (Join-Path ([System.IO.Path]::GetFullPath($AppDataRoot)) 'zhu-ye-ime')
 $packsDataDir = Join-Path $dataRoot 'packs'
 
 if ($SkipBuild) {
