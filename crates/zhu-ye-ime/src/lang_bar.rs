@@ -462,11 +462,14 @@ impl ITfLangBarItem_Impl for LangBarModeButton_Impl {
             return Err(E_POINTER.into());
         }
         // szDescription 是定长数组：逐元素拷贝 + 空终止，不做定长转换。
-        // 单字"竹"作为显示文字：Win11 任务栏输入法指示器/系统托盘以本字段
-        // 为品牌简称（微信输入法"微"同款机制，2026-10-06 用户点名：指示器
-        // 不再显示语言层面回退的"简体"）；完整模式说明在 GetTooltipString。
+        // 完整品牌名：Win11 任务栏输入法指示器取 TIP 语言档注册的 IconFile
+        // 图标资源（T-112b 嵌入 DLL 的"竹"字 ICO）；本字段在语言栏/回退
+        // 场景显示完整名称，不再用单字占位（单字"竹"仅用于图标本身）。
         let mut desc = [0u16; TF_LBI_DESC_MAXLEN as usize];
-        for (slot, unit) in desc.iter_mut().zip("竹".encode_utf16().chain(Some(0))) {
+        for (slot, unit) in desc
+            .iter_mut()
+            .zip("竹叶输入法（中英切换）".encode_utf16().chain(Some(0)))
+        {
             *slot = unit;
         }
         let info = TF_LANGBARITEMINFO {
@@ -828,8 +831,13 @@ mod tests {
         assert_ne!(info.dwStyle & TF_LBI_STYLE_BTN_BUTTON, 0);
         assert_ne!(info.dwStyle & TF_LBI_STYLE_SHOWNINTRAY, 0);
         assert_eq!(info.szDescription[0], '竹' as u16);
-        // 单字品牌简称：第二元素即空终止（2026-10-06 起指示器显示"竹"）。
-        assert_eq!(info.szDescription[1], 0);
+        // 完整品牌名（图标由 DLL 资源提供"竹"字，"竹叶输入法"是正式名称）：
+        // 首字"竹"、名称逐字就位、末尾空终止。
+        let name = "竹叶输入法（中英切换）";
+        for (i, unit) in name.encode_utf16().enumerate() {
+            assert_eq!(info.szDescription[i], unit);
+        }
+        assert_eq!(info.szDescription[name.encode_utf16().count()], 0);
     }
 
     /// 图标可渲染：中/英两枚图标创建成功，且像素级校验——底色

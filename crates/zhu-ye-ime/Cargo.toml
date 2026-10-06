@@ -12,6 +12,10 @@ description = "竹叶输入法 TSF 输入法 DLL 与候选窗"
 # 静态链接。
 crate-type = ["cdylib"]
 
+[build-dependencies]
+# T-112b：把"竹"字品牌图标注入 TSF DLL 资源（任务栏指示器图标源）。
+winresource = "0.1"
+
 [[bin]]
 name = "candidate-demo"
 path = "src/bin/candidate_demo.rs"
