@@ -47,6 +47,10 @@ pub enum CandidateSource {
     /// 前缀组词展开候选（FR-059，T-090）；完整拼音整词命中不足一页时按拼音前缀
     /// 补足更深组词（D-70/D-71），独立追加组不参与主排序，UI 不新增标签。
     PrefixExpand,
+    /// 动态组词候选（FR-068，第十三期）：整词未命中/不足一页时，按末尾向前
+    /// 贪心最长词匹配拼接出组合短语（`你有`/`你去`/`我来`）；独立追加组，
+    /// 不参与领域提权与用户词学习，UI 不新增标签。
+    DynamicCompose,
 }
 
 /// 输入法候选。
@@ -254,6 +258,69 @@ pub fn generate_candidates(
     deduplicate_and_sort(collected)
 }
 
+/// FR-068：动态组词候选（第十三期）。
+///
+/// 整词命中不足一页（含未命中）时，按**完整音节切分 + 头部向前贪心最长词匹配**
+/// 拼接出组合短语（`你有`/`你去`/`我来`/`来电话` 类）。与 [`generate_candidates`]
+/// 的切分组合（仅整词未命中时、逐音节取首词）不同：本函数在**整词命中组不足一页**
+/// 时也能补足（D-83，用户 2026-10-06 报障：`niyou` 仅有昵友/腻友/拟游隼而无"你有"）。
+///
+/// 匹配规则：
+/// - 从**头部音节**向前扩展，优先更长词（双音节词 > 单音节词），拼接顺序自然
+///   （先取的段在前，无需逆序）；
+/// - **整串本身（`pinyin` 全部音节）不参与匹配**——整词归属 `direct_hit` 主候选，
+///   动态组词只补足真子段组合（否则会返回整词自身，与主候选重复无新增）；
+/// - 同拼音键多词时取**词频最高**者（词典条目不保证排序，显式取 max）；
+/// - 逐段选取后拼接为单一候选文本（词条序列唯一，不产生排序歧义）。
+///
+/// 返回 `None`（不产出）：串非完整音节（还可继续输入，如 `ni`/`nish`）、切分
+/// 有歧义（多解，如 `xian` → `xian`/`xi`+`an`）、音节数 <2、或任一段无词
+/// （生僻音节）。**位次与去重**由调用方负责（置于主候选组之后、同文本去重、
+/// 按页剩余补足）。
+#[must_use]
+pub fn dynamic_compose_candidates(
+    table: &SyllableTable,
+    dictionary: &dyn Dictionary,
+    pinyin: &str,
+) -> Option<String> {
+    let all = segment_all(table, pinyin);
+    if all.len() != 1 {
+        // 无法切分（非完整音节串）或切分有歧义（多解）均不产出。
+        return None;
+    }
+    let syllables = &all[0];
+    if syllables.len() < 2 {
+        return None;
+    }
+    let mut words: Vec<String> = Vec::with_capacity(syllables.len());
+    let mut rest = syllables.as_slice();
+    let mut first = true;
+    while !rest.is_empty() {
+        // 首个匹配段跳过整串（整词归属 direct_hit 主候选，组词只补真子段）。
+        let max_len = if first { rest.len() - 1 } else { rest.len() };
+        first = false;
+        let mut picked: Option<(String, usize)> = None;
+        for len in (1..=max_len).rev() {
+            let key = rest[..len].join("");
+            let entries = dictionary.lookup(&key);
+            if entries.is_empty() {
+                continue;
+            }
+            let best = entries.iter().max_by_key(|e| e.frequency)?;
+            picked = Some((best.word.clone(), len));
+            break;
+        }
+        match picked {
+            Some((word, len)) => {
+                words.push(word);
+                rest = &rest[len..];
+            }
+            None => return None,
+        }
+    }
+    Some(words.concat())
+}
+
 fn candidate_from_entry(entry: &DictionaryEntry) -> Candidate {
     let mut candidate = Candidate::new(
         entry.word.clone(),
@@ -455,15 +522,22 @@ pub fn initial_candidates(dictionary: &dyn Dictionary, initials: &str) -> Vec<Ca
 /// 纠错变体上限（M7，方案设计 12.3.3）。
 pub const CORRECTION_VARIANT_CAP: usize = 24;
 
-/// 模糊音与纠错候选（M7，FR-024，方案设计 12.3）。
+/// 模糊音与纠错候选（M7，FR-024，方案设计 12.3；FR-069 扩展相邻换位）。
 ///
-/// 输入串必须**可完整切分**且**无整词命中**（由调用方保证，本函数内部防御）。
-/// 两类纠错：
-/// 1. **模糊替换**：对切分中每个音节做 `fuzzy_variants`（如 `zong`→`zhong`）；
-/// 2. **少字母补全**：对最后一个音节枚举以它为前缀的完整音节（如 `ha`→`hao`）。
+/// 输入串**无整词命中**（由调用方保证，本函数内部防御）。按输入能否完整切分
+/// 走两路：
+/// 1. **可完整切分**（原逻辑）：模糊替换（`zong`→`zhong`）+ 尾音节少字母补全
+///    （`ha`→`hao`）；
+/// 2. **不可完整切分**（FR-069，2026-10-06 用户报障：快速输入相邻字符交替，
+///    如 `xiagnzhe`/`zhegnq`/`shegnc`/`zhagnh`）：枚举**一次相邻字符换位**
+///    （`gn`→`ng`、`agn`→`ang` 等）得到变体串，变体按序走三路——① **整词命中**
+///    （`lookup` 非空）直接产出；② **可完整切分**走 `generate_candidates`
+///    （整词 + 音节切分组合，如 `xiagnzhe`→`xiangzhe`→想着）；③ **前缀路径**走
+///    `generate_prefix_candidates`（完成组 + 补全组，如 `zhegnq`→`zhengq`→
+///    正确(zhengque)、`shegnc`→`shengc`→生成(shengcheng)）。
 ///
-/// 变体拼音串命中词典的候选标注 `CandidateSource::Corrected`，作为独立组
-/// 追加在主候选之后（UI 不新增标签）。数量受 `CORRECTION_VARIANT_CAP` 约束。
+/// 全部候标注 `CandidateSource::Corrected`、`pinyin` 为**纠正后的正确拼音**；
+/// 数量受 `CORRECTION_VARIANT_CAP` 约束，变体间文本去重。
 #[must_use]
 pub fn corrected_candidates(
     table: &SyllableTable,
@@ -473,51 +547,116 @@ pub fn corrected_candidates(
     if pinyin.is_empty() || !dictionary.lookup(pinyin).is_empty() {
         return Vec::new();
     }
-    let segments = segment_all(table, pinyin);
-    let Some(segments) = segments.first() else {
-        return Vec::new();
-    };
-    let syllable_count = segments.len();
     let mut collected: Vec<Candidate> = Vec::new();
-    let mut seen_pinyin: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_text: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push_corrected = |candidate: &mut Candidate, collected: &mut Vec<Candidate>| {
+        if seen_text.insert(candidate.text.clone()) {
+            candidate.source = CandidateSource::Corrected;
+            collected.push(candidate.clone());
+        }
+    };
 
-    for (index, syllable) in segments.iter().enumerate() {
-        let variants = if index + 1 == syllable_count {
-            // 尾音节：模糊替换 + 少字母补全。
-            let mut variants = fuzzy_variants(syllable);
-            variants.extend(
-                table
-                    .complete_syllables_with_prefix(syllable)
-                    .into_iter()
-                    .filter(|completed| *completed != syllable)
-                    .map(str::to_owned),
-            );
-            variants
-        } else {
-            fuzzy_variants(syllable)
-        };
-        for variant in variants {
-            if !table.is_complete_syllable(&variant) {
-                continue;
+    // ---- 路 1：可完整切分（原 M7 逻辑） ----
+    if let Some(segments) = segment_all(table, pinyin).first() {
+        let syllable_count = segments.len();
+        let mut seen_pinyin: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (index, syllable) in segments.iter().enumerate() {
+            if collected.len() >= CORRECTION_VARIANT_CAP {
+                break;
             }
-            let mut replaced = segments.clone();
-            replaced[index] = variant.clone();
-            let new_pinyin = replaced.concat();
-            if !seen_pinyin.insert(new_pinyin.clone()) {
-                continue;
-            }
-            for entry in dictionary.lookup(&new_pinyin) {
-                let mut candidate = candidate_from_entry(&entry);
-                candidate.source = CandidateSource::Corrected;
-                candidate.pinyin = Some(new_pinyin.clone());
-                collected.push(candidate);
-                if collected.len() >= CORRECTION_VARIANT_CAP {
-                    return collected;
+            let variants = if index + 1 == syllable_count {
+                // 尾音节：模糊替换 + 少字母补全。
+                let mut variants = fuzzy_variants(syllable);
+                variants.extend(
+                    table
+                        .complete_syllables_with_prefix(syllable)
+                        .into_iter()
+                        .filter(|completed| *completed != syllable)
+                        .map(str::to_owned),
+                );
+                variants
+            } else {
+                fuzzy_variants(syllable)
+            };
+            for variant in variants {
+                if !table.is_complete_syllable(&variant) {
+                    continue;
+                }
+                let mut replaced = segments.clone();
+                replaced[index] = variant.clone();
+                let new_pinyin = replaced.concat();
+                if !seen_pinyin.insert(new_pinyin.clone()) {
+                    continue;
+                }
+                for entry in dictionary.lookup(&new_pinyin) {
+                    let mut candidate = candidate_from_entry(&entry);
+                    candidate.pinyin = Some(new_pinyin.clone());
+                    push_corrected(&mut candidate, &mut collected);
+                    if collected.len() >= CORRECTION_VARIANT_CAP {
+                        return collected;
+                    }
                 }
             }
         }
+        return collected;
+    }
+
+    // ---- 路 2（FR-069）：不可完整切分 → 相邻换位纠正 ----
+    for variant in transposition_variants(pinyin) {
+        if collected.len() >= CORRECTION_VARIANT_CAP {
+            break;
+        }
+        // a. 整词命中。
+        let direct = dictionary.lookup(&variant);
+        if !direct.is_empty() {
+            for entry in &direct {
+                let mut candidate = candidate_from_entry(entry);
+                candidate.pinyin = Some(variant.clone());
+                push_corrected(&mut candidate, &mut collected);
+            }
+            continue;
+        }
+        // b. 可完整切分 → 常规候选管线（整词 + 切分组合）。
+        if !segment_all(table, &variant).is_empty() {
+            for mut candidate in generate_candidates(table, dictionary, &variant) {
+                push_corrected(&mut candidate, &mut collected);
+            }
+            continue;
+        }
+        // c. 前缀路径：完成组 + 补全组（`zhengq`→正确、`shengc`→生成）。
+        let groups =
+            generate_prefix_candidates(table, dictionary, &variant, CORRECTION_VARIANT_CAP);
+        let merged = merge_candidate_groups(groups.completions, groups.completed);
+        for mut candidate in merged {
+            push_corrected(&mut candidate, &mut collected);
+        }
     }
     collected
+}
+
+/// 相邻字符换位变体（FR-069）：对输入串做**一次**相邻位置交换并去重；
+/// 仅 ASCII 小写字母参与（数字/大写保持原位，避免扰动 v 模式等键路）。
+#[must_use]
+fn transposition_variants(input: &str) -> Vec<String> {
+    let chars: Vec<char> = input.chars().collect();
+    if chars.len() < 2 {
+        return Vec::new();
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut variants: Vec<String> = Vec::new();
+    for i in 0..chars.len() - 1 {
+        if !chars[i].is_ascii_lowercase() || !chars[i + 1].is_ascii_lowercase() {
+            continue;
+        }
+        let mut swapped = chars.clone();
+        swapped.swap(i, i + 1);
+        let text: String = swapped.into_iter().collect();
+        if seen.insert(text.clone()) {
+            variants.push(text);
+        }
+    }
+    variants
 }
 
 /// Beam Search 参数（M7，方案设计 12.4.2）。
@@ -831,10 +970,10 @@ mod tests {
     use crate::bigram::InMemoryBigramModel;
     use crate::candidate::{
         abbreviation_candidates, append_abbreviation_group, corrected_candidates,
-        generate_candidates, generate_prefix_candidates, initial_candidates, is_abbreviation_input,
-        merge_candidate_groups, prefix_expand_candidates, sentence_candidates, Candidate,
-        CandidateSorter, CandidateSource, RankingConfig, RankingContext, RankingModel,
-        StaticRankingModel,
+        dynamic_compose_candidates, generate_candidates, generate_prefix_candidates,
+        initial_candidates, is_abbreviation_input, merge_candidate_groups,
+        prefix_expand_candidates, sentence_candidates, Candidate, CandidateSorter, CandidateSource,
+        RankingConfig, RankingContext, RankingModel, StaticRankingModel,
     };
     use crate::dict::{DictionaryEntry, InMemoryDictionary};
     use crate::pinyin::SyllableTable;
@@ -850,6 +989,169 @@ mod tests {
     }
 
     // ---- 缩写输入路径（M6-R）----
+
+    // ---- FR-068：动态组词（第十三期） ----
+
+    #[test]
+    fn 动态组词整词不足一页补足你有() {
+        let table = SyllableTable::standard();
+        // 现场词典情景：`niyou` 整词命中（昵友/腻友）不足一页，
+        // 动态组词补出"你有"（`you` 取词频最高的"有"，非"优"）。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("昵友", "niyou", 500),
+            DictionaryEntry::new("腻友", "niyou", 400),
+            DictionaryEntry::new("你", "ni", 9000),
+            DictionaryEntry::new("有", "you", 9500),
+            DictionaryEntry::new("优", "you", 6000),
+        ]);
+        assert_eq!(
+            dynamic_compose_candidates(&table, &dictionary, "niyou").as_deref(),
+            Some("你有")
+        );
+    }
+
+    #[test]
+    fn 动态组词最长词优先且歧义生僻不产出() {
+        let table = SyllableTable::standard();
+        // 双音节词优先于单音节逐字：`womende` 切分唯一（wo+men+de），
+        // 头部贪心首段取"我们"（women 双字词）而非"我"+"门"。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("我们", "women", 9000),
+            DictionaryEntry::new("我", "wo", 8500),
+            DictionaryEntry::new("门", "men", 7000),
+            DictionaryEntry::new("的", "de", 8000),
+        ]);
+        assert_eq!(
+            dynamic_compose_candidates(&table, &dictionary, "womende").as_deref(),
+            Some("我们的")
+        );
+        // 切分有歧义（xian → 仙 或 西+安）不产出（宁缺勿误，D-83）。
+        let ambiguous = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("仙", "xian", 9000),
+            DictionaryEntry::new("西", "xi", 9000),
+            DictionaryEntry::new("安", "an", 9000),
+        ]);
+        assert_eq!(dynamic_compose_candidates(&table, &ambiguous, "xian"), None);
+        assert_eq!(
+            dynamic_compose_candidates(&table, &ambiguous, "laidianhua"),
+            None
+        );
+        // 单音节/非完整音节串不产出。
+        assert_eq!(dynamic_compose_candidates(&table, &dictionary, "ni"), None);
+        assert_eq!(dynamic_compose_candidates(&table, &dictionary, "lai"), None);
+        assert_eq!(dynamic_compose_candidates(&table, &dictionary, "wo"), None);
+        assert_eq!(
+            dynamic_compose_candidates(&table, &dictionary, "womend"),
+            None
+        );
+        // 生僻段无词不产出。
+        let missing =
+            InMemoryDictionary::from_entries(vec![DictionaryEntry::new("你", "ni", 9000)]);
+        assert_eq!(dynamic_compose_candidates(&table, &missing, "niyou"), None);
+    }
+
+    // ---- FR-069：相邻换位容错纠正（第十三期 2026-10-06 报障） ----
+
+    #[test]
+    fn 相邻换位纠正完整切分变体() {
+        let table = SyllableTable::standard();
+        // xiagnzhe（`gn` 换位）→ xiangzhe 可完整切分 → 想着（xiang+zhe 组合），
+        // 候选 pinyin 为纠正后的正确拼音。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("想着", "xiangzhe", 5000),
+            DictionaryEntry::new("想", "xiang", 9000),
+            DictionaryEntry::new("着", "zhe", 8000),
+        ]);
+        let found = corrected_candidates(&table, &dictionary, "xiagnzhe");
+        assert!(!found.is_empty(), "换位变体应有纠正候选");
+        let texts: Vec<&str> = found.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["想着"]);
+        assert_eq!(found[0].source, CandidateSource::Corrected);
+        assert_eq!(found[0].pinyin.as_deref(), Some("xiangzhe"));
+    }
+
+    #[test]
+    fn 相邻换位纠正前缀补全组词() {
+        let table = SyllableTable::standard();
+        // shegnc → shengc：前缀补全组出"生成/生产"（lookup_prefix shengc*），
+        // 完成组出"生"（generate sheng），pinyin 均为纠正后正确拼音。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("生成", "shengcheng", 9000),
+            DictionaryEntry::new("生产", "shengchan", 8500),
+            DictionaryEntry::new("生", "sheng", 8000),
+        ]);
+        let found = corrected_candidates(&table, &dictionary, "shegnc");
+        assert!(!found.is_empty(), "换位变体应有前缀纠正候选");
+        let texts: Vec<&str> = found.iter().map(|c| c.text.as_str()).collect();
+        assert!(
+            texts.contains(&"生成"),
+            "应出 生成（shengcheng），实际 {texts:?}"
+        );
+        assert!(
+            texts.contains(&"生产"),
+            "应出 生产（shengchan），实际 {texts:?}"
+        );
+        assert!(
+            texts.contains(&"生"),
+            "完成组应出 生（sheng），实际 {texts:?}"
+        );
+        let generated = found
+            .iter()
+            .find(|c| c.text == "生成")
+            .expect("生成应在候选内");
+        assert_eq!(generated.source, CandidateSource::Corrected);
+        assert_eq!(generated.pinyin.as_deref(), Some("shengcheng"));
+    }
+
+    #[test]
+    fn 相邻换位纠正前缀意图识别() {
+        let table = SyllableTable::standard();
+        // zhagnh → zhangh：意图 zhanghu（账户）或 zhang（账）；
+        // zhegnq → zhengq：意图 zhengque（正确）。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("账户", "zhanghu", 9000),
+            DictionaryEntry::new("账", "zhang", 8500),
+            DictionaryEntry::new("正确", "zhengque", 9000),
+            DictionaryEntry::new("正", "zheng", 8800),
+            DictionaryEntry::new("整", "zheng", 8000),
+        ]);
+        let zh_ok = corrected_candidates(&table, &dictionary, "zhagnh");
+        let zh_texts: Vec<&str> = zh_ok.iter().map(|c| c.text.as_str()).collect();
+        assert!(zh_texts.contains(&"账户"), "应出 账户，实际 {zh_texts:?}");
+        assert!(zh_texts.contains(&"账"), "完成组应出 账，实际 {zh_texts:?}");
+
+        let zq_ok = corrected_candidates(&table, &dictionary, "zhegnq");
+        let zq_texts: Vec<&str> = zq_ok.iter().map(|c| c.text.as_str()).collect();
+        assert!(zq_texts.contains(&"正确"), "应出 正确，实际 {zq_texts:?}");
+        let zhengque = zq_ok
+            .iter()
+            .find(|c| c.text == "正确")
+            .expect("正确应在候选内");
+        assert_eq!(
+            zhengque.pinyin.as_deref(),
+            Some("zhengque"),
+            "正确拼音应为纠正后 zhengque"
+        );
+    }
+
+    #[test]
+    fn 相邻换位不可纠正串保持空() {
+        let table = SyllableTable::standard();
+        // 换位也不可切分/无整词/无前缀命中的串不产出（宁缺勿误）；
+        // 已有整词命中不触发纠正（调用方保证，内部防御）。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("想", "xiang", 9000),
+            DictionaryEntry::new("着", "zhe", 8000),
+        ]);
+        assert!(
+            corrected_candidates(&table, &dictionary, "xbncgh").is_empty(),
+            "全串换位无任何可用路径时应为空"
+        );
+        assert!(
+            corrected_candidates(&table, &dictionary, "想着拼音").is_empty(),
+            "非字母串不参与换位纠正"
+        );
+    }
 
     fn slang_dictionary() -> InMemoryDictionary {
         InMemoryDictionary::from_entries(vec![

@@ -35,9 +35,9 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_0, VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN,
-    VK_ESCAPE, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_RETURN,
-    VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
+    GetKeyState, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL,
+    VK_DOWN, VK_ESCAPE, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA,
+    VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
@@ -145,6 +145,10 @@ enum KeyAction {
     VConsume(char),
     /// v 模式退格（有类型码时回退，只有 `v` 时退出）。
     VBackspace,
+    /// FR-067：中文标点全角直出。触发字符为拉丁键盘键位（`\`/`,`/`.`/`;`/`:`/
+    /// `?`/`!`/`(`/`)`/`"`/`'`），由 `commit_fullwidth_punct` 映射为全角标点
+    /// 并清空组合；仅中文模式吃键，英文模式与数字/v 模式外放行宿主。
+    FullWidthPunct(char),
 }
 
 impl KeyAction {
@@ -170,6 +174,7 @@ impl KeyAction {
                 | KeyAction::VCode(_)
                 | KeyAction::VConsume(_)
                 | KeyAction::VBackspace
+                | KeyAction::FullWidthPunct(_)
         )
     }
 }
@@ -615,6 +620,18 @@ fn classify_key(wparam: WPARAM, lparam: LPARAM, shift: bool) -> Option<KeyAction
         code if code == VK_OEM_1.0 && shift => Some(KeyAction::FormatChar(':')),
         // T-066：英文布局 `/`（VK_OEM_2，无 Shift；Shift+`/` 的 `?` 放行宿主）。
         code if code == VK_OEM_2.0 && !shift => Some(KeyAction::FormatChar('/')),
+        // FR-067：中文标点全角直出的键位归类（上档字符 `?`/`!`/`（`/`）`/`"`/`:` 在
+        // 英文布局由 Shift 组合产生，这里按键盘字符语义归类；是否吃键由 `plan_action`
+        // 按中文模式判定，英文模式放行宿主）。
+        code if code == VK_OEM_1.0 && !shift => Some(KeyAction::FullWidthPunct(';')),
+        code if code == VK_OEM_5.0 && !shift => Some(KeyAction::FullWidthPunct('\\')),
+        code if code == VK_OEM_7.0 && !shift => Some(KeyAction::FullWidthPunct('\'')),
+        code if code == VK_OEM_7.0 && shift => Some(KeyAction::FullWidthPunct('"')),
+        code if code == VK_OEM_COMMA.0 => Some(KeyAction::FullWidthPunct(',')),
+        code if code == VK_OEM_2.0 && shift => Some(KeyAction::FullWidthPunct('?')),
+        code if code == VK_1.0 && shift => Some(KeyAction::FullWidthPunct('!')),
+        code if code == VK_9.0 && shift => Some(KeyAction::FullWidthPunct('(')),
+        code if code == VK_0.0 && shift => Some(KeyAction::FullWidthPunct(')')),
         code if code == VK_BACK.0 => Some(KeyAction::Backspace),
         code if code == VK_SPACE.0 => Some(KeyAction::Space),
         code if code == VK_RETURN.0 => Some(KeyAction::Enter),
@@ -714,12 +731,15 @@ fn plan_action(
         KeyAction::Letter(_) => (engine.mode() == InputMode::Chinese).then_some(action),
         KeyAction::Dot => {
             // FR-027：数字格式模式内追加小数点（金额小数位）。
-            // T-066：否则组合态邮箱/网址上下文中 `.` 进组合串（按引擎 `is_format_key`），
-            // 普通拼音组合后的 `.` 照旧放行宿主直出标点。
+            // T-066：否则组合态邮箱/网址上下文中 `.` 进组合串（按引擎 `is_format_key`）。
+            // FR-067：中文模式其余情况（普通拼音组合/空闲态）`.` 全角直出"。"，
+            // 替换原"放行宿主输出半角"语义（D-83）。
             if engine.mode() == InputMode::Chinese && engine.digit_active() {
                 Some(KeyAction::BufferDigit('.'))
             } else if engine.mode() == InputMode::Chinese && engine.is_format_key('.') {
                 Some(KeyAction::FormatChar('.'))
+            } else if engine.mode() == InputMode::Chinese {
+                Some(KeyAction::FullWidthPunct('.'))
             } else {
                 None
             }
@@ -730,6 +750,11 @@ fn plan_action(
             if engine.mode() == InputMode::Chinese && engine.is_format_key(c) =>
         {
             Some(action)
+        }
+        // FR-067：中文模式下 Shift+`;`（`:`）非网址意图时全角直出"："；
+        // `@`/`/`（VK_2+Shift / VK_OEM_2）保持放行宿主（邮箱/路径输入语义不变）。
+        KeyAction::FormatChar(':') if engine.mode() == InputMode::Chinese => {
+            Some(KeyAction::FullWidthPunct(':'))
         }
         KeyAction::FormatChar(_) => None,
         // T-049：数字键在中文模式下先判断是否为"含数字缩写键"的组成部分
@@ -753,6 +778,9 @@ fn plan_action(
         KeyAction::Escape if engine.digit_active() || engine.v_active() => Some(action),
         KeyAction::ToggleMode if !engine.is_active() => Some(action),
         KeyAction::ToggleMode => None,
+        // FR-067：中文模式（组合态或空闲态）标点键全角直出；英文模式放行宿主。
+        KeyAction::FullWidthPunct(_) if engine.mode() == InputMode::Chinese => Some(action),
+        KeyAction::FullWidthPunct(_) => None,
         _ if engine.is_active() => Some(action),
         _ => None,
     }
@@ -875,6 +903,17 @@ fn apply_action(
         KeyAction::BufferDigit(c) => {
             let text = c.to_string();
             finish_composition(state, context, ec, &text)?;
+        }
+        // FR-067：中文标点全角直出——组合态/空闲态都直接上屏该标点
+        // （组合态已由引擎清空，状态同步在 `sync_engine` 尾部统一完成）。
+        KeyAction::FullWidthPunct(c) => {
+            let text = {
+                let engine = &mut state.lock().unwrap().engine;
+                engine.commit_fullwidth_punct(c).unwrap_or_default()
+            };
+            if !text.is_empty() {
+                finish_composition(state, context, ec, &text)?;
+            }
         }
         // FR-027：数字格式模式退格——文档侧删插入点前 1 字符。
         KeyAction::DigitBackspace => {
@@ -1084,6 +1123,9 @@ fn sync_engine(state: &Arc<SharedEngine>, action: KeyAction) {
         KeyAction::VBackspace => {
             let _ = engine.v_backspace();
         }
+        // FR-067：状态已在 apply_action 的 commit_fullwidth_punct 内完成（清空组合、
+        // 引号交替）；此处只需刷新候选窗（空组合自动隐藏），无需额外推进。
+        KeyAction::FullWidthPunct(_) => {}
     }
 }
 
@@ -2235,9 +2277,10 @@ mod tests {
             classify_key(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0), false),
             Some(KeyAction::PageDown)
         );
+        // T-033 起逗号句号不再映射翻页；FR-067 起中文模式逗号归类为标点键。
         assert_eq!(
             classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0), false),
-            None
+            Some(KeyAction::FullWidthPunct(','))
         );
         // FR-027：`.`（VK_OEM_PERIOD/小键盘 VK_DECIMAL）归为 Dot，
         // 数字格式模式内追加小数、模式外放行宿主。
@@ -2363,8 +2406,12 @@ mod tests {
             crate::input::CandidateLayer::Translation
         );
         let before = state.lock().unwrap().engine.page();
+        let pages = state.lock().unwrap().engine.page_count();
         sync_engine(&state, KeyAction::PageDown);
-        assert_eq!(state.lock().unwrap().engine.page(), before);
+        // 译文层与中文层翻页语义一致（next_page：下翻一页、末页回卷）。
+        // 对齐 T-013 旧断言与 input.rs 演进的漂移（2026-10-06 回归基线修复）。
+        let after = if before + 1 < pages { before + 1 } else { 0 };
+        assert_eq!(state.lock().unwrap().engine.page(), after);
         sync_engine(&state, KeyAction::ToggleMode);
         assert_eq!(state.lock().unwrap().engine.mode(), InputMode::English);
     }
@@ -2650,7 +2697,8 @@ mod tests {
     }
 
     #[test]
-    fn 数字模式外小数点放行宿主() {
+    fn 小数点中文全角直出英文放行() {
+        // FR-067：中文模式（空闲态/组合态）`.` 全角直出"。"；英文模式放行宿主。
         let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
         assert_eq!(
             plan_action(
@@ -2660,8 +2708,95 @@ mod tests {
                 false,
                 &state
             ),
+            Some(KeyAction::FullWidthPunct('.')),
+            "中文模式空闲态 `.` 全角直出"
+        );
+        // 切英文模式后 `.` 放行宿主。
+        sync_engine(&state, KeyAction::ToggleMode);
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_PERIOD.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
             None,
-            "非数字模式 `.` 放行给宿主直出标点"
+            "英文模式 `.` 放行给宿主直出半角标点"
+        );
+    }
+
+    #[test]
+    fn 标点键归类与中文吃键英文放行() {
+        // FR-067：各标点键归类为 FullWidthPunct（英文布局上档字符按 Shift 判定）。
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0), false),
+            Some(KeyAction::FullWidthPunct(','))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_5.0 as usize), LPARAM(0), false),
+            Some(KeyAction::FullWidthPunct('\\'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), false),
+            Some(KeyAction::FullWidthPunct(';'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), true),
+            Some(KeyAction::FormatChar(':'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_7.0 as usize), LPARAM(0), false),
+            Some(KeyAction::FullWidthPunct('\''))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_7.0 as usize), LPARAM(0), true),
+            Some(KeyAction::FullWidthPunct('"'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_1.0 as usize), LPARAM(0), true),
+            Some(KeyAction::FullWidthPunct('!'))
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_2.0 as usize), LPARAM(0), true),
+            Some(KeyAction::FullWidthPunct('?'))
+        );
+        // plan_action：中文模式吃键（空闲态/组合态）、英文模式放行宿主。
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_5.0 as usize), LPARAM(0), false, false, &state),
+            Some(KeyAction::FullWidthPunct('\\')),
+            "中文模式空闲态 `\\` 吃键全角直出"
+        );
+        sync_engine(&state, KeyAction::Letter('n'));
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_COMMA.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
+            Some(KeyAction::FullWidthPunct(',')),
+            "中文模式组合态 `,` 吃键全角直出"
+        );
+        // 组合态 Shift+`;`（非网址意图）→ 全角"："。
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), false, true, &state),
+            Some(KeyAction::FullWidthPunct(':'))
+        );
+        // 网址意图 `:` 仍进组合串（T-066 不回归）。
+        let url = format_state("http");
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), false, true, &url),
+            Some(KeyAction::FormatChar(':'))
+        );
+        // 英文模式标点放行。
+        sync_engine(&state, KeyAction::ToggleMode);
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_5.0 as usize), LPARAM(0), false, false, &state),
+            None,
+            "英文模式 `\\` 放行宿主"
         );
     }
 
@@ -2736,14 +2871,14 @@ mod tests {
 
     #[test]
     fn 冒号与斜杠仅网址意图进串() {
-        // 键分类：Shift+`;` => `:`；`;` 放行宿主；`/` 无 Shift；Shift+`/`（`?`）放行。
+        // 键分类：Shift+`;` => `:`；无 Shift `;` / Shift+`/`（`?`）为 FR-067 标点键。
         assert_eq!(
             classify_key(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), true),
             Some(KeyAction::FormatChar(':'))
         );
         assert_eq!(
             classify_key(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), false),
-            None
+            Some(KeyAction::FullWidthPunct(';'))
         );
         assert_eq!(
             classify_key(WPARAM(VK_OEM_2.0 as usize), LPARAM(0), false),
@@ -2751,7 +2886,7 @@ mod tests {
         );
         assert_eq!(
             classify_key(WPARAM(VK_OEM_2.0 as usize), LPARAM(0), true),
-            None
+            Some(KeyAction::FullWidthPunct('?'))
         );
         // `http` 演进：`:` 与 `/` 逐键进串，最终命中网址态。
         let state = format_state("http");
@@ -2769,11 +2904,11 @@ mod tests {
             sync_engine(&state, KeyAction::FormatChar('/'));
         }
         assert_eq!(state.lock().unwrap().engine.composing(), "http://");
-        // 结构相似但非网址意图（httpw）：`:` 放行宿主。
+        // 结构相似但非网址意图（httpw）：`:` 全角直出"："（FR-067）。
         let bad = format_state("httpw");
         assert_eq!(
             plan_action(WPARAM(VK_OEM_1.0 as usize), LPARAM(0), false, true, &bad),
-            None
+            Some(KeyAction::FullWidthPunct(':'))
         );
         // 普通拼音组合后的 `/`：放行宿主（不改变既有标点直出语义）。
         let nihao = format_state("nihao");
@@ -2809,7 +2944,7 @@ mod tests {
             ),
             Some(KeyAction::FormatChar('.'))
         );
-        // 普通拼音：`nihao` 后按 `.` 放行宿主（既有行为不回退）。
+        // 普通拼音：`nihao` 后按 `.` → FR-067 中文全角直出"。"（替换原放行语义）。
         let nihao = format_state("nihao");
         assert_eq!(
             plan_action(
@@ -2819,7 +2954,7 @@ mod tests {
                 false,
                 &nihao
             ),
-            None
+            Some(KeyAction::FullWidthPunct('.'))
         );
         // 完整邮箱串继续演进：me@163.com 已含点 → 单候选直通。
         let full = format_state("me@163.c");

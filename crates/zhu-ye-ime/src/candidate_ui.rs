@@ -21,6 +21,8 @@ pub struct CandidateUiItem {
     pub text: String,
     /// 译文；无译文时为空字符串。
     pub translation: String,
+    /// 候选拼音（FR-069：候选行显示正确拼音）；无拼音时为空字符串。
+    pub pinyin: String,
     /// 候选来源，用于 UI 弱化标识。
     pub source: CandidateSource,
 }
@@ -92,19 +94,26 @@ impl CandidateUiView {
 /// 网络语候选的标注文本（M6-R，方案设计 11.4）。
 pub const SLANG_LABEL: &str = "[网络]";
 
-/// 候选主文本的展示形式：网络语缩写候选追加 `[网络]` 标注。
+/// 候选主文本的展示形式：网络语缩写候选追加 `[网络]` 标注；
+/// 有拼音的候选以 `中文（拼音）` 展示（FR-069，纠正/前缀/整词候选均带
+/// 正确拼音，如 `生（sheng）`、`正确（zhengque）`）。
 ///
-/// 标注并入主文本而非独立列，因此 `row_split` 的宽度估算天然把它算进去，
-/// 不会与译文区重叠。译文层展示译文本身，不加标注。
+/// 标注与拼音并入主文本而非独立列，因此 `row_split` 的宽度估算天然把它们
+/// 算进去，不会与译文区重叠。译文层展示译文本身，不加标注与拼音。
 #[must_use]
 pub fn display_main_text(item: &CandidateUiItem, translation_mode: bool) -> String {
     if translation_mode && !item.translation.is_empty() {
         return item.translation.clone();
     }
+    // 网络语缩写保持 `文本 [网络]` 标注（拼音为缩写源串，不展示）。
     if item.source == CandidateSource::Slang {
         return format!("{} {}", item.text, SLANG_LABEL);
     }
-    item.text.clone()
+    if item.pinyin.is_empty() {
+        item.text.clone()
+    } else {
+        format!("{}（{}）", item.text, item.pinyin)
+    }
 }
 
 /// 候选窗配色。
@@ -454,6 +463,7 @@ mod tests {
                     } else {
                         String::new()
                     },
+                    pinyin: String::new(),
                     source: CandidateSource::Static,
                 })
                 .collect(),
@@ -464,6 +474,7 @@ mod tests {
         CandidateUiItem {
             text: text.to_owned(),
             translation: translation.to_owned(),
+            pinyin: String::new(),
             source: CandidateSource::Slang,
         }
     }
@@ -482,6 +493,7 @@ mod tests {
         let item = CandidateUiItem {
             text: "你好".to_owned(),
             translation: "hello".to_owned(),
+            pinyin: String::new(),
             source: CandidateSource::Static,
         };
         assert_eq!(display_main_text(&item, false), "你好");
@@ -491,6 +503,33 @@ mod tests {
             ..item.clone()
         };
         assert_eq!(display_main_text(&user, false), "你好");
+    }
+
+    #[test]
+    fn 候选带拼音时显示中文括号拼音() {
+        // 生（sheng）、正确（zhengque）：纠正/前缀候选向用户展示正确拼音（FR-069）。
+        let sheng = CandidateUiItem {
+            text: "生".to_owned(),
+            translation: "birth".to_owned(),
+            pinyin: "sheng".to_owned(),
+            source: CandidateSource::Corrected,
+        };
+        assert_eq!(display_main_text(&sheng, false), "生（sheng）");
+        let zhengque = CandidateUiItem {
+            text: "正确".to_owned(),
+            translation: String::new(),
+            pinyin: "zhengque".to_owned(),
+            source: CandidateSource::Corrected,
+        };
+        assert_eq!(display_main_text(&zhengque, false), "正确（zhengque）");
+        // 译文层仍以译文为主文本，不带拼音。
+        assert_eq!(display_main_text(&sheng, true), "birth");
+        // 网络语候选不带括号拼音。
+        let slang = slang_item("永远的神", "");
+        assert_eq!(
+            display_main_text(&slang, false),
+            format!("永远的神 {SLANG_LABEL}")
+        );
     }
 
     #[test]

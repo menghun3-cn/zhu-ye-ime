@@ -111,11 +111,16 @@ fn parse_theme(value: &str) -> Result<ThemePreference, String> {
 
 fn demo_view(translation_mode: bool, emoji_row: bool) -> CandidateUiView {
     let mut items = vec![
-        item("你好", "Hello", CandidateSource::Static),
-        item("你们好", "Hello everyone", CandidateSource::Static),
-        item("你好呀", "Hi there", CandidateSource::User),
-        item("耐火", "Fire-resistant", CandidateSource::Static),
-        item("拟稿", "Draft", CandidateSource::Static),
+        item_py("你好", "Hello", "nihao", CandidateSource::Static),
+        item_py(
+            "你们好",
+            "Hello everyone",
+            "nimenhao",
+            CandidateSource::Static,
+        ),
+        item_py("你好呀", "Hi there", "nihiyao", CandidateSource::User),
+        item_py("耐火", "Fire-resistant", "naihuo", CandidateSource::Static),
+        item_py("拟稿", "Draft", "nigao", CandidateSource::Static),
     ];
     if emoji_row {
         // T-074：注入彩色 emoji 候选行供截图验收（其余行保持 GDI 基线）。
@@ -123,10 +128,10 @@ fn demo_view(translation_mode: bool, emoji_row: bool) -> CandidateUiView {
         items.push(item("完成 🚀", "", CandidateSource::Static));
     }
     items.extend([
-        item("溺爱", "Dote on", CandidateSource::Static),
-        item("逆光", "Backlight", CandidateSource::Static),
-        item("泥泞", "Muddy", CandidateSource::Static),
-        item("妮好", "", CandidateSource::Static),
+        item_py("溺爱", "Dote on", "niai", CandidateSource::Static),
+        item_py("逆光", "Backlight", "niguang", CandidateSource::Static),
+        item_py("泥泞", "Muddy", "nining", CandidateSource::Static),
+        item_py("妮好", "", "nihao", CandidateSource::Static),
     ]);
     CandidateUiView {
         composition: "ni hao".to_owned(),
@@ -141,9 +146,20 @@ fn demo_view(translation_mode: bool, emoji_row: bool) -> CandidateUiView {
 }
 
 fn item(text: &str, translation: &str, source: CandidateSource) -> CandidateUiItem {
+    item_py(text, translation, "", source)
+}
+
+/// FR-069：带正确拼音的候选项（demo 数据演示 `中文（拼音）` 展示）。
+fn item_py(
+    text: &str,
+    translation: &str,
+    pinyin: &str,
+    source: CandidateSource,
+) -> CandidateUiItem {
     CandidateUiItem {
         text: text.to_owned(),
         translation: translation.to_owned(),
+        pinyin: pinyin.to_owned(),
         source,
     }
 }
