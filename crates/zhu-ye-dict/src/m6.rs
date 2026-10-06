@@ -801,6 +801,9 @@ pub struct BaseStats {
     pub jieba_expansion: usize,
     /// 由 CC-CEDICT 兜底注音进入的词条数（含译文）。
     pub cedict_words: usize,
+    /// 译文补齐的词条数（T-115 后续：骨架/jieba/CEDICT 无译义词经 CEDICT
+    /// 首义或精修表补上译文的条数；此前骨架词整批无译文）。
+    pub patched_translations: usize,
     /// 规范字集（kTGHZ 8,102 字，约等于通用规范汉字表 8,105）中出现在 base 的字占比。
     pub char_set_coverage_pct: f64,
     /// 最终词条总数。
@@ -810,6 +813,69 @@ pub struct BaseStats {
     /// 产物内容 SHA-256（manifest 输入）。
     pub sha256: String,
 }
+
+/// 译文净化（T-115 后续）：取 CEDICT 单段中分号前的首义，去掉尾部感叹号。
+///
+/// CEDICT 首义常为 `你好 /hello; hi/` 这类"分号并列多义"，译文层逐词只展示
+/// 一条首义，用户点名示例期望 `你好 → hello` 而非 `hello; hi`；
+/// 括号说明（如 `to be (followed by substantives only)`）属于语义内容保留不删。
+fn clean_translation(text: &str) -> Option<String> {
+    let part = text.split(';').next()?.trim();
+    let trimmed = part.trim_end_matches(['!', '.', '…']).trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// 常用词译文精修表（T-115 后续）。
+///
+/// CC-CEDICT 对骨架高频基础词的首义偏书面或语境化（如 `是` 首义
+/// `to be (followed by substantives only)`，用户点名期望 `yes`）；精修表给出
+/// 更贴近日常口语的首义，只覆盖骨架高频基础词，CEDICT 首义已准确的词不入表。
+/// 数据自研（来自本项目的口语译文，非抄录第三方词表），记于 Agent Note。
+const TRANSLATION_PATCHES: &[(&str, &str)] = &[
+    ("是", "yes; to be"),
+    ("的", "of; 's"),
+    ("了", "already; done"),
+    ("我", "I; me"),
+    ("你", "you"),
+    ("他", "he; him"),
+    ("她", "she; her"),
+    ("它", "it"),
+    ("我们", "we; us"),
+    ("你们", "you (plural)"),
+    ("他们", "they; them"),
+    ("这个", "this"),
+    ("那个", "that"),
+    ("这些", "these"),
+    ("那些", "those"),
+    ("什么", "what"),
+    ("怎么", "how"),
+    ("为什么", "why"),
+    ("谢谢", "thanks; thank you"),
+    ("再见", "goodbye"),
+    ("你好", "hello"),
+    ("早上好", "good morning"),
+    ("晚上好", "good evening"),
+    ("晚安", "good night"),
+    ("没关系", "never mind; no problem"),
+    ("对不起", "sorry"),
+    ("请", "please"),
+    ("好", "good; ok"),
+    ("不好", "bad; not good"),
+    ("要", "want; need"),
+    ("不要", "don't; no"),
+    ("有", "have; there is"),
+    ("没有", "not have; there is no"),
+    ("可以", "can; ok"),
+    ("不行", "no; not allowed"),
+    ("知道", "know"),
+    ("不知道", "don't know"),
+    ("明白", "understand"),
+    ("不懂", "don't understand"),
+    ("会", "can; will"),
+    ("不会", "cannot; won't"),
+    ("对", "right; correct"),
+    ("不对", "wrong; incorrect"),
+];
 
 /// 构建基础包：骨架（xdhyc 全部）→ CEDICT 词级兜底 → jieba 扩充（纯 CJK、频率标定 ≥ min_score）。
 /// 词频：wordfreq 主源（zipf×1000）优先，未命中取 jieba 标定值，再未命中按 1。
@@ -867,17 +933,16 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         merged.insert(word.clone(), (pinyin.clone(), frequency, None));
     }
 
-    // b) 骨架 + CEDICT 词条：保留 CEDICT 译文；已入包（骨架）的词不重复。
+    // b) 骨架 + CEDICT 词条：CEDICT 独有词全量入包（拼音/词频/译文均由
+    // CEDICT 兜底）；骨架已有的词不重复插入，译文统一由 d) 段补齐
+    // （T-115 后续修复：此前骨架词直接跳过，`是` 等高频字词无译文）。
     let mut cedict_words = 0usize;
-    for (word, (pinyin, translation)) in &cedict {
+    for (word, (pinyin, _)) in &cedict {
         if merged.contains_key(word) {
             continue;
         }
         let frequency = frequency_of(word);
-        merged.insert(
-            word.clone(),
-            (pinyin.clone(), frequency, translation.clone()),
-        );
+        merged.insert(word.clone(), (pinyin.clone(), frequency, None));
         cedict_words += 1;
     }
 
@@ -903,6 +968,30 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         };
         merged.insert(word.clone(), (pinyin, score, None));
         jieba_expansion += 1;
+    }
+
+    // d) 译文补齐（T-115 后续）：骨架/jieba/CEDICT 独有词中无译文的，一律用
+    // CEDICT 首义（净化后）补上；精修表优先覆盖 CEDICT 首义不宜的常用基础词。
+    // 统计无译文词在补丁前后的变化：骨架高频字词此前整批缺译文，
+    // 译文层（Tab 切换）过滤无译义词，导致"是/我/你/谢谢"都不出现在译文层。
+    let mut patched_translations = 0usize;
+    for (word, (_, _, translation)) in merged.iter_mut() {
+        if translation.is_some() {
+            continue;
+        }
+        let patched = TRANSLATION_PATCHES
+            .iter()
+            .find(|(patched_word, _)| *patched_word == word)
+            .map(|(_, value)| (*value).to_owned())
+            .or_else(|| {
+                cedict
+                    .get(word)
+                    .and_then(|(_, t)| t.as_deref().and_then(clean_translation))
+            });
+        if let Some(value) = patched {
+            *translation = Some(value);
+            patched_translations += 1;
+        }
     }
 
     // 规范字集覆盖：以注音底表字集为基线（≈ 通用规范汉字表）。
@@ -952,6 +1041,7 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         wordfreq_hit_pct,
         jieba_expansion,
         cedict_words,
+        patched_translations,
         char_set_coverage_pct,
         entry_count: entries.len(),
         file_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
@@ -963,12 +1053,13 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         stats.file_size as f64 / 1_048_576.0
     );
     println!(
-        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，规范字集覆盖 {:.1}%",
+        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，译文补齐 {}（T-115 后续），规范字集覆盖 {:.1}%",
         stats.skeleton_words,
         stats.wordfreq_hits,
         stats.wordfreq_hit_pct,
         stats.jieba_expansion,
         stats.cedict_words,
+        stats.patched_translations,
         stats.char_set_coverage_pct
     );
     println!("内容 SHA-256: {}", stats.sha256);
@@ -1125,6 +1216,38 @@ mod tests {
         assert_eq!(strip_tone_marks("lǜ").as_deref(), Some("lv"));
         assert_eq!(strip_tone_marks("㑇"), None);
         assert_eq!(strip_tone_marks("").as_deref(), None);
+    }
+
+    #[test]
+    fn 译文净化取分号前首义并清尾标点() {
+        // T-115 后续：CEDICT `你好 /hello; hi/` 净化后只留 "hello"（用户点名）。
+        assert_eq!(clean_translation("hello; hi").as_deref(), Some("hello"));
+        assert_eq!(clean_translation("hello!").as_deref(), Some("hello"));
+        // 括号说明是语义内容，保留不删。
+        assert_eq!(
+            clean_translation("to be (followed by substantives only)").as_deref(),
+            Some("to be (followed by substantives only)")
+        );
+        // 空段 / 纯标点 -> None（不产生空译文）。
+        assert_eq!(clean_translation(""), None);
+        assert_eq!(clean_translation("; hi"), None);
+    }
+
+    #[test]
+    fn 精修表覆盖用户点名的常用词() {
+        // T-115 后续："是"→yes、"谢谢"→thanks、"再见"→goodbye 由精修表保证，
+        // 不依赖 CEDICT 首义（CEDICT 给 `是` 的书面对外义不宜做译文层首义）。
+        let patch_of = |word: &str| {
+            TRANSLATION_PATCHES
+                .iter()
+                .find(|(w, _)| *w == word)
+                .map(|(_, v)| *v)
+        };
+        assert_eq!(patch_of("是"), Some("yes; to be"));
+        assert_eq!(patch_of("谢谢"), Some("thanks; thank you"));
+        assert_eq!(patch_of("再见"), Some("goodbye"));
+        assert_eq!(patch_of("你好"), Some("hello"));
+        assert_eq!(patch_of("我"), Some("I; me"));
     }
 
     #[test]

@@ -144,6 +144,7 @@ fn item(text: &str, translation: &str, source: CandidateSource) -> CandidateUiIt
     CandidateUiItem {
         text: text.to_owned(),
         translation: translation.to_owned(),
+        pinyin: String::new(),
         source,
     }
 }

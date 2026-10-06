@@ -21,6 +21,8 @@ pub struct CandidateUiItem {
     pub text: String,
     /// 译文；无译文时为空字符串。
     pub translation: String,
+    /// 拼音串（T-115 后续：候选窗按字展示"词（音节）"用；无拼音时为空）。
+    pub pinyin: String,
     /// 候选来源，用于 UI 弱化标识。
     pub source: CandidateSource,
 }
@@ -454,6 +456,7 @@ mod tests {
                     } else {
                         String::new()
                     },
+                    pinyin: String::new(),
                     source: CandidateSource::Static,
                 })
                 .collect(),
@@ -464,6 +467,7 @@ mod tests {
         CandidateUiItem {
             text: text.to_owned(),
             translation: translation.to_owned(),
+            pinyin: String::new(),
             source: CandidateSource::Slang,
         }
     }
@@ -482,6 +486,7 @@ mod tests {
         let item = CandidateUiItem {
             text: "你好".to_owned(),
             translation: "hello".to_owned(),
+            pinyin: "nihao".to_owned(),
             source: CandidateSource::Static,
         };
         assert_eq!(display_main_text(&item, false), "你好");

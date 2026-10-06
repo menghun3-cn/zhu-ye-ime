@@ -36,13 +36,13 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VIRTUAL_KEY, VK_0, VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN,
-    VK_ESCAPE, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_RETURN,
-    VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
+    VK_ESCAPE, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD,
+    VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
-    ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfContextComposition,
-    ITfEditSession, ITfEditSession_Impl, ITfFnConfigure, ITfFnConfigure_Impl, ITfFunction,
-    ITfFunction_Impl, ITfInsertAtSelection, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr,
+    ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfEditSession,
+    ITfEditSession_Impl, ITfFnConfigure, ITfFnConfigure_Impl, ITfFunction, ITfFunction_Impl,
+    ITfInsertAtSelection, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr,
     ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl,
     ITfThreadMgr, TfAnchor, TF_AE_END, TF_DEFAULT_SELECTION, TF_ES_READWRITE, TF_ES_SYNC,
     TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
@@ -122,14 +122,23 @@ enum KeyAction {
     ToggleMode,
     /// Tab 在中文候选层与译文层之间切换。
     ToggleLayer,
-    /// 逗号上翻页。
+    /// `-` 上翻页（T-033：翻页键由 `,`/`.` 改为 `-`/`=`，腾出逗号句号给中文标点）。
     PageUp,
-    /// 句号下翻页。
+    /// `=`/`+` 下翻页（T-033，VK_OEM_PLUS 同时覆盖 Shift+`=` 的 `+`）。
     PageDown,
     /// 上方向键移动页内选中行（T-039）。
     SelectUp,
     /// 下方向键移动页内选中行（T-039）。
     SelectDown,
+    /// 中文标点直出（T-115 后续，搜狗式全角标点）：`，` 一次上屏。
+    /// 组合态先提交首选候选再上屏标点；空闲态直插；英文模式放行宿主出英文逗号。
+    PunctComma,
+    /// 中文标点直出（T-115 后续）：`。` 一次上屏（语义同 PunctComma；键来源为
+    /// VK_OEM_PERIOD 且不在数字格式/网址意图上下文时由 plan_action 转换成此动作）。
+    PunctPeriod,
+    /// 中文标点直出（T-115 后续）：`、` 顿号一次上屏（键来源为 VK_OEM_5 无 Shift，
+    /// 即反斜杠键；中文模式全角顿号，英文模式放行输出 `\`）。
+    PunctDun,
     /// 小数点键（VK_OEM_PERIOD/VK_DECIMAL）：仅在数字格式模式内追加（FR-027 金额）。
     Dot,
     /// 数字格式模式：追加一个数字/小数点（TSF 直插该字符上屏，引擎累积 buffer）。
@@ -167,6 +176,9 @@ impl KeyAction {
                 | KeyAction::BufferDigit(_)
                 | KeyAction::DigitBackspace
                 | KeyAction::SelectAndReplace(_)
+                | KeyAction::PunctComma
+                | KeyAction::PunctPeriod
+                | KeyAction::PunctDun
                 | KeyAction::VStart
                 | KeyAction::VCode(_)
                 | KeyAction::VConsume(_)
@@ -185,6 +197,10 @@ struct EngineState {
     candidate_window: CandidateWindow,
     /// 语言栏中英模式图标（T-046）；仅在激活且有线程管理器时存在。
     lang_bar: Option<LangBarHandle>,
+    /// T-114 后续：空闲态按下 Shift 后进入"待定切换"；若弹起前有任意非
+    /// Shift 键按下（Shift+`?`/`+` 等组合）则取消。只有单独按下并弹起的
+    /// Shift 才切换中英模式。
+    pending_shift_toggle: bool,
 }
 
 /// T-046：跨线程共享的引擎状态（语言栏点击切换模式需要）。
@@ -280,6 +296,7 @@ impl EngineState {
             composition: None,
             candidate_window: CandidateWindow::with_theme(configured_theme_preference()),
             lang_bar: None,
+            pending_shift_toggle: false,
         }
     }
 
@@ -294,6 +311,7 @@ impl EngineState {
             composition: None,
             candidate_window: configured_candidate_window(),
             lang_bar: None,
+            pending_shift_toggle: false,
         }
     }
 }
@@ -517,13 +535,29 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     }
 
     fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
-        let Some(action) = plan_action(
+        let action = plan_action(
             wparam,
             lparam,
             key_modifiers_down(),
             shift_key_down(),
             self.state(),
-        ) else {
+        );
+        let code = VIRTUAL_KEY(wparam.0 as u16).0;
+        // T-114 后续：Shift 键按下不立即切换中英——空闲态非重复 Shift 只进入
+        // 待定切换（弹起时再判定"单独按下"），组合态/长按直接放行宿主，
+        // 避免 Shift+`?`/`+` 等组合输入时顺带切走中文模式。
+        if code == VK_SHIFT.0 {
+            if action == Some(KeyAction::ToggleMode) {
+                state_lock(self).pending_shift_toggle = true;
+                if should_log(zhu_ye_core::LogLevel::Debug) {
+                    debug_log("zhu-ye: shift-down pending (lone-shift armed)");
+                }
+            }
+            return Ok(BOOL(0));
+        }
+        // 任何非 Shift 键按下 = Shift 组合键（或恢复单独按键）→ 取消待定切换。
+        state_lock(self).pending_shift_toggle = false;
+        let Some(action) = action else {
             return Ok(BOOL(0));
         };
 
@@ -549,12 +583,11 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         }
 
         let tid = state_lock(self).tid;
-        let sink = self.to_object().to_interface::<ITfCompositionSink>();
         let state = Arc::clone(self.state());
         let session_context = context.clone();
         let session: ITfEditSession = EditSession {
             callback: Mutex::new(Some(Box::new(move |ec| {
-                apply_action(&state, &session_context, &sink, ec, action)
+                apply_action(&state, &session_context, ec, action)
             }))),
         }
         .into();
@@ -572,7 +605,18 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         }
         Ok(BOOL(1))
     }
-    fn OnKeyUp(&self, _pic: Ref<'_, ITfContext>, _wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+    fn OnKeyUp(&self, _pic: Ref<'_, ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+        // T-114 后续：只有"单独按下并弹起"的 Shift 才切换中英——弹起瞬间判定
+        // 待定切换是否仍在（期间有非 Shift 键按下则已被取消）。
+        if VIRTUAL_KEY(wparam.0 as u16).0 == VK_SHIFT.0
+            && shift_up_should_toggle(&mut state_lock(self))
+        {
+            sync_engine(self.state(), KeyAction::ToggleMode);
+            refresh_candidate_window(self.state(), None);
+            if should_log(zhu_ye_core::LogLevel::Debug) {
+                debug_log("zhu-ye: shift-up ToggleMode (lone shift)");
+            }
+        }
         Ok(BOOL(0))
     }
 
@@ -650,8 +694,14 @@ fn classify_key(wparam: WPARAM, lparam: LPARAM, shift: bool) -> Option<KeyAction
             // T-049：数字键先归类为"数字"，由 `plan_action` 决定它是选词还是进组合串。
             char::from_u32(u32::from(b'0') + u32::from(code - VK_0.0)).map(KeyAction::Digit)
         }
+        // T-115 后续：英文布局反斜杠键（无 Shift）归为 PunctDun，中文模式上屏
+        // "、"；Shift+`\` 的 `|` 放行宿主。英文模式由 plan_action 放行英文 `\`。
+        code if code == VK_OEM_5.0 && !shift => Some(KeyAction::PunctDun),
+        // T-115 后续：英文布局逗号键（无 Shift）归为 PunctComma，中文模式上屏
+        // "，"；Shift+`,` 的 `<` 放行宿主。英文模式由 plan_action 放行英文逗号。
+        code if code == VK_OEM_COMMA.0 && !shift => Some(KeyAction::PunctComma),
         // FR-027：英文布局小数点（`.`/小键盘 `.`）归为 Dot，仅在数字格式模式内
-        // 追加（金额小数位）；数字模式外放行给宿主直出标点。
+        // 追加（金额小数位）；数字模式外由 plan_action 转成中文句号直出或放行宿主。
         code if code == VK_OEM_PERIOD.0 || code == VK_DECIMAL.0 => Some(KeyAction::Dot),
         code if code == VK_SHIFT.0 && !is_repeat(lparam) => Some(KeyAction::ToggleMode),
         code if code == VK_TAB.0 => Some(KeyAction::ToggleLayer),
@@ -741,16 +791,26 @@ fn plan_action(
         KeyAction::Letter(_) => (engine.mode() == InputMode::Chinese).then_some(action),
         KeyAction::Dot => {
             // FR-027：数字格式模式内追加小数点（金额小数位）。
-            // T-066：否则组合态邮箱/网址上下文中 `.` 进组合串（按引擎 `is_format_key`），
-            // 普通拼音组合后的 `.` 照旧放行宿主直出标点。
+            // T-066：否则组合态邮箱/网址上下文中 `.` 进组合串（按引擎 `is_format_key`）。
+            // T-115 后续：普通中文（非数字格式/非网址意图）`.` 转中文句号直出。
             if engine.mode() == InputMode::Chinese && engine.digit_active() {
                 Some(KeyAction::BufferDigit('.'))
             } else if engine.mode() == InputMode::Chinese && engine.is_format_key('.') {
                 Some(KeyAction::FormatChar('.'))
+            } else if engine.mode() == InputMode::Chinese {
+                Some(KeyAction::PunctPeriod)
             } else {
                 None
             }
         }
+        // T-115 后续：中文模式逗号/句号/顿号键上屏全角标点（空闲/组合/联想态皆吃，
+        // 组合态由 apply_action 先提交首选候选）；英文模式放行宿主出英文标点。
+        KeyAction::PunctComma | KeyAction::PunctPeriod | KeyAction::PunctDun
+            if engine.mode() == InputMode::Chinese =>
+        {
+            Some(action)
+        }
+        KeyAction::PunctComma | KeyAction::PunctPeriod | KeyAction::PunctDun => None,
         // T-066：`@`/`:`/`/` 是否进组合串由引擎判定（组合态邮箱/网址上下文为真，
         // 空闲态/普通拼音/英文模式为假并放行宿主）。
         KeyAction::FormatChar(c)
@@ -782,6 +842,20 @@ fn plan_action(
         KeyAction::ToggleMode => None,
         _ if engine.is_active() => Some(action),
         _ => None,
+    }
+}
+
+/// T-114 后续：Shift 弹起时的中英切换判定。空闲态按下 Shift 会置起
+/// `pending_shift_toggle`（`OnKeyDown`），期间任何非 Shift 键按下都会取消；
+/// 此处消费该标记：弹起时标记仍在说明 Shift 是"单独按下并松开"，返回 `true`
+/// 触发 ToggleMode；否则（组合键）返回 `false` 不切换。副作用：无论结果如何
+/// 均清除待定标记。
+fn shift_up_should_toggle(state: &mut EngineState) -> bool {
+    if state.pending_shift_toggle {
+        state.pending_shift_toggle = false;
+        true
+    } else {
+        false
     }
 }
 
@@ -874,25 +948,22 @@ fn should_compose_digit(engine: &InputEngine, digit: char) -> bool {
 fn apply_action(
     state: &Arc<SharedEngine>,
     context: &ITfContext,
-    sink: &ITfCompositionSink,
     ec: u32,
     action: KeyAction,
 ) -> Result<()> {
     match action {
+        // T-115 后续（搜狗式组合）：字母/数字/格式符/退格不再写入文档组合，
+        // 拼音与候选全部显示在候选窗（候选窗顶部头行已画组合串），
+        // 选词/空格/回车才经 finish_composition 一次上屏。
         KeyAction::Letter(_)
         | KeyAction::Digit(_)
         | KeyAction::FormatChar(_)
-        | KeyAction::Backspace => {
-            let text = compose_text(state, action);
-            update_composition(state, context, sink, ec, &text)?;
-        }
-        // FR-028：`vi` 等回退拼音——`v`+字母直接开组合显示，进正常拼音路径。
-        KeyAction::VConsume(c) => {
-            let text = compose_text(state, action);
-            update_composition(state, context, sink, ec, &text)?;
-            if should_log(zhu_ye_core::LogLevel::Debug) {
-                debug_log(&format!("zhu-ye: v-consume {c} -> {text:?}"));
-            }
+        | KeyAction::Backspace
+        // FR-028：`vi` 等回退拼音同样只进候选窗。
+        | KeyAction::VConsume(_) => {
+            sync_engine(state, action);
+            refresh_candidate_window(state, Some((context, ec)));
+            return Ok(());
         }
         KeyAction::Space | KeyAction::Enter | KeyAction::Escape | KeyAction::Select(_) => {
             let text = commit_text(state, action);
@@ -914,6 +985,28 @@ fn apply_action(
                 engine.preview_digit(index).unwrap_or_default()
             };
             replace_last_chars(context, ec, replace_len, &text)?;
+        }
+        // T-115 后续：中文标点直出。组合态/联想态先提交首选候选（与微软拼音
+        // 惯例一致：`你好，` 连打），再上屏全角标点；空闲态只上屏标点。
+        KeyAction::PunctComma | KeyAction::PunctPeriod | KeyAction::PunctDun => {
+            let punct = match action {
+                KeyAction::PunctComma => "，",
+                KeyAction::PunctPeriod => "。",
+                KeyAction::PunctDun => "、",
+                _ => unreachable!("标点分支只处理三种全角标点"),
+            };
+            let has_pending = {
+                let engine = &mut state.lock().unwrap().engine;
+                engine.is_active()
+            };
+            if has_pending {
+                let text = commit_text(state, KeyAction::Space);
+                finish_composition(state, context, ec, &text)?;
+            }
+            finish_composition(state, context, ec, punct)?;
+            sync_engine(state, action);
+            refresh_candidate_window(state, Some((context, ec)));
+            return Ok(());
         }
         KeyAction::ToggleMode
         | KeyAction::ToggleLayer
@@ -982,6 +1075,11 @@ fn replace_last_chars(context: &ITfContext, ec: u32, replace_len: usize, text: &
 }
 
 /// 计算下一次组合串文本；不修改引擎，真实状态在 TSF 写入完成后同步。
+///
+/// T-115 后续（搜狗式组合）：生产中组合串不再写入文档，改由引擎
+/// `composing()` 直出候选窗头行；本预览函数保留给单元测试验证
+/// 引擎组合串演进与提交语义的一致性。
+#[cfg(test)]
 fn compose_text(state: &Arc<SharedEngine>, action: KeyAction) -> String {
     let text = {
         let engine = &mut state.lock().unwrap().engine;
@@ -1098,6 +1196,9 @@ fn sync_engine(state: &Arc<SharedEngine>, action: KeyAction) {
         KeyAction::SelectAndReplace(index) => {
             let _ = engine.commit_digit(index);
         }
+        // T-115 后续：中文标点一次上屏，引擎状态无需推进（组合/联想已由
+        // apply_action 先提交并清空，`is_active` 此刻为 false）。
+        KeyAction::PunctComma | KeyAction::PunctPeriod | KeyAction::PunctDun => {}
         // FR-028：v 模式状态推进（文档侧无写入，VConsume 的组合已在 apply_action 更新）。
         KeyAction::VStart => {
             let _ = engine.v_start();
@@ -1128,11 +1229,7 @@ fn refresh_candidate_window(state: &Arc<SharedEngine>, edit: Option<(&ITfContext
         state.lock().unwrap().candidate_window.hide();
         return;
     }
-    let placement = if view.composition.is_empty() {
-        edit.and_then(|(context, ec)| selection_placement(context, ec))
-    } else {
-        edit.and_then(|(context, ec)| composition_placement(state, context, ec))
-    };
+    let placement = edit.and_then(|(context, ec)| selection_placement(context, ec));
     if should_log(zhu_ye_core::LogLevel::Debug) {
         debug_log(&format!(
             "zhu-ye: cand-show items={} first={:?}",
@@ -1147,30 +1244,9 @@ fn refresh_candidate_window(state: &Arc<SharedEngine>, edit: Option<(&ITfContext
         .update(view, placement);
 }
 
-/// 编辑会话内取组合范围在屏幕上的底部坐标，用于候选窗定位。
-fn composition_placement(
-    state: &Arc<SharedEngine>,
-    context: &ITfContext,
-    ec: u32,
-) -> Option<CandidateWindowPlacement> {
-    let composition = state.lock().unwrap().composition.clone()?;
-    let view = unsafe { context.GetActiveView() }.ok()?;
-    let range = unsafe { composition.GetRange() }.ok()?;
-    let mut rect = RECT::default();
-    let mut clipped = BOOL(0);
-    unsafe {
-        view.GetTextExt(ec, &range, &mut rect, &mut clipped).ok()?;
-    }
-    Some(CandidateWindowPlacement {
-        anchor: POINT {
-            x: rect.left,
-            y: rect.bottom,
-        },
-    })
-}
-
 /// 编辑会话内取文档当前插入点（selection 起点）在屏幕上的底部坐标，
-/// 用于上屏联想候选窗（T-059，组合串为空无组成区范围）定位。
+/// 用于候选窗定位（T-059 上屏联想；T-115 后续搜狗式组合不再有文档组合区，
+/// 组合过程统一按插入点定位）。
 fn selection_placement(context: &ITfContext, ec: u32) -> Option<CandidateWindowPlacement> {
     let mut selection = [TF_SELECTION::default()];
     let mut fetched: u32 = 0;
@@ -1194,110 +1270,46 @@ fn selection_placement(context: &ITfContext, ec: u32) -> Option<CandidateWindowP
     })
 }
 
-/// 更新组合文本：已有组合直接替换，否则插入文本并启动新组合。
-fn update_composition(
-    state: &Arc<SharedEngine>,
-    context: &ITfContext,
-    sink: &ITfCompositionSink,
-    ec: u32,
-    text: &str,
-) -> Result<()> {
-    let wide = to_wide_no_term(text);
-    let existing = state.lock().unwrap().composition.clone();
-    match existing {
-        Some(composition) => {
-            let range = unsafe { composition.GetRange() }?;
-            unsafe { range.SetText(ec, 0, &wide) }?;
-            if should_log(zhu_ye_core::LogLevel::Debug) {
-                debug_log(&format!("zhu-ye: comp-update {text:?}"));
-            }
-        }
-        None => {
-            debug_log("zhu-ye: comp-insert-begin");
-            let insert = context.cast::<ITfInsertAtSelection>()?;
-            debug_log("zhu-ye: comp-insert-cast-ok");
-            // 注意：不能用 TF_IAS_NOQUERY 直接写入——msctf 的
-            // InsertTextAtSelection 写入分支在本机与 Win10/1809 上都会
-            // 在非空 pprange 下崩溃（c0000005），本地探针 tsf_min_host
-            // 已验证。改为 QUERYONLY 取得插入点 range，再由
-            // StartComposition + range.SetText 写入（组合范围会覆盖新文本，
-            // 探针已用 GetText 逐键验证）。
-            let range = match unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &wide) } {
-                Ok(range) => {
-                    debug_log("zhu-ye: comp-insert-ok");
-                    range
-                }
-                Err(err) => {
-                    debug_log(&format!("zhu-ye: comp-insert-err {err:?}"));
-                    return Err(err);
-                }
-            };
-            debug_log("zhu-ye: comp-ccomp-begin");
-            let composition_services = context.cast::<ITfContextComposition>()?;
-            debug_log("zhu-ye: comp-ccomp-cast-ok");
-            let composition =
-                match unsafe { composition_services.StartComposition(ec, &range, sink) } {
-                    Ok(composition) => {
-                        debug_log("zhu-ye: comp-start-ok");
-                        composition
-                    }
-                    Err(err) => {
-                        debug_log(&format!("zhu-ye: comp-start-err {err:?}"));
-                        return Err(err);
-                    }
-                };
-            if let Err(err) = unsafe { range.SetText(ec, 0, &wide) } {
-                debug_log(&format!("zhu-ye: comp-settext-err {err:?}"));
-                // 组合已启动但写入失败：立即结束空组合，避免悬挂。
-                let _ = unsafe { composition.EndComposition(ec) };
-                return Err(err);
-            }
-            debug_log("zhu-ye: comp-settext-ok");
-            state.lock().unwrap().composition = Some(composition);
-            debug_log(&format!("zhu-ye: comp-start {text:?}"));
-        }
-    }
-    Ok(())
-}
-
-/// 结束组合并提交文本；空文本按取消处理，若原本没有组合则直接插入提交文本。
+/// 结束"候选窗式组合"并提交文本（T-115 后续：搜狗式，不允许有文档组合）。
+///
+/// 组合串全程只显示在候选窗顶行；选词/空格/回车时在此一次性经
+/// `ITfInsertAtSelection`(QUERYONLY) + `SetText` 直插上屏，随后把插入点
+/// 折叠到提交文本末尾并回写选区（覆盖新记事本不自动移动光标的宿主）。
+/// 空文本按取消处理（引擎状态由后续 `sync_engine` 清空）。
 fn finish_composition(
     state: &Arc<SharedEngine>,
     context: &ITfContext,
     ec: u32,
     text: &str,
 ) -> Result<()> {
-    let composition = state.lock().unwrap().composition.take();
-    match composition {
-        Some(composition) => {
-            let wide: Vec<u16> = if text.is_empty() {
-                Vec::new()
-            } else {
-                to_wide_no_term(text)
-            };
-            let range = unsafe { composition.GetRange() }?;
-            unsafe { range.SetText(ec, 0, &wide) }?;
-            unsafe { composition.EndComposition(ec) }?;
-            if text.is_empty() {
-                debug_log("zhu-ye: commit-cancel (empty)");
-            } else {
-                if should_log(zhu_ye_core::LogLevel::Debug) {
-                    debug_log(&format!("zhu-ye: commit {text:?} ({} utf8)", text.len()));
-                }
-            }
-        }
-        None if !text.is_empty() => {
-            let insert = context.cast::<ITfInsertAtSelection>()?;
-            let wide = to_wide_no_term(text);
-            // 同 update_composition：QUERYONLY + SetText 绕过崩溃的写入分支。
-            let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &wide) }?;
-            unsafe { range.SetText(ec, 0, &wide) }?;
-            debug_log(&format!("zhu-ye: commit-no-comp {text:?}"));
-        }
-        None => {
-            debug_log("zhu-ye: commit-noop (no comp, empty)");
-        }
+    // 防御：不应存在文档组合（搜狗式组合不创建）；若某个宿主中断残留则丢弃。
+    let stale = state.lock().unwrap().composition.take();
+    if stale.is_some() {
+        debug_log("zhu-ye: commit-drop-stale-composition");
     }
+    if text.is_empty() {
+        debug_log("zhu-ye: commit-noop (no comp, empty)");
+        return Ok(());
+    }
+    let wide = to_wide_no_term(text);
+    let insert = context.cast::<ITfInsertAtSelection>()?;
+    let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &wide) }?;
+    unsafe { range.SetText(ec, 0, &wide) }?;
+    // 上屏后修正光标：折叠到提交文本末尾（T-113 后续：新记事本不自动移动光标）。
+    unsafe {
+        range.Collapse(ec, TfAnchor(1))?;
+    }
+    let selection = TF_SELECTION {
+        range: std::mem::ManuallyDrop::new(Some(range)),
+        style: TF_SELECTIONSTYLE {
+            ase: TF_AE_END,
+            fInterimChar: BOOL(0),
+        },
+    };
+    unsafe {
+        context.SetSelection(ec, &[selection])?;
+    }
+    debug_log(&format!("zhu-ye: commit-no-comp {text:?}"));
     Ok(())
 }
 
@@ -2277,12 +2289,19 @@ mod tests {
             classify_key(WPARAM(VK_OEM_PLUS.0 as usize), LPARAM(0), false),
             Some(KeyAction::PageDown)
         );
+        // T-115 后续：逗号键归为 PunctComma（中文模式上屏全角"，"，模式外放行）。
         assert_eq!(
             classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0), false),
+            Some(KeyAction::PunctComma)
+        );
+        // Shift+`,` 的 `<` 放行宿主（不归类）。
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_COMMA.0 as usize), LPARAM(0), true),
             None
         );
         // FR-027：`.`（VK_OEM_PERIOD/小键盘 VK_DECIMAL）归为 Dot，
-        // 数字格式模式内追加小数、模式外放行宿主。
+        // 数字格式模式内追加小数，普通中文由 plan_action 转中文句号，
+        // 英文模式放行宿主。
         assert_eq!(
             classify_key(WPARAM(VK_OEM_PERIOD.0 as usize), LPARAM(0), false),
             Some(KeyAction::Dot)
@@ -2377,6 +2396,48 @@ mod tests {
         assert_eq!(
             plan_action(WPARAM(VK_DOWN.0 as usize), LPARAM(0), true, false, &state),
             None
+        );
+    }
+
+    #[test]
+    fn 单独shift弹起才切换组合shift不切换() {
+        // T-114 后续：Shift+`?` 等组合输入不应顺带切走中文模式。
+        // 状态机：空闲态 Shift 按下 → 待定；弹起时待定仍在 → 切换。
+        let mut state = EngineState::new();
+        assert!(!state.pending_shift_toggle, "初始无待定");
+        // 空闲态 Shift 的 plan_action 分类由 shift与组合内功能键放行策略正确
+        // 覆盖（返回 ToggleMode）；这里只测状态机：按下进入待定，弹起触发切换。
+        state.pending_shift_toggle = true; // 模拟 OnKeyDown 的置位分支
+        assert!(
+            shift_up_should_toggle(&mut state),
+            "单独 Shift 弹起应触发切换"
+        );
+        assert!(!state.pending_shift_toggle, "待定标记已消费");
+
+        // Shift+`?`：Shift 按下进入待定，随后非 Shift 键（`?`）按下取消待定，
+        // Shift 弹起时不切换。
+        state.pending_shift_toggle = true;
+        state.pending_shift_toggle = false; // 模拟 OnKeyDown 非 Shift 分支清除
+        assert!(!shift_up_should_toggle(&mut state), "组合键后弹起不应切换");
+
+        // 组合态（有拼音）Shift 按下不进入待定（plan_action 返回 None），
+        // 弹起自然不切换（T-033 翻页场景保持）。
+        let mut eng = EngineState::new();
+        eng.engine.handle_letter('n');
+        let shared = Arc::new(SharedEngine(Mutex::new(eng)));
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_SHIFT.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &shared
+            ),
+            None
+        );
+        assert!(
+            !shift_up_should_toggle(&mut shared.lock().unwrap()),
+            "组合态 Shift 弹起不切换"
         );
     }
 
@@ -2696,8 +2757,23 @@ mod tests {
     }
 
     #[test]
-    fn 数字模式外小数点放行宿主() {
+    fn 数字模式外小数点转中文句号() {
         let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
+        // T-115 后续：空闲中文态 `.` 转中文句号直出（不再放行英文点）。
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_PERIOD.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
+            Some(KeyAction::PunctPeriod),
+            "空闲中文态 `.` 应上屏中文句号"
+        );
+        // 英文模式仍放行宿主（英文句号）。
+        state.lock().unwrap().engine.toggle_mode();
+        assert_eq!(state.lock().unwrap().engine.mode(), InputMode::English);
         assert_eq!(
             plan_action(
                 WPARAM(VK_OEM_PERIOD.0 as usize),
@@ -2707,7 +2783,49 @@ mod tests {
                 &state
             ),
             None,
-            "非数字模式 `.` 放行给宿主直出标点"
+            "英文模式 `.` 放行宿主出英文句号"
+        );
+    }
+
+    #[test]
+    fn 中文逗号全程吃键英文模式放行() {
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
+        // 中文空闲态：逗号键上屏全角。
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_COMMA.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
+            Some(KeyAction::PunctComma)
+        );
+        // 中文组合态：逗号键同样吃（先提交首选候选再上屏全角逗号）。
+        state.lock().unwrap().engine.handle_letter('n');
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_COMMA.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
+            Some(KeyAction::PunctComma)
+        );
+        // 英文模式：放行宿主出英文逗号。
+        state.lock().unwrap().engine.toggle_mode();
+        assert_eq!(state.lock().unwrap().engine.mode(), InputMode::English);
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_COMMA.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &state
+            ),
+            None,
+            "英文模式逗号放行宿主出英文逗号"
         );
     }
 
@@ -2855,7 +2973,7 @@ mod tests {
             ),
             Some(KeyAction::FormatChar('.'))
         );
-        // 普通拼音：`nihao` 后按 `.` 放行宿主（既有行为不回退）。
+        // 普通拼音：`nihao` 后按 `.` 转中文句号（T-115 后续；先提交首选再上屏句号）。
         let nihao = format_state("nihao");
         assert_eq!(
             plan_action(
@@ -2865,7 +2983,7 @@ mod tests {
                 false,
                 &nihao
             ),
-            None
+            Some(KeyAction::PunctPeriod)
         );
         // 完整邮箱串继续演进：me@163.com 已含点 → 单候选直通。
         let full = format_state("me@163.c");

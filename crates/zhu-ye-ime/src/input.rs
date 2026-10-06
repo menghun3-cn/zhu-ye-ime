@@ -1064,6 +1064,7 @@ impl InputEngine {
                     .map(|text| CandidateUiItem {
                         text: text.clone(),
                         translation: String::new(),
+                        pinyin: String::new(),
                         source: zhu_ye_core::candidate::CandidateSource::Suggestion,
                     })
                     .collect(),
@@ -1437,6 +1438,22 @@ impl InputEngine {
                     if !corrected.is_empty() {
                         main = append_group(main, corrected);
                     }
+                    // T-115 后续：错序容错——快打常见的相邻字母颠倒（zhegnq→zhengq、
+                    // shegnc→shengc、xiagnzhe→xiangzhe、zhagnh→zhangh）使串无法完整
+                    // 切分，FR-024 只处理可切分串故漏掉；主候选不足一页时追加
+                    // 「错序组」于纠错组之后、缩写组之前（候选拼音为变体=正确拼音，
+                    // 供 UI 展示"词（正确拼音）"）。
+                    if main.len() < self.page_size {
+                        let transposed = zhu_ye_core::transposed_candidates(
+                            &self.table,
+                            dictionary.as_ref(),
+                            &composing,
+                            PREFIX_COMPLETION_CAP,
+                        );
+                        if !transposed.is_empty() {
+                            main = append_group(main, transposed);
+                        }
+                    }
                 }
             }
 
@@ -1569,6 +1586,7 @@ fn candidate_ui_item(candidate: &Candidate) -> CandidateUiItem {
     CandidateUiItem {
         text: candidate.text.clone(),
         translation: candidate.translation.clone().unwrap_or_default(),
+        pinyin: candidate.pinyin.clone().unwrap_or_default(),
         source: candidate.source.clone(),
     }
 }
@@ -1724,14 +1742,19 @@ mod tests {
     }
 
     #[test]
-    fn 无完整音节开头的输入不出现前缀候选() {
+    fn 无完整音节开头的输入出补全候选() {
+        // T-115 后续：`z`/`zh` 等无完整音节首的单字母/声母前缀照常出补全候选
+        // （搜狗/微软同款：`d` 一按出现 的/多/到），补全组有词频排序即可见。
         let mut eng = engine();
         type_text(&mut eng, "zh");
-        assert!(eng.candidates().is_empty());
+        assert!(
+            !eng.candidates().is_empty(),
+            "zh 应给出补全候选（的中这之类）"
+        );
 
         let mut eng2 = engine();
         type_text(&mut eng2, "z");
-        assert!(eng2.candidates().is_empty());
+        assert!(!eng2.candidates().is_empty(), "z 应给出补全候选");
     }
 
     #[test]

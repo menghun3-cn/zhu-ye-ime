@@ -47,6 +47,42 @@ use crate::candidate_ui::{
     UiThemeKind, BASE_DPI,
 };
 
+/// 拼音拼注（T-115 后续）：把"词"逐字插入切分音节为"词（音节）词（音节）"，
+/// 如 `生成` + `shengcheng` → `生（sheng）成（cheng）`。
+/// 输入非 CJK、拼音为空、无法按标准音节表切分或音节数与字数不符时原样返回。
+#[must_use]
+fn spell_pinyin(word: &str, pinyin: &str) -> String {
+    if word.is_empty() || pinyin.is_empty() || !pinyin.is_ascii() {
+        return word.to_owned();
+    }
+    let word_chars: Vec<char> = word.chars().collect();
+    if word_chars.is_empty()
+        || word_chars
+            .iter()
+            .any(|ch| !('一'..='\u{9fff}').contains(ch))
+    {
+        return word.to_owned();
+    }
+    let Some(syllables) =
+        zhu_ye_core::pinyin::segment_all(&zhu_ye_core::pinyin::SyllableTable::standard(), pinyin)
+            .into_iter()
+            .next()
+    else {
+        return word.to_owned();
+    };
+    if syllables.len() != word_chars.len() {
+        return word.to_owned();
+    }
+    let mut out = String::with_capacity(word.len() + pinyin.len() + 4 * word_chars.len());
+    for (ch, syllable) in word_chars.iter().zip(&syllables) {
+        out.push(*ch);
+        out.push('（');
+        out.push_str(syllable);
+        out.push('）');
+    }
+    out
+}
+
 /// 窗口主题偏好；`Auto` 跟随系统深浅色与高对比度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemePreference {
@@ -405,7 +441,15 @@ impl CandidateWindowState {
 
             // M6-R：网络语缩写候选在主文本后追加 `[网络]` 标注；
             // 标注并入主文本，宽度估算（row_split）自然把它计入。
-            let main_owned = display_main_text(item, self.view.translation_mode);
+            let base = display_main_text(item, self.view.translation_mode);
+            // T-115 后续：拼音拼注——中文候选行展示"词（音节）"，如
+            // "生（sheng）成（cheng）"；错序纠错候选借此展示正确拼音（用户点名
+            // 示意）。译文层主文本是英文，不拼注；切分失败保持原样。
+            let main_owned = if self.view.translation_mode {
+                base
+            } else {
+                spell_pinyin(&base, &item.pinyin)
+            };
             let (main, secondary) = if self.view.translation_mode && !item.translation.is_empty() {
                 (
                     main_owned.as_str(),
@@ -1185,9 +1229,28 @@ fn system_colors() -> SystemColors {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bmp, resolve_theme, resolve_with_custom, system_high_contrast_on, to_utf16_null,
-        CandidateWindow, ThemePreference,
+        build_bmp, resolve_theme, resolve_with_custom, spell_pinyin, system_high_contrast_on,
+        to_utf16_null, CandidateWindow, ThemePreference,
     };
+
+    #[test]
+    fn 拼音拼注逐字插音节() {
+        // T-115 后续：全拼候选行展示"词（音节）"，错序纠错候选借此显示正确拼音。
+        assert_eq!(spell_pinyin("生成", "shengcheng"), "生（sheng）成（cheng）");
+        assert_eq!(spell_pinyin("账号", "zhanghao"), "账（zhang）号（hao）");
+        assert_eq!(spell_pinyin("的", "de"), "的（de）");
+    }
+
+    #[test]
+    fn 拼音拼注异常输入原样返回() {
+        // T-115 后续：无拼音/无法切分/字数与音节数不符时不拼注，避免噪声。
+        assert_eq!(spell_pinyin("abc", ""), "abc");
+        assert_eq!(spell_pinyin("你好", ""), "你好");
+        assert_eq!(spell_pinyin("账号", "zhanghaoX"), "账号");
+        assert_eq!(spell_pinyin("", "nihao"), "");
+        // 非 CJK 主文本不拼注（网络语缩写标注场景）。
+        assert_eq!(spell_pinyin("yyds", "yyds"), "yyds");
+    }
 
     #[test]
     fn 主题偏好由构造参数决定且默认自动() {

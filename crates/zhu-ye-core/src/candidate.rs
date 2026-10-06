@@ -130,7 +130,9 @@ pub fn generate_prefix_candidates(
     if pinyin.is_empty() || !segment_all(table, pinyin).is_empty() {
         return empty;
     }
-    // 找最长可完整切分前缀 P；找不到（如 `z`/`zh`）则两组皆空，避免前缀泛滥。
+    // 找最长可完整切分前缀 P；找不到（如 `d`/`z`/`zh`）时无完成组，
+    // 但补全组仍照常给出（单字母/声母前缀即时出候选：`d` → 的/多/到……，
+    // 搜狗/微软拼音同款体验），长度由 `completion_cap` 封顶避免前缀泛滥。
     let mut complete_len = 0usize;
     for cut in (1..pinyin.len()).rev() {
         if !segment_all(table, &pinyin[..cut]).is_empty() {
@@ -138,15 +140,18 @@ pub fn generate_prefix_candidates(
             break;
         }
     }
-    if complete_len == 0 {
-        return empty;
-    }
     let completions = dictionary
         .lookup_prefix(pinyin)
         .into_iter()
         .map(|entry| candidate_from_entry(&entry))
         .take(completion_cap.max(1))
         .collect();
+    if complete_len == 0 {
+        return PrefixCandidateGroups {
+            completions,
+            completed: Vec::new(),
+        };
+    }
     let completed = generate_candidates(table, dictionary, &pinyin[..complete_len]);
     PrefixCandidateGroups {
         completions,
@@ -520,6 +525,81 @@ pub fn corrected_candidates(
     collected
 }
 
+/// 错序容错候选上限（T-115 后续）：与 `CORRECTION_VARIANT_CAP` 同量级，
+/// 防止变体枚举把候选列表撑爆。
+pub const TRANSPOSITION_VARIANT_CAP: usize = 16;
+
+/// 错序容错（T-115 后续）：输入串**无法完整切分**时（快打常见的相邻字母
+/// 颠倒，如 `zhegnq`→`zhengq`、`shegnc`→`shengc`、`xiagnzhe`→`xiangzhe`、
+/// `zhagnh`→`zhangh`），枚举每对相邻字母交换后的变体出候选：
+///
+/// - 变体**可完整切分** → 走主链路 `generate_candidates`（整词/音节切分组合）；
+/// - 变体**仍不可切分**（如 `zhangh` 尾音节残）→ 走前缀候选链路
+///   （补全组优先，`账号` 即由 `zhangh` 补全命中）。
+///
+/// 与 `corrected_candidates`（FR-024）互补：后者只处理**可完整切分**串的
+/// 模糊替换/少字母补全；错位串此前被两条链路都漏掉，用户点名报缺陷。
+/// 候选标注 `CandidateSource::Corrected` 且 `pinyin` 为变体（正确拼音），
+/// 候选窗据此展示"词（正确拼音）"。数量受 `TRANSPOSITION_VARIANT_CAP` 约束。
+#[must_use]
+pub fn transposed_candidates(
+    table: &SyllableTable,
+    dictionary: &dyn Dictionary,
+    pinyin: &str,
+    completion_cap: usize,
+) -> Vec<Candidate> {
+    if pinyin.is_empty()
+        || !pinyin.is_ascii()
+        || !dictionary.lookup(pinyin).is_empty()
+        || !segment_all(table, pinyin).is_empty()
+    {
+        // 整词已命中或可完整切分：无需错序容错（由主链路承担）。
+        return Vec::new();
+    }
+    let mut collected: Vec<Candidate> = Vec::new();
+    let mut seen_pinyin: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for variant in transposition_variants(pinyin) {
+        if !seen_pinyin.insert(variant.clone()) {
+            continue;
+        }
+        let variant_candidates = if segment_all(table, &variant).is_empty() {
+            let groups = generate_prefix_candidates(table, dictionary, &variant, completion_cap);
+            let mut all = groups.completions;
+            all.extend(groups.completed);
+            all
+        } else {
+            generate_candidates(table, dictionary, &variant)
+        };
+        for mut candidate in variant_candidates {
+            candidate.source = CandidateSource::Corrected;
+            candidate.pinyin = Some(variant.clone());
+            collected.push(candidate);
+            if collected.len() >= TRANSPOSITION_VARIANT_CAP {
+                return collected;
+            }
+        }
+    }
+    collected
+}
+
+/// 相邻字母交换变体：对输入串每对相邻位置交换一次生成候选串。
+fn transposition_variants(input: &str) -> Vec<String> {
+    let bytes = input.as_bytes();
+    let mut variants = Vec::new();
+    for index in 0..bytes.len().saturating_sub(1) {
+        if bytes[index] == bytes[index + 1] {
+            continue;
+        }
+        let mut swapped = Vec::with_capacity(bytes.len());
+        swapped.extend_from_slice(&bytes[..index]);
+        swapped.push(bytes[index + 1]);
+        swapped.push(bytes[index]);
+        swapped.extend_from_slice(&bytes[index + 2..]);
+        variants.push(String::from_utf8(swapped).expect("纯 ASCII 输入交换后仍为 ASCII"));
+    }
+    variants
+}
+
 /// Beam Search 参数（M7，方案设计 12.4.2）。
 pub const BEAM_WIDTH: usize = 8;
 /// 每个（子串）最多参与搜索的候选词数。
@@ -832,9 +912,9 @@ mod tests {
     use crate::candidate::{
         abbreviation_candidates, append_abbreviation_group, corrected_candidates,
         generate_candidates, generate_prefix_candidates, initial_candidates, is_abbreviation_input,
-        merge_candidate_groups, prefix_expand_candidates, sentence_candidates, Candidate,
-        CandidateSorter, CandidateSource, RankingConfig, RankingContext, RankingModel,
-        StaticRankingModel,
+        merge_candidate_groups, prefix_expand_candidates, sentence_candidates,
+        transposed_candidates, Candidate, CandidateSorter, CandidateSource, RankingConfig,
+        RankingContext, RankingModel, StaticRankingModel,
     };
     use crate::dict::{DictionaryEntry, InMemoryDictionary};
     use crate::pinyin::SyllableTable;
@@ -1163,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn 前缀候选无完整音节或可完整切分时为空() {
+    fn 前缀候选无完整音节时只给补全组可完整切分时为空() {
         use crate::dict::{DictionaryEntry, InMemoryDictionary};
         use crate::pinyin::SyllableTable;
 
@@ -1171,11 +1251,15 @@ mod tests {
         let dictionary = InMemoryDictionary::from_entries(vec![
             DictionaryEntry::new("你好", "nihao", 100),
             DictionaryEntry::new("你", "ni", 200),
+            DictionaryEntry::new("中", "zhong", 60),
+            DictionaryEntry::new("这", "zhe", 40),
         ]);
-        // `zh` 前无完整音节：两组皆空，避免前缀泛滥。
+        // `zh` 前无完整音节：无完成组，但补全组仍给出（单字母/声母前缀即时出候选，
+        // `d`/`z`/`zh` 一按就出现 的/多/到 之类，搜狗/微软同款；上限由 cap 封顶）。
         let groups = generate_prefix_candidates(&table, &dictionary, "zh", 32);
-        assert!(groups.completions.is_empty());
         assert!(groups.completed.is_empty());
+        let completions: Vec<&str> = groups.completions.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(completions, vec!["中", "这"]);
         // 可完整切分时不由前缀逻辑处理。
         let groups = generate_prefix_candidates(&table, &dictionary, "nihao", 32);
         assert!(groups.completions.is_empty());
@@ -1423,6 +1507,75 @@ mod tests {
             "nihao 整词命中则不纠错"
         );
         assert!(corrected_candidates(&table, &dictionary, "").is_empty());
+    }
+
+    // ---- 错序容错（T-115 后续）----
+
+    fn errata_dictionary() -> InMemoryDictionary {
+        InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("正确", "zhengque", 8000),
+            DictionaryEntry::new("争取", "zhengqu", 6000),
+            DictionaryEntry::new("生成", "shengcheng", 7000),
+            DictionaryEntry::new("账号", "zhanghao", 5000),
+            DictionaryEntry::new("想着", "xiangzhe", 6000),
+            DictionaryEntry::new("想", "xiang", 9000),
+            DictionaryEntry::new("着", "zhe", 7000),
+            DictionaryEntry::new("账", "zhang", 5000),
+            DictionaryEntry::new("号", "hao", 7000),
+            DictionaryEntry::new("生", "sheng", 8000),
+            DictionaryEntry::new("成", "cheng", 7000),
+        ])
+    }
+
+    #[test]
+    fn 错序容错相邻交换变体出正确候选() {
+        let table = SyllableTable::standard();
+        let dict = errata_dictionary();
+        // zhegnq -> 变体 zhengq（仍不可切分）-> 前缀链路补全出"正确"（用户点名）。
+        let out = transposed_candidates(&table, &dict, "zhegnq", 8);
+        let hit = out.iter().find(|c| c.text == "正确");
+        assert!(hit.is_some(), "zhegnq 应纠出 正确，实际: {out:?}");
+        // 拼音标注为变体（正确拼音），来源标 Corrected 供 UI 区分。
+        let hit = hit.unwrap();
+        assert_eq!(hit.pinyin.as_deref(), Some("zhengq"));
+        assert_eq!(hit.source, CandidateSource::Corrected);
+        // 同一错误两个变体可同时命中（shegnc -> shengc -> 生成，用户点名）。
+        let out = transposed_candidates(&table, &dict, "shegnc", 8);
+        assert!(
+            out.iter().any(|c| c.text == "生成"),
+            "shegnc 应纠出 生成，实际: {out:?}"
+        );
+    }
+
+    #[test]
+    fn 错序容错完整切分变体走主链路() {
+        let table = SyllableTable::standard();
+        let dict = errata_dictionary();
+        // xiagnzhe -> 变体 xiangzhe（可完整切分）-> 主链路整词"想着"。
+        let out = transposed_candidates(&table, &dict, "xiagnzhe", 8);
+        assert!(
+            out.iter().any(|c| c.text == "想着"),
+            "xiagnzhe 应纠出 想着，实际: {out:?}"
+        );
+        // zhagnh -> 变体 zhangh -> 前缀链路补全出"账号"（用户点名"账（zhang）号（hao）"）。
+        let out = transposed_candidates(&table, &dict, "zhagnh", 8);
+        assert!(
+            out.iter().any(|c| c.text == "账号"),
+            "zhagnh 应纠出 账号，实际: {out:?}"
+        );
+    }
+
+    #[test]
+    fn 错序容错整词命中或可切分输入不触发() {
+        let table = SyllableTable::standard();
+        let dict = errata_dictionary();
+        assert!(
+            transposed_candidates(&table, &dict, "zhengqu", 8).is_empty(),
+            "整词命中不触发错序容错"
+        );
+        // nihao 不在 errata 词典，但输入可完整切分（不触发错序容错本身）。
+        assert!(transposed_candidates(&table, &dict, "nihao", 8).is_empty());
+        assert!(transposed_candidates(&table, &dict, "", 8).is_empty());
     }
 
     #[test]
