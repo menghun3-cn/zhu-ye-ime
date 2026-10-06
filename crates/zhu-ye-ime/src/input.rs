@@ -119,6 +119,11 @@ pub struct InputEngine {
     /// 模糊音与纠错开关（FR-024；O-05 修订）。默认开；关闭后纠错组
     /// （模糊替换 + 少字母补全，`corrected_candidates`）不生成。
     enable_fuzzy: bool,
+    /// 中文引号成对交替状态（FR-067，D-83）：`"` 键按 `“`/`”` 交替、`'` 键按
+    /// `‘`/`’` 交替，各维护一个开关位（双引号与单引号互不影响）。
+    quote_double_open: bool,
+    /// 单引号交替开关（见 [`InputEngine::quote_double_open`]）。
+    quote_single_open: bool,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -193,6 +198,8 @@ impl InputEngine {
             en_lexicon: None,
             enable_abbreviation: true,
             enable_fuzzy: true,
+            quote_double_open: false,
+            quote_single_open: false,
         }
     }
 
@@ -748,6 +755,54 @@ impl InputEngine {
             return false;
         }
         self.push_composing(c)
+    }
+
+    /// FR-067（D-83）：中文标点全角直出。
+    ///
+    /// 中文模式（组合态或空闲态）下标点键被 TSF 吃下后调用：返回对应**全角标点**
+    /// 文本供直接上屏，并清空组合与联想（未确定的拼音丢弃，与主流中文输入法一致）。
+    /// 已上屏的候选不受影响（数字/v 模式由键路先退出后才到本方法）。英文模式或
+    /// 未知触发字符返回 `None`（调用方放行宿主）。
+    ///
+    /// 引号 `"`/`'` 按成对交替输出（`“”`/`‘’`）；标点直出不参与用户词学习
+    /// （组合已清空，天然不产生 learn 输入）；清空前词上下文——标点后不触发
+    /// 上屏联想（T-059）。
+    ///
+    /// 触发字符为拉丁键盘键位（与 Shift 组合无关，键路已把上档字符译为字符）：
+    /// `\`→`、` `,`→`，` `.`→`。` `;`→`；` `:`→`：` `?`→`？` `!`→`！`
+    /// `(`→`（` `)`→`）` `"`→`“”`交替 `'`→`‘’`交替。
+    pub fn commit_fullwidth_punct(&mut self, c: char) -> Option<String> {
+        if self.mode != InputMode::Chinese {
+            return None;
+        }
+        let text = match c {
+            '\\' => "、".to_owned(),
+            ',' => "，".to_owned(),
+            '.' => "。".to_owned(),
+            ';' => "；".to_owned(),
+            ':' => "：".to_owned(),
+            '?' => "？".to_owned(),
+            '!' => "！".to_owned(),
+            '(' => "（".to_owned(),
+            ')' => "）".to_owned(),
+            '"' => {
+                let t = if self.quote_double_open { "”" } else { "“" };
+                self.quote_double_open = !self.quote_double_open;
+                t.to_owned()
+            }
+            '\'' => {
+                let t = if self.quote_single_open { "’" } else { "‘" };
+                self.quote_single_open = !self.quote_single_open;
+                t.to_owned()
+            }
+            _ => return None,
+        };
+        // 组合态/联想态：清空组合与候选（标点直出；拼音丢弃）；空闲态为空清无副作用。
+        self.clear_composition();
+        self.suggestion.clear();
+        // 标点打断词间上下文：不触发上屏联想。
+        self.previous_word = None;
+        Some(text)
     }
 
     /// 格式键是否应对当前组合态生效（T-066，TSF 键路判定用，D-11）：
@@ -1413,6 +1468,26 @@ impl InputEngine {
                 }
             }
 
+            // FR-068（第十三期）：动态组词——整词命中不足一页（含未命中）且串为
+            // 完整音节时，末尾向前贪心最长词匹配产出组合短语（`你有`/`你去`/
+            // `我来`/`来电话`），置于主候选组之后（与展开组同一插入点语义；
+            // D-83 用户报障：`niyou` 仅有昵友/腻友/拟游隼而无"你有"）。
+            // 词条序列唯一、同文本主候选优先去重；不参与领域提权与用户词学习。
+            if main.len() < self.page_size && !composing.is_empty() {
+                if let Some(composed) = zhu_ye_core::dynamic_compose_candidates(
+                    &self.table,
+                    dictionary.as_ref(),
+                    &composing,
+                ) {
+                    let mut composed_candidates: Vec<Candidate> =
+                        Vec::with_capacity(self.page_size - main.len());
+                    let mut c = Candidate::new(composed, 0);
+                    c.source = zhu_ye_core::candidate::CandidateSource::DynamicCompose;
+                    composed_candidates.push(c);
+                    main = append_group(main, composed_candidates);
+                }
+            }
+
             // M7 整句（FR-025）：无整词命中时用 beam 搜索全局最优整句，
             // 作为独立「整句组」置于主候选最前（长串用户意图即整句）。
             if !direct_hit {
@@ -1622,6 +1697,85 @@ mod tests {
 
     fn type_text(engine: &mut InputEngine, text: &str) {
         assert!(text.chars().all(|c| engine.handle_letter(c)));
+    }
+
+    #[test]
+    fn 中文标点全角直出() {
+        // FR-067：各标点键 → 对应全角；引号成对交替；未知字符放行。
+        let mut engine = engine();
+        assert_eq!(engine.commit_fullwidth_punct('\\').as_deref(), Some("、"));
+        assert_eq!(engine.commit_fullwidth_punct(',').as_deref(), Some("，"));
+        assert_eq!(engine.commit_fullwidth_punct('.').as_deref(), Some("。"));
+        assert_eq!(engine.commit_fullwidth_punct(';').as_deref(), Some("；"));
+        assert_eq!(engine.commit_fullwidth_punct(':').as_deref(), Some("："));
+        assert_eq!(engine.commit_fullwidth_punct('?').as_deref(), Some("？"));
+        assert_eq!(engine.commit_fullwidth_punct('!').as_deref(), Some("！"));
+        assert_eq!(engine.commit_fullwidth_punct('(').as_deref(), Some("（"));
+        assert_eq!(engine.commit_fullwidth_punct(')').as_deref(), Some("）"));
+        // 双引号/单引号各自成对交替。
+        assert_eq!(engine.commit_fullwidth_punct('"').as_deref(), Some("“"));
+        assert_eq!(engine.commit_fullwidth_punct('"').as_deref(), Some("”"));
+        assert_eq!(engine.commit_fullwidth_punct('"').as_deref(), Some("“"));
+        assert_eq!(engine.commit_fullwidth_punct('\'').as_deref(), Some("‘"));
+        assert_eq!(engine.commit_fullwidth_punct('\'').as_deref(), Some("’"));
+        // 未入映射表的字符（`/`、`@`）返回 None，调用方放行宿主。
+        assert_eq!(engine.commit_fullwidth_punct('/'), None);
+        assert_eq!(engine.commit_fullwidth_punct('@'), None);
+    }
+
+    #[test]
+    fn 标点直出清空组合() {
+        let mut engine = engine();
+        type_text(&mut engine, "nihao");
+        assert!(engine.is_active());
+        assert_eq!(engine.commit_fullwidth_punct(',').as_deref(), Some("，"));
+        assert!(!engine.is_active(), "标点直出后组合被清空");
+        assert_eq!(engine.composing(), "");
+        assert!(engine.candidates().is_empty());
+    }
+
+    #[test]
+    fn 英文模式标点放行() {
+        let mut engine = engine();
+        engine.toggle_mode(); // English
+        assert_eq!(engine.commit_fullwidth_punct(','), None);
+        assert_eq!(engine.commit_fullwidth_punct('\\'), None);
+        assert_eq!(engine.commit_fullwidth_punct('"'), None);
+    }
+
+    #[test]
+    fn 动态组词补足你有() {
+        // FR-068：现场词典情景（niyou 整词命中不足一页）→ 组词候选"你有"
+        // 置于整词命中组之后，来源 DynamicCompose。
+        use zhu_ye_core::dict::InMemoryDictionary;
+        use zhu_ye_core::DictionaryEntry;
+        let dict = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("昵友", "niyou", 500),
+            DictionaryEntry::new("腻友", "niyou", 400),
+            DictionaryEntry::new("你", "ni", 9000),
+            DictionaryEntry::new("有", "you", 9500),
+            DictionaryEntry::new("优", "you", 6000),
+        ]);
+        let mut engine = InputEngine::new(Arc::new(dict));
+        type_text(&mut engine, "niyou");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(
+            texts.contains(&"你有"),
+            "候选列表应含动态组词候选，实际 {texts:?}"
+        );
+        let idx = texts.iter().position(|t| *t == "你有").unwrap();
+        assert!(
+            idx >= 2,
+            "组词候选置于整词命中组（昵友/腻友）之后：{texts:?}"
+        );
+        assert_eq!(
+            engine.candidates()[idx].source,
+            zhu_ye_core::candidate::CandidateSource::DynamicCompose
+        );
     }
 
     #[test]

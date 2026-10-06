@@ -47,6 +47,10 @@ pub enum CandidateSource {
     /// 前缀组词展开候选（FR-059，T-090）；完整拼音整词命中不足一页时按拼音前缀
     /// 补足更深组词（D-70/D-71），独立追加组不参与主排序，UI 不新增标签。
     PrefixExpand,
+    /// 动态组词候选（FR-068，第十三期）：整词未命中/不足一页时，按末尾向前
+    /// 贪心最长词匹配拼接出组合短语（`你有`/`你去`/`我来`）；独立追加组，
+    /// 不参与领域提权与用户词学习，UI 不新增标签。
+    DynamicCompose,
 }
 
 /// 输入法候选。
@@ -252,6 +256,69 @@ pub fn generate_candidates(
         }
     }
     deduplicate_and_sort(collected)
+}
+
+/// FR-068：动态组词候选（第十三期）。
+///
+/// 整词命中不足一页（含未命中）时，按**完整音节切分 + 头部向前贪心最长词匹配**
+/// 拼接出组合短语（`你有`/`你去`/`我来`/`来电话` 类）。与 [`generate_candidates`]
+/// 的切分组合（仅整词未命中时、逐音节取首词）不同：本函数在**整词命中组不足一页**
+/// 时也能补足（D-83，用户 2026-10-06 报障：`niyou` 仅有昵友/腻友/拟游隼而无"你有"）。
+///
+/// 匹配规则：
+/// - 从**头部音节**向前扩展，优先更长词（双音节词 > 单音节词），拼接顺序自然
+///   （先取的段在前，无需逆序）；
+/// - **整串本身（`pinyin` 全部音节）不参与匹配**——整词归属 `direct_hit` 主候选，
+///   动态组词只补足真子段组合（否则会返回整词自身，与主候选重复无新增）；
+/// - 同拼音键多词时取**词频最高**者（词典条目不保证排序，显式取 max）；
+/// - 逐段选取后拼接为单一候选文本（词条序列唯一，不产生排序歧义）。
+///
+/// 返回 `None`（不产出）：串非完整音节（还可继续输入，如 `ni`/`nish`）、切分
+/// 有歧义（多解，如 `xian` → `xian`/`xi`+`an`）、音节数 <2、或任一段无词
+/// （生僻音节）。**位次与去重**由调用方负责（置于主候选组之后、同文本去重、
+/// 按页剩余补足）。
+#[must_use]
+pub fn dynamic_compose_candidates(
+    table: &SyllableTable,
+    dictionary: &dyn Dictionary,
+    pinyin: &str,
+) -> Option<String> {
+    let all = segment_all(table, pinyin);
+    if all.len() != 1 {
+        // 无法切分（非完整音节串）或切分有歧义（多解）均不产出。
+        return None;
+    }
+    let syllables = &all[0];
+    if syllables.len() < 2 {
+        return None;
+    }
+    let mut words: Vec<String> = Vec::with_capacity(syllables.len());
+    let mut rest = syllables.as_slice();
+    let mut first = true;
+    while !rest.is_empty() {
+        // 首个匹配段跳过整串（整词归属 direct_hit 主候选，组词只补真子段）。
+        let max_len = if first { rest.len() - 1 } else { rest.len() };
+        first = false;
+        let mut picked: Option<(String, usize)> = None;
+        for len in (1..=max_len).rev() {
+            let key = rest[..len].join("");
+            let entries = dictionary.lookup(&key);
+            if entries.is_empty() {
+                continue;
+            }
+            let best = entries.iter().max_by_key(|e| e.frequency)?;
+            picked = Some((best.word.clone(), len));
+            break;
+        }
+        match picked {
+            Some((word, len)) => {
+                words.push(word);
+                rest = &rest[len..];
+            }
+            None => return None,
+        }
+    }
+    Some(words.concat())
 }
 
 fn candidate_from_entry(entry: &DictionaryEntry) -> Candidate {
@@ -831,10 +898,10 @@ mod tests {
     use crate::bigram::InMemoryBigramModel;
     use crate::candidate::{
         abbreviation_candidates, append_abbreviation_group, corrected_candidates,
-        generate_candidates, generate_prefix_candidates, initial_candidates, is_abbreviation_input,
-        merge_candidate_groups, prefix_expand_candidates, sentence_candidates, Candidate,
-        CandidateSorter, CandidateSource, RankingConfig, RankingContext, RankingModel,
-        StaticRankingModel,
+        dynamic_compose_candidates, generate_candidates, generate_prefix_candidates,
+        initial_candidates, is_abbreviation_input, merge_candidate_groups,
+        prefix_expand_candidates, sentence_candidates, Candidate, CandidateSorter, CandidateSource,
+        RankingConfig, RankingContext, RankingModel, StaticRankingModel,
     };
     use crate::dict::{DictionaryEntry, InMemoryDictionary};
     use crate::pinyin::SyllableTable;
@@ -850,6 +917,66 @@ mod tests {
     }
 
     // ---- 缩写输入路径（M6-R）----
+
+    // ---- FR-068：动态组词（第十三期） ----
+
+    #[test]
+    fn 动态组词整词不足一页补足你有() {
+        let table = SyllableTable::standard();
+        // 现场词典情景：`niyou` 整词命中（昵友/腻友）不足一页，
+        // 动态组词补出"你有"（`you` 取词频最高的"有"，非"优"）。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("昵友", "niyou", 500),
+            DictionaryEntry::new("腻友", "niyou", 400),
+            DictionaryEntry::new("你", "ni", 9000),
+            DictionaryEntry::new("有", "you", 9500),
+            DictionaryEntry::new("优", "you", 6000),
+        ]);
+        assert_eq!(
+            dynamic_compose_candidates(&table, &dictionary, "niyou").as_deref(),
+            Some("你有")
+        );
+    }
+
+    #[test]
+    fn 动态组词最长词优先且歧义生僻不产出() {
+        let table = SyllableTable::standard();
+        // 双音节词优先于单音节逐字：`womende` 切分唯一（wo+men+de），
+        // 头部贪心首段取"我们"（women 双字词）而非"我"+"门"。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("我们", "women", 9000),
+            DictionaryEntry::new("我", "wo", 8500),
+            DictionaryEntry::new("门", "men", 7000),
+            DictionaryEntry::new("的", "de", 8000),
+        ]);
+        assert_eq!(
+            dynamic_compose_candidates(&table, &dictionary, "womende").as_deref(),
+            Some("我们的")
+        );
+        // 切分有歧义（xian → 仙 或 西+安）不产出（宁缺勿误，D-83）。
+        let ambiguous = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("仙", "xian", 9000),
+            DictionaryEntry::new("西", "xi", 9000),
+            DictionaryEntry::new("安", "an", 9000),
+        ]);
+        assert_eq!(dynamic_compose_candidates(&table, &ambiguous, "xian"), None);
+        assert_eq!(
+            dynamic_compose_candidates(&table, &ambiguous, "laidianhua"),
+            None
+        );
+        // 单音节/非完整音节串不产出。
+        assert_eq!(dynamic_compose_candidates(&table, &dictionary, "ni"), None);
+        assert_eq!(dynamic_compose_candidates(&table, &dictionary, "lai"), None);
+        assert_eq!(dynamic_compose_candidates(&table, &dictionary, "wo"), None);
+        assert_eq!(
+            dynamic_compose_candidates(&table, &dictionary, "womend"),
+            None
+        );
+        // 生僻段无词不产出。
+        let missing =
+            InMemoryDictionary::from_entries(vec![DictionaryEntry::new("你", "ni", 9000)]);
+        assert_eq!(dynamic_compose_candidates(&table, &missing, "niyou"), None);
+    }
 
     fn slang_dictionary() -> InMemoryDictionary {
         InMemoryDictionary::from_entries(vec![
