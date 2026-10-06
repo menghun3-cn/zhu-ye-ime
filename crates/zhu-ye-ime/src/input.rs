@@ -1119,6 +1119,7 @@ impl InputEngine {
                     .map(|text| CandidateUiItem {
                         text: text.clone(),
                         translation: String::new(),
+                        pinyin: String::new(),
                         source: zhu_ye_core::candidate::CandidateSource::Suggestion,
                     })
                     .collect(),
@@ -1644,6 +1645,7 @@ fn candidate_ui_item(candidate: &Candidate) -> CandidateUiItem {
     CandidateUiItem {
         text: candidate.text.clone(),
         translation: candidate.translation.clone().unwrap_or_default(),
+        pinyin: candidate.pinyin.clone().unwrap_or_default(),
         source: candidate.source.clone(),
     }
 }
@@ -1775,6 +1777,44 @@ mod tests {
         assert_eq!(
             engine.candidates()[idx].source,
             zhu_ye_core::candidate::CandidateSource::DynamicCompose
+        );
+    }
+
+    #[test]
+    fn 相邻换位纠正出正确拼音候选() {
+        // FR-069：zhegnq（快速输入 `gn` 交替）→ 换位纠正 zhengq →
+        // 前缀补全 zhengque → 正确；来源 Corrected、pinyin 为纠正后正确拼音，
+        // 候选窗行主文本展示 `中文（正确拼音）`。
+        use zhu_ye_core::candidate::CandidateSource;
+        use zhu_ye_core::dict::InMemoryDictionary;
+        use zhu_ye_core::DictionaryEntry;
+        let dict = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("正确", "zhengque", 9000),
+            DictionaryEntry::new("正", "zheng", 8500),
+            DictionaryEntry::new("整", "zheng", 8000),
+        ]);
+        let mut engine = InputEngine::new(Arc::new(dict));
+        type_text(&mut engine, "zhegnq");
+        let candidates = engine.candidates();
+        let texts: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
+        assert!(texts.contains(&"正确"), "应出 正确，实际 {texts:?}");
+        let hit = candidates
+            .iter()
+            .find(|c| c.text == "正确")
+            .expect("正确应在候选内");
+        assert_eq!(hit.source, CandidateSource::Corrected);
+        assert_eq!(hit.pinyin.as_deref(), Some("zhengque"));
+        // UI 快照：候选行主文本显示 中文（正确拼音）。
+        let view = engine.candidate_ui_view();
+        let row = view
+            .items
+            .iter()
+            .find(|i| i.text == "正确")
+            .expect("视图应含 正确");
+        assert_eq!(row.pinyin, "zhengque");
+        assert_eq!(
+            crate::candidate_ui::display_main_text(row, false),
+            "正确（zhengque）"
         );
     }
 
