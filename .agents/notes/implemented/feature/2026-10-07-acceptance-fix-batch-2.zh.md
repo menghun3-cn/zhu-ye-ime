@@ -106,7 +106,11 @@ v0.1.2 批一 DLL 上：
 落地并把 CLSID InprocServer32/IconFile 指针切到新文件，随后两地
 `IconFile` 回写 `tsf\zhu.ico`（任务栏"竹"图标），ctfmon 重启；全新
 `dictionary.zyct`（26,983,690B，base 重铸产物）覆盖部署至
-`%APPDATA%\ai-zhu-ye-ime\`（旧档备份 `.bak_20261007`）；cli 实查：
+`%APPDATA%\ai-zhu-ye-ime\`（旧档备份 `.bak_20261007`）——**注意：
+该目录并非 ime 实际加载目录（`%APPDATA%\zhu-ye-ime\`），批二译文
+修复因此未生效，批三已纠正部署到正确目录**（见
+[批三](../../implemented/feature/2026-10-07-acceptance-fix-batch-3.md)）；
+cli 实查：
 `是→yes; to be`、`你好→hello`、`谢谢→thanks; thank you`、
 `再见→goodbye`、`我→I; me`。
 
@@ -153,3 +157,4 @@ DLL 被多个宿主加载、进程内 UI 生命周期与宿主绑定）；ITfFnC
 - CEDICT 真实词典导入与首义来源：[2026-09-21-real-dictionary-import.md](../../implemented/architecture/2026-09-21-real-dictionary-import.md)
 - 源 pin 与重锁流程：[2026-09-28-dictionary-source-pins-and-fetch-script.md](../../implemented/process/2026-09-28-dictionary-source-pins-and-fetch-script.md)
 - M7 纠错/整句原链路（本次补充而非取代）：[2026-09-19-candidate-ranking-static-model.md](../../implemented/feature/2026-09-19-candidate-ranking-static-model.md)
+- 批三（部署纠正 + 六项后续修复）：[2026-10-07-acceptance-fix-batch-3.md](2026-10-07-acceptance-fix-batch-3.md)

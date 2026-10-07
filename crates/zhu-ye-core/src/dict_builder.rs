@@ -9,9 +9,9 @@ use std::collections::HashMap;
 
 use crate::dict::DictionaryEntry;
 use crate::dict_format::{
-    content_sha256, normalize_translation_key, BIGRAM_RECORD_SIZE, ENTRY_RECORD_SIZE, HEADER_SIZE,
-    PINYIN_INDEX_RECORD_SIZE, REVERSE_TRANSLATION_RECORD_SIZE, TEXT_POOL_START,
-    WORD_TRANSLATION_RECORD_SIZE,
+    content_sha256, normalize_translation_key, strip_pos_prefix, BIGRAM_RECORD_SIZE,
+    ENTRY_RECORD_SIZE, HEADER_SIZE, PINYIN_INDEX_RECORD_SIZE, REVERSE_TRANSLATION_RECORD_SIZE,
+    TEXT_POOL_START, WORD_TRANSLATION_RECORD_SIZE,
 };
 use crate::{Error, Result};
 
@@ -182,7 +182,7 @@ pub fn build_v2(entries: &[DictionaryEntry], bigrams: &[(&str, &str, u64)]) -> R
         record[10..12].copy_from_slice(&translation_len.to_le_bytes());
         word_translation_bytes.extend_from_slice(&record);
 
-        let key = normalize_translation_key(source.translation);
+        let key = normalize_translation_key(strip_pos_prefix(source.translation));
         let (key_offset, key_len) = intern(&key, &mut text_pool, &mut text_refs)?;
         reverse_sources.push((key, source.word, key_offset, key_len, word_offset, word_len));
     }

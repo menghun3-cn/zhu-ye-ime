@@ -42,6 +42,12 @@ pub trait Dictionary: Send + Sync {
 
     /// 按拼音前缀查询词条（前缀候选/补全用）；实现必须按词频降序返回。
     fn lookup_prefix(&self, pinyin_prefix: &str) -> Vec<DictionaryEntry>;
+
+    /// 英文词的中文译文（反查索引，FR-030 场景 6 扩展：英文候选带中文释义）。
+    /// 默认无译文；二进制词典按英文译文键反查中文词实现。
+    fn translate_en_to_zh(&self, _word: &str) -> Option<String> {
+        None
+    }
 }
 
 /// 内存词典：用于脚手架、测试与小型演示数据。

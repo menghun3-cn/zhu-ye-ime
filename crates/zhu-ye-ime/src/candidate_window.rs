@@ -47,8 +47,8 @@ use crate::candidate_ui::{
     UiThemeKind, BASE_DPI,
 };
 
-/// 拼音拼注（T-115 后续）：把"词"逐字插入切分音节为"词（音节）词（音节）"，
-/// 如 `生成` + `shengcheng` → `生（sheng）成（cheng）`。
+/// 拼音拼注（T-115 后续）：把"词"切分音节并按空格拼接，供候选词**上方**的
+/// 小号拼音行显示，如 `生成` + `shengcheng` → `sheng cheng`。
 /// 输入非 CJK、拼音为空、无法按标准音节表切分或音节数与字数不符时原样返回。
 #[must_use]
 fn spell_pinyin(word: &str, pinyin: &str) -> String {
@@ -73,14 +73,7 @@ fn spell_pinyin(word: &str, pinyin: &str) -> String {
     if syllables.len() != word_chars.len() {
         return word.to_owned();
     }
-    let mut out = String::with_capacity(word.len() + pinyin.len() + 4 * word_chars.len());
-    for (ch, syllable) in word_chars.iter().zip(&syllables) {
-        out.push(*ch);
-        out.push('（');
-        out.push_str(syllable);
-        out.push('）');
-    }
-    out
+    syllables.join(" ")
 }
 
 /// 窗口主题偏好；`Auto` 跟随系统深浅色与高对比度。
@@ -337,6 +330,9 @@ struct CandidateWindowState {
     theme: CandidateUiTheme,
     font: HFONT,
     font_is_stock: bool,
+    /// 拼音行小号字体（T-115 后续：候选词上方拼音小字）。
+    pin_font: HFONT,
+    pin_font_is_stock: bool,
     theme_pref: ThemePreference,
     forced_dpi: Option<u32>,
     quit_on_destroy: bool,
@@ -356,12 +352,15 @@ impl CandidateWindowState {
     ) -> Self {
         let metrics = CandidateMetrics::new(initial_dpi.max(BASE_DPI));
         let (font, font_is_stock) = create_font(metrics.font_height);
+        let (pin_font, pin_font_is_stock) = create_font(metrics.pin_font_height);
         Self {
             view,
             theme: resolve_with_custom(options.theme, options.custom_theme.as_ref()),
             metrics,
             font,
             font_is_stock,
+            pin_font,
+            pin_font_is_stock,
             theme_pref: options.theme,
             forced_dpi: options.dpi,
             quit_on_destroy,
@@ -383,6 +382,15 @@ impl CandidateWindowState {
         let (font, font_is_stock) = create_font(metrics.font_height);
         self.font = font;
         self.font_is_stock = font_is_stock;
+        let old_pin_font = mem::take(&mut self.pin_font);
+        if !self.pin_font_is_stock {
+            unsafe {
+                let _ = DeleteObject(old_pin_font.into());
+            }
+        }
+        let (pin_font, pin_font_is_stock) = create_font(metrics.pin_font_height);
+        self.pin_font = pin_font;
+        self.pin_font_is_stock = pin_font_is_stock;
         self.metrics = metrics;
     }
 
@@ -442,25 +450,26 @@ impl CandidateWindowState {
             // M6-R：网络语缩写候选在主文本后追加 `[网络]` 标注；
             // 标注并入主文本，宽度估算（row_split）自然把它计入。
             let base = display_main_text(item, self.view.translation_mode);
-            // T-115 后续：拼音拼注——中文候选行展示"词（音节）"，如
-            // "生（sheng）成（cheng）"；错序纠错候选借此展示正确拼音（用户点名
-            // 示意）。译文层主文本是英文，不拼注；切分失败保持原样。
-            let main_owned = if self.view.translation_mode {
-                base
+            // T-115 后续：候选词拼音行——拼音改到词汇**上方**、小一号字体
+            // （仿微软拼音布局，用户点名）；错序纠错候选借此展示正确拼音
+            // （如输入 zhagnh 显示 账号 上方 "zhang hao"）。译文层主文本是
+            // 英文，拼音行不适用；切分失败（拼音行与原文本相同）不显示。
+            // 主文本不再采用内联"词（音节）"拼注，保持纯词汇。
+            let pin_text = if self.view.translation_mode {
+                String::new()
             } else {
                 spell_pinyin(&base, &item.pinyin)
             };
-            let (main, secondary) = if self.view.translation_mode && !item.translation.is_empty() {
-                (
-                    main_owned.as_str(),
-                    if item.text == item.translation {
-                        ""
-                    } else {
-                        item.text.as_str()
-                    },
-                )
+            let show_pin = !pin_text.is_empty() && pin_text != base;
+            let main = base.as_str();
+            let secondary = if self.view.translation_mode && !item.translation.is_empty() {
+                if item.text == item.translation {
+                    ""
+                } else {
+                    item.text.as_str()
+                }
             } else {
-                (main_owned.as_str(), item.translation.as_str())
+                item.translation.as_str()
             };
             let text_color = if is_selected {
                 self.theme.highlight_foreground
@@ -469,7 +478,44 @@ impl CandidateWindowState {
             };
             // T-037：动态分栏——译文紧跟主文本（不再固定右侧 1/3 列），
             // 英文译文更靠左、可用宽度更大。
-            let (main_rect, translation_rect) = self.metrics.row_split(row_ui, main, secondary);
+            let (main_col, translation_col) = self.metrics.row_split(row_ui, main, secondary);
+            let (main_rect, translation_rect) = if show_pin {
+                // 拼音行占行首上方区（小字体），主文本与译文下移至其下方，
+                // 两段互不重叠；无拼音行保持原样（整行垂直居中）。
+                let pin_band = self
+                    .metrics
+                    .pin_font_height
+                    .saturating_add(self.metrics.pin_line_gap);
+                let pin_bottom = row_ui
+                    .top
+                    .saturating_add(pin_band)
+                    .min(row_ui.bottom - self.metrics.font_height.min(row_ui.height()));
+                let pin_rect = UiRect {
+                    left: main_col.left,
+                    top: row_ui.top,
+                    right: main_col.right,
+                    bottom: pin_bottom,
+                };
+                let _ = unsafe { SelectObject(hdc, self.pin_font.into()) };
+                draw_text(hdc, &pin_text, pin_rect, self.theme.secondary);
+                let _ = unsafe { SelectObject(hdc, self.font.into()) };
+                (
+                    UiRect {
+                        left: main_col.left,
+                        top: pin_bottom,
+                        right: main_col.right,
+                        bottom: row_ui.bottom,
+                    },
+                    UiRect {
+                        left: translation_col.left,
+                        top: pin_bottom,
+                        right: translation_col.right,
+                        bottom: row_ui.bottom,
+                    },
+                )
+            } else {
+                (main_col, translation_col)
+            };
             draw_text(hdc, main, main_rect, text_color);
             draw_text(hdc, secondary, translation_rect, self.theme.secondary);
         }
@@ -516,6 +562,11 @@ impl Drop for CandidateWindowState {
         if !self.font_is_stock && !self.font.is_invalid() {
             unsafe {
                 let _ = DeleteObject(self.font.into());
+            }
+        }
+        if !self.pin_font_is_stock && !self.pin_font.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(self.pin_font.into());
             }
         }
     }
@@ -1236,9 +1287,9 @@ mod tests {
     #[test]
     fn 拼音拼注逐字插音节() {
         // T-115 后续：全拼候选行展示"词（音节）"，错序纠错候选借此显示正确拼音。
-        assert_eq!(spell_pinyin("生成", "shengcheng"), "生（sheng）成（cheng）");
-        assert_eq!(spell_pinyin("账号", "zhanghao"), "账（zhang）号（hao）");
-        assert_eq!(spell_pinyin("的", "de"), "的（de）");
+        assert_eq!(spell_pinyin("生成", "shengcheng"), "sheng cheng");
+        assert_eq!(spell_pinyin("账号", "zhanghao"), "zhang hao");
+        assert_eq!(spell_pinyin("的", "de"), "de");
     }
 
     #[test]

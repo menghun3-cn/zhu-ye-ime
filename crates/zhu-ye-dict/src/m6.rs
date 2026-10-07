@@ -197,6 +197,12 @@ pub struct PinyinTables {
     table: SyllableTable,
 }
 
+/// kTGHZ2013 拼音列按《新华字典》读音序（如「着」zhāo,zháo,zhe,zhuó、
+/// 「说」shuì,shuō），首个未必是日常常用音；无 CEDICT 词级注音的多字词
+/// （如「想着」「说来」）逐字注音时会落到生僻音。此表把常用音提升为
+/// 单字注音首选（用户证据：#4 上屏词「想着」「说来」）。
+const CHAR_PREFERRED_PINYIN: &[(&str, &str)] = &[("着", "zhe"), ("说", "shuo"), ("还", "hai")];
+
 impl PinyinTables {
     /// 由 CC-CEDICT 文本与 Unihan kTGHZ2013 文本构建注音表。
     pub fn from_texts(cedict_text: &str, ktghz_text: &str) -> Self {
@@ -249,6 +255,12 @@ impl PinyinTables {
             let Some(hanzi) = line[sharp + 1..].trim().chars().next() else {
                 continue;
             };
+            // 常用音覆盖（见 CHAR_PREFERRED_PINYIN）：匹配则用表值而非
+            // kTGHZ 首个读音。
+            let pinyin = CHAR_PREFERRED_PINYIN
+                .iter()
+                .find(|(ch, _)| ch.starts_with(hanzi))
+                .map_or(pinyin, |(_, preferred)| (*preferred).to_owned());
             tables.char_pinyin.insert(hanzi, pinyin);
         }
         tables
@@ -663,6 +675,83 @@ pub fn load_jieba_freq(text: &str) -> HashMap<String, u64> {
     map
 }
 
+/// 解析 jieba dict.txt 行（`词 频次 词性`），返回 词 -> 词性编码（第三列）。
+/// 词性用于译文词性标注（T-115 后续）：拼音→英文译文前显示传统词性缩写。
+/// 极少数行只有两列（无词性），跳过。
+pub fn load_jieba_pos(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(word) = parts.next() else {
+            continue;
+        };
+        if parts.next().is_none() {
+            continue; // 无频次列（异常行）
+        }
+        let Some(pos) = parts.next() else {
+            continue; // 无词性列（两列行）
+        };
+        map.insert(word.to_owned(), pos.to_owned());
+    }
+    map
+}
+
+#[cfg(test)]
+mod pos_tests {
+    use super::{load_jieba_pos, pos_label};
+
+    #[test]
+    fn jieba词性解析取第三列() {
+        let map = load_jieba_pos("你好 158450 l\n生成 12000 v\n\n只有两列\n好 59999 a\n");
+        assert_eq!(map.get("你好").map(String::as_str), Some("l"));
+        assert_eq!(map.get("生成").map(String::as_str), Some("v"));
+        assert!(!map.contains_key("只有两列"), "两列行无词性应跳过");
+    }
+
+    #[test]
+    fn 词性映射到传统英文缩写() {
+        assert_eq!(pos_label("v"), Some("v."));
+        assert_eq!(pos_label("vn"), Some("v."));
+        assert_eq!(pos_label("n"), Some("n."));
+        assert_eq!(pos_label("nr"), Some("n."));
+        assert_eq!(pos_label("a"), Some("adj."));
+        assert_eq!(pos_label("ad"), Some("adj."));
+        assert_eq!(pos_label("d"), Some("adv."));
+        assert_eq!(pos_label("r"), Some("pron."));
+        assert_eq!(pos_label("p"), Some("prep."));
+        assert_eq!(pos_label("c"), Some("conj."));
+        assert_eq!(pos_label("e"), Some("int."));
+        assert_eq!(pos_label("m"), Some("num."));
+        assert_eq!(pos_label("q"), Some("cls."));
+        assert_eq!(pos_label("u"), Some("aux."));
+        assert_eq!(pos_label("i"), None, "成语不标词性");
+        assert_eq!(pos_label(""), None);
+    }
+}
+
+/// jieba 词性编码 → 传统英语词性缩写（显示在译文前）。子类归并主类；
+/// 未映射的（u/j/x/i/l/o/y/t/f/z…）返回 None 不标注，避免杂类噪音。
+fn pos_label(tag: &str) -> Option<&'static str> {
+    Some(match tag {
+        "n" | "nr" | "ns" | "nt" | "nz" | "nrt" | "ng" => "n.",
+        "v" | "vd" | "vn" | "vg" | "vi" | "vl" | "vf" | "vx" => "v.",
+        "a" | "ad" | "an" | "ag" | "al" => "adj.",
+        "d" | "dg" => "adv.",
+        "r" | "rg" => "pron.",
+        "p" => "prep.",
+        "c" => "conj.",
+        "e" => "int.",
+        "m" | "mq" | "mg" => "num.",
+        "q" | "qg" => "cls.",
+        "u" | "uj" | "ul" | "uv" | "uz" | "ud" | "ug" => "aux.",
+        _ => return None,
+    })
+}
+
 /// jieba 频次 -> zipf×1000 标定：与 wordfreq 同尺度（wordfreq 顶部 ≈ 7,500-7,600 对应
 /// 的 3.2e5 词频；取 log10 斜率使 jieba 顶部亦落在 ~7,500 量级）。
 /// `score = 2000 + 1000*log10(freq)`，封顶 9000。
@@ -804,6 +893,8 @@ pub struct BaseStats {
     /// 译文补齐的词条数（T-115 后续：骨架/jieba/CEDICT 无译义词经 CEDICT
     /// 首义或精修表补上译文的条数；此前骨架词整批无译文）。
     pub patched_translations: usize,
+    /// 译文加词性前缀的词条数（T-115 后续：jieba 词性列 → 传统缩写拼入译文）。
+    pub pos_labeled: usize,
     /// 规范字集（kTGHZ 8,102 字，约等于通用规范汉字表 8,105）中出现在 base 的字占比。
     pub char_set_coverage_pct: f64,
     /// 最终词条总数。
@@ -875,6 +966,42 @@ const TRANSLATION_PATCHES: &[(&str, &str)] = &[
     ("不会", "cannot; won't"),
     ("对", "right; correct"),
     ("不对", "wrong; incorrect"),
+    // #4 用户证据（2026-10-07 日志上屏词审计）：CEDICT 首义偏差或缺失的常用词。
+    // 词性标注（e) 段）随后按 jieba 词性附加；反查键保持纯净（构建器剥前缀）。
+    ("更多", "more; furthermore"),
+    ("哪位", "which one; who"),
+    ("救来", "to come to the rescue"),
+    ("泥湿", "wet; muddy"),
+    ("逆事", "adverse event"),
+    ("逆施", "to act counter"),
+    ("升成", "to promote into"),
+    ("四书五经", "the Four Books and Five Classics"),
+    ("书", "book; letter"),
+    ("输入", "to input; to enter"),
+    ("也", "also; too"),
+    ("和", "and; with"),
+    ("上", "on; above; up"),
+    ("后", "after; behind"),
+    ("词", "word; term"),
+    ("帐号", "account number"),
+    ("水", "water"),
+];
+
+/// 词频精修表（T-115 后续 #4）：wordfreq 网页语料对个别现代常用词低估
+/// （如「输入框」zipf 1.5 ≈ 1510，低于 jieba 扩充门槛 2000），导致日常
+/// 词被卡掉；此表给出保底词频，只覆盖用户上屏证据中确属常用而语料低估的词。
+/// 生成（用户点名示例词，与「声称」同音竞争首位）也在此提频。
+const WORD_FREQ_PATCHES: &[(&str, u32)] = &[("输入框", 2500), ("生成", 4600)];
+
+/// 词性精修表（T-115 后续 #6）：jieba 词性标注对个别常用词有误
+/// （「谢谢」标 nr 人名、「想法」标 v 动词、「总是/可以」标 c 连词、
+/// 「用」标 p 介词），此处按传统词性修正，拼入译文前显示。
+const WORD_POS_PATCHES: &[(&str, &str)] = &[
+    ("谢谢", "int."),
+    ("总是", "adv."),
+    ("可以", "aux."),
+    ("想法", "n."),
+    ("用", "v."),
 ];
 
 /// 构建基础包：骨架（xdhyc 全部）→ CEDICT 词级兜底 → jieba 扩充（纯 CJK、频率标定 ≥ min_score）。
@@ -907,6 +1034,12 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
     let tables = PinyinTables::from_texts(&cedict_text, &ktghz_text);
 
     let frequency_of = |word: &str| -> u32 {
+        if let Some((_, freq)) = WORD_FREQ_PATCHES
+            .iter()
+            .find(|(patched, _)| *patched == word)
+        {
+            return *freq;
+        }
         wordfreq.get(word).copied().unwrap_or_else(|| {
             jieba
                 .get(word)
@@ -994,6 +1127,31 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         }
     }
 
+    // e) 译文词性标注（T-115 后续，用户点名）：拼音→英文译文前显示传统词性。
+    // 词性取自 jieba 词性列（load_jieba_pos），词性精修表（WORD_POS_PATCHES）
+    // 优先覆盖 jieba 误标；映射为传统英文缩写拼入译文显示串
+    // （如「生成」→ "v. to generate"）；反查键（英→中）在构建器侧剥掉前缀保持
+    // 纯净（dict_builder 经 strip_pos_prefix），不影响英文反查。
+    let jieba_pos = load_jieba_pos(&jieba_text);
+    let mut pos_labeled = 0usize;
+    for (word, (_, _, translation)) in merged.iter_mut() {
+        let Some(value) = translation.as_mut() else {
+            continue;
+        };
+        let label = WORD_POS_PATCHES
+            .iter()
+            .find(|(patched, _)| *patched == word)
+            .map(|(_, label)| *label)
+            .or_else(|| jieba_pos.get(word).and_then(|tag| pos_label(tag)));
+        let Some(label) = label else {
+            continue;
+        };
+        if !value.starts_with(label) {
+            value.insert_str(0, &format!("{label} "));
+            pos_labeled += 1;
+        }
+    }
+
     // 规范字集覆盖：以注音底表字集为基线（≈ 通用规范汉字表）。
     let mut merged_chars: HashSet<char> = HashSet::new();
     for (word, (_, _, _)) in &merged {
@@ -1042,6 +1200,7 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         jieba_expansion,
         cedict_words,
         patched_translations,
+        pos_labeled,
         char_set_coverage_pct,
         entry_count: entries.len(),
         file_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
@@ -1053,13 +1212,14 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         stats.file_size as f64 / 1_048_576.0
     );
     println!(
-        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，译文补齐 {}（T-115 后续），规范字集覆盖 {:.1}%",
+        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，译文补齐 {}，词性标注 {}（T-115 后续），规范字集覆盖 {:.1}%",
         stats.skeleton_words,
         stats.wordfreq_hits,
         stats.wordfreq_hit_pct,
         stats.jieba_expansion,
         stats.cedict_words,
         stats.patched_translations,
+        stats.pos_labeled,
         stats.char_set_coverage_pct
     );
     println!("内容 SHA-256: {}", stats.sha256);

@@ -64,6 +64,34 @@ pub fn normalize_translation_key(text: &str) -> String {
     out
 }
 
+/// 词性标注前缀白名单（m6 构建期拼入译文显示串，见 m6::pos_label）。
+/// 反查键（英→中）必须剥掉前缀，否则 `adj. good` 无法按 `good` 反查命中。
+pub const POS_PREFIXES: &[&str] = &[
+    "n.", "v.", "adj.", "adv.", "pron.", "prep.", "conj.", "int.", "num.", "cls.", "aux.",
+];
+
+/// 剥掉译文开头的词性前缀（大小写不敏感），供反查键生成使用。
+/// 前缀不在白名单时不剥；剥后为空串（纯前缀条目）时原样返回。
+#[must_use]
+pub fn strip_pos_prefix(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    for prefix in POS_PREFIXES {
+        if trimmed.len() >= prefix.len()
+            && trimmed
+                .as_bytes()
+                .get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+        {
+            let rest = trimmed[prefix.len()..].trim_start();
+            if rest.is_empty() {
+                return trimmed;
+            }
+            return rest;
+        }
+    }
+    trimmed
+}
+
 /// 词典头部。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictHeader {
@@ -160,7 +188,9 @@ impl DictHeader {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_translation_key, DictHeader, DICT_VERSION, HEADER_SIZE, MAGIC};
+    use super::{
+        normalize_translation_key, strip_pos_prefix, DictHeader, DICT_VERSION, HEADER_SIZE, MAGIC,
+    };
 
     #[test]
     fn 头部序列化往返一致() {
@@ -216,5 +246,14 @@ mod tests {
         assert_eq!(normalize_translation_key("  Hello\tWorld  "), "hello world");
         assert_eq!(normalize_translation_key("XI'AN"), "xi'an");
         assert_eq!(normalize_translation_key(""), "");
+
+        // 词性前缀剥除（反查键纯净）：小写/大写前缀都剥，非白名单不动，纯前缀保留
+        assert_eq!(strip_pos_prefix("v. to generate"), "to generate");
+        assert_eq!(strip_pos_prefix("adj. good day"), "good day");
+        assert_eq!(strip_pos_prefix("N. China"), "China");
+        assert_eq!(strip_pos_prefix("to be"), "to be");
+        assert_eq!(strip_pos_prefix("  adv. go ahead"), "go ahead");
+        assert_eq!(strip_pos_prefix("n."), "n.");
+        assert_eq!(strip_pos_prefix("节点"), "节点");
     }
 }

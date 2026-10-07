@@ -231,6 +231,10 @@ pub struct CandidateMetrics {
     pub corner_radius: i32,
     /// 字体像素高度。
     pub font_height: i32,
+    /// 拼音行小字体像素高度（T-115 后续：候选词上方拼音小字，仿微软拼音布局）。
+    pub pin_font_height: i32,
+    /// 拼音行与主文本的垂直间距（T-115 后续）。
+    pub pin_line_gap: i32,
 }
 
 impl CandidateMetrics {
@@ -257,6 +261,8 @@ impl CandidateMetrics {
             footer_height: dp(20.0),
             corner_radius: dp(8.0),
             font_height: dp(16.0),
+            pin_font_height: dp(11.0),
+            pin_line_gap: dp(3.0),
         }
     }
 
