@@ -50,6 +50,7 @@ use windows::Win32::UI::TextServices::{
 use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
 };
+use zhu_ye_core::tone::ToneMap;
 use zhu_ye_core::{
     build_contact_index, core_version, parse_vcard, BigramModel, CompositeDictionary, Dictionary,
     DictionaryFile, UserDictStore,
@@ -282,6 +283,49 @@ fn configured_default_mode() -> crate::input::InputMode {
     match config.default_mode {
         zhu_ye_core::ModeChoice::English => crate::input::InputMode::English,
         zhu_ye_core::ModeChoice::Chinese => crate::input::InputMode::Chinese,
+    }
+}
+
+/// 英文态语言档案 GUID（T-112 后续批四）：与 `scripts/ime-identity.ps1` 的
+/// `ProfileGuidEn`、`zhu_ye_core::identity::PROFILE_GUID_ZHU_YE_EN` 保持一致。
+fn en_profile_guid() -> windows::core::GUID {
+    windows::core::GUID::from_u128(zhu_ye_core::identity::PROFILE_GUID_ZHU_YE_EN)
+}
+
+/// 按激活档案决定新会话起始模式（T-112 后续批四：任务栏"未激活状态图标"）。
+///
+/// 系统把 Win+Space 选中的语言档案视为任务栏指示器状态：用户选了英文态档案时，
+/// 指示器显示"英"（我们对英文档案配置 `ying.ico`）；引擎必须同步从英文模式
+/// 起会话，否则图标与行为脱节。查询不到激活档案（非 TSF 激活上下文/旧宿主）
+/// 或激活的是中文档案时回退配置默认。Shift 单击切换是会话内状态，不改变
+/// 系统档案，因此不驱动任务栏图标（平台事实，见验收记录）。
+fn start_mode_for_profile(
+    active_profile: Option<windows::core::GUID>,
+    configured: crate::input::InputMode,
+) -> crate::input::InputMode {
+    if active_profile == Some(en_profile_guid()) {
+        crate::input::InputMode::English
+    } else {
+        configured
+    }
+}
+
+/// 查询当前线程"本 TIP + 简体中文语言"下激活的语言档案；TIP 未在系统输入
+/// 指示器中激活（如旧宿主会话）或 COM 查询失败时返回 `None`（回退配置默认）。
+fn active_language_profile() -> Option<windows::core::GUID> {
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::TextServices::{
+        CLSID_TF_InputProcessorProfiles, ITfInputProcessorProfiles,
+    };
+    unsafe {
+        let profiles: ITfInputProcessorProfiles =
+            CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER).ok()?;
+        let mut langid: u16 = 0;
+        let mut profile = windows::core::GUID::zeroed();
+        profiles
+            .GetActiveLanguageProfile(&CLSID_ZHU_YE_TIP, &mut langid, &mut profile)
+            .ok()?;
+        Some(profile)
     }
 }
 
@@ -1593,9 +1637,41 @@ fn create_engine(user_store: Option<UserDictStore>) -> InputEngine {
     match slang {
         Some(slang) => {
             product_log(zhu_ye_core::LogLevel::Info, "zhu-ye: slang-path enabled");
-            engine.with_slang(slang)
+            tone_engine(engine.with_slang(slang), plan.base.as_deref())
         }
-        None => engine,
+        None => tone_engine(engine, plan.base.as_deref()),
+    }
+}
+
+/// 装配带调拼音表（T-112 后续批四：候选窗拼音显示声调）。
+///
+/// 旁挂文件 `<基础包路径>.tones`（build_base 产出的 `base.zyct.tones`，
+/// 与大包同目录部署）；读取失败/缺失只记日志，候选拼音回退无调拼注，不阻断输入。
+fn tone_engine(engine: InputEngine, base: Option<&Path>) -> InputEngine {
+    let Some(base) = base else {
+        return engine;
+    };
+    let tone_path = std::path::PathBuf::from(format!("{}.tones", base.display()));
+    match std::fs::read_to_string(&tone_path) {
+        Ok(text) => {
+            let map = ToneMap::from_lines(&text);
+            product_log(
+                zhu_ye_core::LogLevel::Info,
+                &format!(
+                    "zhu-ye: tone-map-ok path={tone_path:?} words={} chars={}",
+                    map.words.len(),
+                    map.chars.len()
+                ),
+            );
+            engine.with_tone_map(map)
+        }
+        Err(error) => {
+            product_log(
+                zhu_ye_core::LogLevel::Info,
+                &format!("zhu-ye: tone-map-missing path={tone_path:?} ({error})"),
+            );
+            engine
+        }
     }
 }
 
@@ -1884,10 +1960,12 @@ fn create_class_factory(user_store: Option<UserDictStore>) -> IClassFactory {
 /// 创建文本服务并计入活动对象数；失败路径由 `Drop` 回滚计数。
 fn create_text_service(user_store: Option<UserDictStore>) -> IUnknown {
     object_created();
+    // T-112 后续批四：起始模式优先跟随系统激活的语言档案（Win+Space 选中
+    // 英文态档案 → 英文会话；查询不到回退配置默认）。
+    let mode = start_mode_for_profile(active_language_profile(), configured_default_mode());
     TextService {
         state: Arc::new(SharedEngine(Mutex::new(EngineState::with_start_mode(
-            user_store,
-            configured_default_mode(),
+            user_store, mode,
         )))),
     }
     .into()
@@ -1989,6 +2067,35 @@ mod tests {
 
     /// 生命周期计数是全局状态；测试并行运行时互斥，避免相互干扰。
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// T-112 后续批四：激活档案决定新会话起始模式（任务栏"未激活状态图标"
+    /// 的档案级实现）；查询不到时回退配置默认。
+    #[test]
+    fn 激活档案决定起始模式() {
+        use crate::input::InputMode;
+        assert_eq!(
+            start_mode_for_profile(Some(en_profile_guid()), InputMode::Chinese),
+            InputMode::English
+        );
+        assert_eq!(
+            start_mode_for_profile(
+                Some(windows::core::GUID::from_u128(
+                    zhu_ye_core::identity::PROFILE_GUID_ZHU_YE
+                )),
+                InputMode::English
+            ),
+            InputMode::English
+        );
+        // 查询失败（非 TSF 激活上下文）回退配置默认。
+        assert_eq!(
+            start_mode_for_profile(None, InputMode::Chinese),
+            InputMode::Chinese
+        );
+        assert_eq!(
+            start_mode_for_profile(None, InputMode::English),
+            InputMode::English
+        );
+    }
 
     /// T-046：共享引擎状态必须可跨线程迁移——语言栏/ctfmon 可能经任意
     /// RPC 线程回调 `OnClick` 进入 `Arc<SharedEngine>` 切换模式。

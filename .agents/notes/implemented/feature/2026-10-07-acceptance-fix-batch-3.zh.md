@@ -173,3 +173,4 @@ jieba 语料频次对生僻词膨胀（垸 jieba 5690 vs wordfreq 2450，会盖�
 - 图标/名称与 T-114 设置入口：[2026-10-06-taskbar-icon-zhu.md](2026-10-06-taskbar-icon-zhu.md)
 - CEDICT 真实词典导入与译文来源：[2026-09-21-real-dictionary-import.md](../../implemented/architecture/2026-09-21-real-dictionary-import.md)
 - M7 纠错/候选排序（错序容错补充而非取代）：[2026-09-19-candidate-ranking-static-model.md](../../implemented/feature/2026-09-19-candidate-ranking-static-model.md)
+- 批四（拼音带声调化与矩形横截断修复、双语言档案图标）：[2026-10-07-acceptance-fix-batch-4.zh.md](2026-10-07-acceptance-fix-batch-4.zh.md)

@@ -33,6 +33,7 @@ pub mod suggestion;
 pub mod symbols;
 pub mod theme_file;
 pub mod time;
+pub mod tone;
 pub mod translate;
 pub mod units;
 pub mod update;

@@ -13,6 +13,7 @@ use zhu_ye_core::candidate::{
 };
 use zhu_ye_core::dict::{Dictionary, InMemoryDictionary};
 use zhu_ye_core::pinyin::{segment_all, SyllableTable};
+use zhu_ye_core::tone::ToneMap;
 use zhu_ye_core::{unix_now, DictionaryFile, Result, UserDictStore, UserDictionary};
 
 use crate::candidate_ui::{CandidateUiItem, CandidateUiView};
@@ -119,6 +120,9 @@ pub struct InputEngine {
     /// 模糊音与纠错开关（FR-024；O-05 修订）。默认开；关闭后纠错组
     /// （模糊替换 + 少字母补全，`corrected_candidates`）不生成。
     enable_fuzzy: bool,
+    /// 带调拼音表（T-112 后续批四：候选窗拼音显示声调）。旁挂 tone 文件
+    /// 由调用方装配；未装配（默认空表）时候选拼音回退无调拼注。
+    tone: ToneMap,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -193,7 +197,25 @@ impl InputEngine {
             en_lexicon: None,
             enable_abbreviation: true,
             enable_fuzzy: true,
+            tone: ToneMap::default(),
         }
+    }
+
+    /// 装配带调拼音表（T-112 后续批四：候选窗拼音显示声调）。
+    #[must_use]
+    pub fn with_tone_map(mut self, tone: ToneMap) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    /// 候选词的带调空格拼音；无词级/字级带调数据时返回空串（回退无调拼注）。
+    fn tone_spaced(&self, word: &str) -> String {
+        self.tone.word_tone_spaced(word).unwrap_or_default()
+    }
+
+    /// 候选 → 候选窗条目（含带调拼音装配）。
+    fn ui_item_for(&self, candidate: &Candidate) -> CandidateUiItem {
+        candidate_ui_item_tone(candidate, &self.tone_spaced(&candidate.text))
     }
 
     /// 挂载英文词表文件（T-085，`en.zyen`）；`None`（默认）回退第五期内嵌静态表。
@@ -1086,6 +1108,7 @@ impl InputEngine {
                         text: text.clone(),
                         translation: String::new(),
                         pinyin: String::new(),
+                        pinyin_tone: String::new(),
                         source: zhu_ye_core::candidate::CandidateSource::Suggestion,
                     })
                     .collect(),
@@ -1100,7 +1123,11 @@ impl InputEngine {
                 page_count: 1,
                 selected: self.selected_on_page,
                 translation_mode: false,
-                items: self.candidates.iter().map(candidate_ui_item).collect(),
+                items: self
+                    .candidates
+                    .iter()
+                    .map(|c| self.ui_item_for(c))
+                    .collect(),
             };
         }
         if self.v_active() {
@@ -1112,7 +1139,11 @@ impl InputEngine {
                 page_count: 1,
                 selected: self.selected_on_page,
                 translation_mode: false,
-                items: self.candidates.iter().map(candidate_ui_item).collect(),
+                items: self
+                    .candidates
+                    .iter()
+                    .map(|c| self.ui_item_for(c))
+                    .collect(),
             };
         }
         if self.mode != InputMode::Chinese {
@@ -1141,7 +1172,7 @@ impl InputEngine {
             items: self
                 .current_layer_candidates()
                 .iter()
-                .map(candidate_ui_item)
+                .map(|c| self.ui_item_for(c))
                 .collect(),
         }
     }
@@ -1604,11 +1635,14 @@ impl InputEngine {
     }
 }
 
-fn candidate_ui_item(candidate: &Candidate) -> CandidateUiItem {
+/// 候选 → 候选窗条目；带调拼音（T-112 后续批四：声调显示）仅在候选文本
+/// 词级/字级带调音齐全时填入，否则留空回退无调拼注。
+fn candidate_ui_item_tone(candidate: &Candidate, tone_spaced: &str) -> CandidateUiItem {
     CandidateUiItem {
         text: candidate.text.clone(),
         translation: candidate.translation.clone().unwrap_or_default(),
         pinyin: candidate.pinyin.clone().unwrap_or_default(),
+        pinyin_tone: tone_spaced.to_owned(),
         source: candidate.source.clone(),
     }
 }
@@ -1641,6 +1675,7 @@ mod tests {
     use zhu_ye_core::bigram::InMemoryBigramModel;
     use zhu_ye_core::generate_candidates;
     use zhu_ye_core::pinyin::SyllableTable;
+    use zhu_ye_core::tone::ToneMap;
     use zhu_ye_core::Dictionary;
     use zhu_ye_core::UserDictStore;
     use zhu_ye_core::{build_v2, seed_bigrams, seed_entries, DictionaryEntry};
@@ -2287,6 +2322,41 @@ mod tests {
             cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
         );
         assert_eq!(zh.unwrap().pinyin.as_deref(), Some("zhangh"));
+    }
+
+    #[test]
+    fn 带调拼音装配后候选视图携带声调() {
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("正确", "zhengque", 300));
+        let dir = temp_dir("tone-pin");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        // 未装配带调表 -> pinyin_tone 为空（回退无调拼注）
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        type_text(&mut engine, "zhengque");
+        let view = engine.candidate_ui_view();
+        let item = view.items.iter().find(|i| i.text == "正确").unwrap();
+        assert!(item.pinyin_tone.is_empty());
+
+        // 词级带调命中
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        engine = engine.with_tone_map(ToneMap::from_lines("#word\n正确\tzhèng què\n"));
+        type_text(&mut engine, "zhengque");
+        let view = engine.candidate_ui_view();
+        let item = view.items.iter().find(|i| i.text == "正确").unwrap();
+        assert_eq!(item.pinyin_tone, "zhèng què");
+
+        // 字级兜底逐字拼合
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        engine = engine.with_tone_map(ToneMap::from_lines("#char\n正\tzhèng\n确\tquè\n"));
+        type_text(&mut engine, "zhengque");
+        let view = engine.candidate_ui_view();
+        let item = view.items.iter().find(|i| i.text == "正确").unwrap();
+        assert_eq!(item.pinyin_tone, "zhèng què");
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

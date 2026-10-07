@@ -43,9 +43,13 @@ Win11 任务栏指示器按 TIP 语言档注册的 `IconFile` 加载图标资源
 名称字段；Win11 任务栏指示器不读第三方语言栏项描述，且会破坏
 "竹叶输入法"完整名称。
 
-**`IconFile` 指向独立 `.ico` 文件。** 否决：TSF 图标按 DLL/exe 资源
-路径解析（微软拼音 `ResourceDll.dll`、搜狗 `SogouTSF.ime` 均内嵌），
-独立 ico 文件的加载路径无官方先例保证。
+**`IconFile` 指向独立 `.ico` 文件。** 否决（中文档案）：TSF 图标按
+DLL/exe 资源路径解析（微软拼音 `ResourceDll.dll`、搜狗
+`SogouTSF.ime` 均内嵌），独立 ico 文件的加载路径在当时无官方先例
+保证。**批四修订**（[2026-10-07-acceptance-fix-batch-4.md](2026-10-07-acceptance-fix-batch-4.md)）：
+英文态档案 `{EF42481A-…}` 采用独立 `ying.ico` 作为其 IconFile（Rime
+weasel 以 weasel.ico 文件为档案图标的成熟先例，任务栏指示器可正常
+提取）；中文档案维持 DLL 内嵌（随版本化 DLL 指针切换，零文件依赖）。
 
 **语言栏项目 `GetIcon` 动态绘"竹"。** 否决：T-046 记录已证 Win11
 任务栏不渲染第三方语言栏项目；该机制只影响经典语言栏。
@@ -62,3 +66,8 @@ Win11 任务栏指示器按 TIP 语言档注册的 `IconFile` 加载图标资源
 - 版本化部署语义不变：`IconFile` 指向 `Program Files\zhu-ye-ime\tsf\
   zhu_ye_ime.dll`，随 DLL 更新即换图标。
 - tests 更新：`getinfo身份与描述正确` 断言完整名称逐字与空终止。
+- **批四扩展（2026-10-07）**：同 TIP 树注册英文态第二语言档案
+  `{EF42481A-233D-4035-A80A-7F416BE0E6CA}`（IconFile=独立
+  `ying.ico`），Win+Space 切换中/英档案使任务栏指示器显示竹/英；
+  中文档案仍走 DLL 内嵌 + IconFile=DLL 指针。见
+  [2026-10-07-acceptance-fix-batch-4.md](2026-10-07-acceptance-fix-batch-4.md)。

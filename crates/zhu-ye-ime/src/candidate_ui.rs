@@ -23,6 +23,9 @@ pub struct CandidateUiItem {
     pub translation: String,
     /// 拼音串（T-115 后续：候选窗按字展示"词（音节）"用；无拼音时为空）。
     pub pinyin: String,
+    /// 空格分隔的带调拼音（T-112 后续批四：候选窗上方拼音行显示声调；
+    /// 如 `生成` → `shēng chéng`）。为空时回退 `pinyin` 的无调拼注。
+    pub pinyin_tone: String,
     /// 候选来源，用于 UI 弱化标识。
     pub source: CandidateSource,
 }
@@ -463,6 +466,7 @@ mod tests {
                         String::new()
                     },
                     pinyin: String::new(),
+                    pinyin_tone: String::new(),
                     source: CandidateSource::Static,
                 })
                 .collect(),
@@ -474,6 +478,7 @@ mod tests {
             text: text.to_owned(),
             translation: translation.to_owned(),
             pinyin: String::new(),
+            pinyin_tone: String::new(),
             source: CandidateSource::Slang,
         }
     }
@@ -493,6 +498,7 @@ mod tests {
             text: "你好".to_owned(),
             translation: "hello".to_owned(),
             pinyin: "nihao".to_owned(),
+            pinyin_tone: "nǐ hǎo".to_owned(),
             source: CandidateSource::Static,
         };
         assert_eq!(display_main_text(&item, false), "你好");

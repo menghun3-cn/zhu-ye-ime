@@ -187,13 +187,97 @@ pub fn source_check(root: &Path) -> Result<SourceCheckStats, String> {
 // 拼音注音
 // ---------------------------------------------------------------------------
 
+/// 把 CC-CEDICT 数字调音节（`zhong1`、`guo2`、`nü3`、`u:4`、无调 `zhe`）转为
+/// 带声调符号音节：`ü` 保留、`u:` 归一为 `ü`；调号 5（轻读）与无调号不标注。
+/// 非拼音字符返回 `None`。
+fn tone_digits_to_marks(syllable: &str) -> Option<String> {
+    let body = syllable.replace("u:", "ü");
+    let mut chars: Vec<char> = body.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let tone = match chars.last().copied() {
+        Some(last @ '1'..='5') => {
+            chars.pop();
+            last.to_digit(10)?
+        }
+        _ => 0,
+    };
+    // 尾部声调数字分离后，剩余必须全为拼音字母（`zhong!` 这类拒绝）。
+    if chars
+        .iter()
+        .any(|c| !(c.is_ascii_alphabetic() || *c == 'ü'))
+    {
+        return None;
+    }
+    if tone == 0 || tone == 5 {
+        return Some(chars.into_iter().collect());
+    }
+    // 标调位置：a > e > o > i/u/ü 并列取后者（ui→uǐ、iu→iū）。
+    let pos = chars
+        .iter()
+        .position(|c| *c == 'a')
+        .or_else(|| chars.iter().position(|c| *c == 'e'))
+        .or_else(|| chars.iter().position(|c| *c == 'o'))
+        .or_else(|| chars.iter().rposition(|c| matches!(c, 'i' | 'u' | 'ü')))?;
+    let marked = match (tone, chars[pos]) {
+        (1, 'a') => 'ā',
+        (2, 'a') => 'á',
+        (3, 'a') => 'ǎ',
+        (4, 'a') => 'à',
+        (1, 'e') => 'ē',
+        (2, 'e') => 'é',
+        (3, 'e') => 'ě',
+        (4, 'e') => 'è',
+        (1, 'o') => 'ō',
+        (2, 'o') => 'ó',
+        (3, 'o') => 'ǒ',
+        (4, 'o') => 'ò',
+        (1, 'i') => 'ī',
+        (2, 'i') => 'í',
+        (3, 'i') => 'ǐ',
+        (4, 'i') => 'ì',
+        (1, 'u') => 'ū',
+        (2, 'u') => 'ú',
+        (3, 'u') => 'ǔ',
+        (4, 'u') => 'ù',
+        (1, 'ü') => 'ǖ',
+        (2, 'ü') => 'ǘ',
+        (3, 'ü') => 'ǚ',
+        (4, 'ü') => 'ǜ',
+        _ => return Some(chars.into_iter().collect()),
+    };
+    chars[pos] = marked;
+    Some(chars.into_iter().collect())
+}
+
+/// 从 CC-CEDICT 拼音列构建"词 → 空格分隔带调拼音"；音节数不符或转换失败返回 `None`。
+fn build_word_tone(marked: &str, expect_chars: usize) -> Option<String> {
+    let mut syllables = Vec::new();
+    for part in marked.split([' ', '\'']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        syllables.push(tone_digits_to_marks(part)?);
+    }
+    if syllables.len() != expect_chars {
+        return None;
+    }
+    Some(syllables.join(" "))
+}
+
 /// 汉字拼音注音表：词级（CC-CEDICT）优先，单字级（kTGHZ2013）兜底。
 ///
 /// 领域词包（THUOCL 等）只提供汉字词，不含拼音；本表负责补齐拼音并
 /// 逐音节校验引擎标准全拼表，未覆盖字或非法音节的词不进入构建。
+/// 带调表（`*_tone`）供候选窗声调显示（旁挂 tone 文件，见
+/// `emit_tone_map`）；无调表维持输入匹配语义（zyct 拼音键）。
 pub struct PinyinTables {
     word_pinyin: HashMap<String, String>,
     char_pinyin: HashMap<char, String>,
+    word_pinyin_tone: HashMap<String, String>,
+    char_pinyin_tone: HashMap<char, String>,
     table: SyllableTable,
 }
 
@@ -201,7 +285,9 @@ pub struct PinyinTables {
 /// 「说」shuì,shuō），首个未必是日常常用音；无 CEDICT 词级注音的多字词
 /// （如「想着」「说来」）逐字注音时会落到生僻音。此表把常用音提升为
 /// 单字注音首选（用户证据：#4 上屏词「想着」「说来」）。
-const CHAR_PREFERRED_PINYIN: &[(&str, &str)] = &[("着", "zhe"), ("说", "shuo"), ("还", "hai")];
+/// 表值用**带调符号**（`shuō`/`hái`；「着」的常用读法为轻声，保持无调 `zhe`），
+/// 无调处经 `strip_tone_marks` 归一。
+const CHAR_PREFERRED_PINYIN: &[(&str, &str)] = &[("着", "zhe"), ("说", "shuō"), ("还", "hái")];
 
 impl PinyinTables {
     /// 由 CC-CEDICT 文本与 Unihan kTGHZ2013 文本构建注音表。
@@ -209,6 +295,8 @@ impl PinyinTables {
         let mut tables = PinyinTables {
             word_pinyin: HashMap::new(),
             char_pinyin: HashMap::new(),
+            word_pinyin_tone: HashMap::new(),
+            char_pinyin_tone: HashMap::new(),
             table: SyllableTable::standard(),
         };
         for line in cedict_text.lines() {
@@ -231,8 +319,13 @@ impl PinyinTables {
             // 一词多音时保留首个读音（CC-CEDICT 条目排序即常用度优先）。
             tables
                 .word_pinyin
-                .entry(word)
+                .entry(word.clone())
                 .or_insert_with(|| syllables.concat());
+            // 带调词音（候选窗声调显示）：数字调→符号调，空格分隔；转换失败
+            // 只缺该词的带调，不影响无调注音。
+            if let Some(tone) = build_word_tone(&marked, word.chars().count()) {
+                tables.word_pinyin_tone.entry(word).or_insert(tone);
+            }
         }
         for line in ktghz_text.lines() {
             let line = line.trim();
@@ -256,12 +349,19 @@ impl PinyinTables {
                 continue;
             };
             // 常用音覆盖（见 CHAR_PREFERRED_PINYIN）：匹配则用表值而非
-            // kTGHZ 首个读音。
-            let pinyin = CHAR_PREFERRED_PINYIN
+            // kTGHZ 首个读音。无调表用剥离声调后的首选（表值带调），
+            // 带调表（候选窗声调显示）用表值原样。
+            let preferred_tone = CHAR_PREFERRED_PINYIN
                 .iter()
                 .find(|(ch, _)| ch.starts_with(hanzi))
-                .map_or(pinyin, |(_, preferred)| (*preferred).to_owned());
+                .map(|(_, preferred)| (*preferred).to_owned());
+            let pinyin = preferred_tone
+                .as_deref()
+                .and_then(strip_tone_marks)
+                .unwrap_or(pinyin);
             tables.char_pinyin.insert(hanzi, pinyin);
+            let tone = preferred_tone.unwrap_or_else(|| raw.to_owned());
+            tables.char_pinyin_tone.insert(hanzi, tone);
         }
         tables
     }
@@ -283,6 +383,42 @@ impl PinyinTables {
             return None;
         }
         Some(syllables.concat())
+    }
+
+    /// 为单个词生成空格分隔的带调拼音（候选窗声调显示）：词级带调命中直接
+    /// 返回；否则逐字查字级带调表拼合。任一字符缺字级带调音时返回 `None`。
+    pub fn annotate_tone(&self, word: &str) -> Option<String> {
+        if let Some(tone) = self.word_pinyin_tone.get(word) {
+            return Some(tone.clone());
+        }
+        let mut syllables = Vec::with_capacity(word.chars().count());
+        for ch in word.chars() {
+            let syllable = self.char_pinyin_tone.get(&ch)?;
+            syllables.push(syllable.as_str());
+        }
+        Some(syllables.join(" "))
+    }
+
+    /// 字级带调表大小（供诊断使用）。
+    #[must_use]
+    pub fn char_tone_map_len(&self) -> usize {
+        self.char_pinyin_tone.len()
+    }
+
+    /// 词级带调表大小（供诊断使用）。
+    #[must_use]
+    pub fn word_tone_map_len(&self) -> usize {
+        self.word_pinyin_tone.len()
+    }
+
+    /// 词级带调表迭代（供 tone 文件导出）。
+    pub fn word_tone_map(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.word_pinyin_tone.iter()
+    }
+
+    /// 字级带调表迭代（供 tone 文件导出）。
+    pub fn char_tone_map(&self) -> impl Iterator<Item = (&char, &String)> {
+        self.char_pinyin_tone.iter()
     }
 
     /// 词级注音表大小（供诊断使用）。
@@ -1223,7 +1359,46 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         stats.char_set_coverage_pct
     );
     println!("内容 SHA-256: {}", stats.sha256);
+    // T-112 后续批四：候选窗声调显示旁挂文件（与 zyct 同名 .tones）。
+    let tone_lines = emit_tone_map(root, &tables)?;
+    println!(
+        "旁挂带调拼音表 base.zyct.tones：词级 {} / 字级 {} 条，共 {} 行",
+        tables.word_tone_map_len(),
+        tables.char_tone_map_len(),
+        tone_lines
+    );
     Ok(stats)
+}
+
+/// 输出带调拼音旁挂文件（`data/artifacts/base.zyct.tones`）：`#word` 段
+/// 为"词<TAB>空格分隔带调拼音"，`#char` 段为"字<TAB>带调音"（kTGHZ
+/// 符号调或常用音覆盖）。运行期由输入法加载（`zhu_ye_core::tone::ToneMap`），
+/// zyct 格式不变。返回写入总行数。
+pub fn emit_tone_map(root: &Path, tables: &PinyinTables) -> Result<u64, String> {
+    let mut words: Vec<(&String, &String)> = tables.word_tone_map().collect();
+    words.sort_by(|a, b| a.0.cmp(b.0));
+    let mut chars: Vec<(&char, &String)> = tables.char_tone_map().collect();
+    chars.sort_by(|a, b| a.0.cmp(b.0));
+    let mut buf = String::with_capacity(words.len() * 24 + chars.len() * 12 + 16);
+    buf.push_str("#word\n");
+    for (word, tone) in &words {
+        buf.push_str(word);
+        buf.push('\t');
+        buf.push_str(tone);
+        buf.push('\n');
+    }
+    buf.push_str("#char\n");
+    for (ch, tone) in &chars {
+        buf.push(**ch);
+        buf.push('\t');
+        buf.push_str(tone);
+        buf.push('\n');
+    }
+    let dir = root.join(ARTIFACTS_DIR);
+    fs::create_dir_all(&dir).map_err(|error| format!("创建产物目录失败: {error}"))?;
+    fs::write(dir.join("base.zyct.tones"), buf)
+        .map_err(|error| format!("写带调拼音表失败: {error}"))?;
+    Ok(u64::try_from(words.len() + chars.len()).unwrap_or(u64::MAX))
 }
 
 // ---------------------------------------------------------------------------
@@ -1424,6 +1599,47 @@ mod tests {
         assert_eq!(tables.annotate("㑇㑊"), None);
         assert_eq!(tables.word_map_len(), 2);
         assert_eq!(tables.char_map_len(), 2);
+    }
+
+    #[test]
+    fn 带调注音_数字调转符号调与常用音覆盖() {
+        let cedict = "傳統 简体 [jian3 ti3] /simplified/\n想着 想着 [xiang3 zhe5] /to think of/\n中国 中国 [zhong1 guo2] /China/\n";
+        let ktghz = "U+4E2D: zhōng,zhòng  # 中\nU+56FD: guó  # 国\nU+7740: zhāo,zháo,zhe,zhuó  # 着\nU+8BF4: shuì,shuō  # 说\nU+8FD8: hái,huán  # 还\n";
+        let tables = PinyinTables::from_texts(cedict, ktghz);
+        // 词级带调：数字调转符号调、空格分隔；轻声音节（zhe5）不标调。
+        assert_eq!(tables.annotate_tone("简体").as_deref(), Some("jiǎn tǐ"));
+        assert_eq!(tables.annotate_tone("想着").as_deref(), Some("xiǎng zhe"));
+        assert_eq!(tables.annotate_tone("中国").as_deref(), Some("zhōng guó"));
+        // 字级带调兜底：精心挑选常用音（着→zhe 轻声、说→shuō、还→hái）。
+        assert_eq!(
+            tables.annotate_tone("着说还").as_deref(),
+            Some("zhe shuō hái")
+        );
+        // 无调注音不受带调常用音影响（说→shuo 而非 shuì）。
+        assert_eq!(tables.annotate("说").as_deref(), Some("shuo"));
+        assert_eq!(tables.annotate("中国").as_deref(), Some("zhongguo"));
+        // 未覆盖字 -> 无带调
+        assert_eq!(tables.annotate_tone("中国㑇"), None);
+        // 统计
+        assert_eq!(tables.word_tone_map_len(), 3);
+    }
+
+    #[test]
+    fn 数字调转符号调_规则() {
+        use super::tone_digits_to_marks as conv;
+        assert_eq!(conv("zhong1").as_deref(), Some("zhōng"));
+        assert_eq!(conv("guo2").as_deref(), Some("guó"));
+        assert_eq!(conv("xiang3").as_deref(), Some("xiǎng"));
+        assert_eq!(conv("zhe5").as_deref(), Some("zhe"));
+        assert_eq!(conv("zhe").as_deref(), Some("zhe"));
+        // i/u 并列：ui→uǐ（调在后），iu→iū。
+        assert_eq!(conv("kui3").as_deref(), Some("kuǐ"));
+        assert_eq!(conv("liu2").as_deref(), Some("liú"));
+        // ü 保留、u: 归一
+        assert_eq!(conv("lü4").as_deref(), Some("lǜ"));
+        assert_eq!(conv("u:e5").as_deref(), Some("üe"));
+        // 非法字符
+        assert_eq!(conv("zhong!"), None);
     }
 
     #[test]

@@ -457,6 +457,10 @@ impl CandidateWindowState {
             // 主文本不再采用内联"词（音节）"拼注，保持纯词汇。
             let pin_text = if self.view.translation_mode {
                 String::new()
+            } else if !item.pinyin_tone.is_empty() {
+                // T-112 后续批四：带调拼音优先（`生成` → `shēng chéng`）；
+                // 词级/字级带调表齐备时不再回退无调拼注。
+                item.pinyin_tone.clone()
             } else {
                 spell_pinyin(&base, &item.pinyin)
             };
@@ -493,7 +497,9 @@ impl CandidateWindowState {
                 let pin_rect = UiRect {
                     left: main_col.left,
                     top: row_ui.top,
-                    right: main_col.right,
+                    // 拼音带不随主文本列宽截断：拼音（ASCII）比同宽汉字更宽，
+                    // 用整行宽度绘制（拼音带区域无译文，可延伸到行尾）。
+                    right: row_ui.right,
                     bottom: pin_bottom,
                 };
                 let _ = unsafe { SelectObject(hdc, self.pin_font.into()) };
