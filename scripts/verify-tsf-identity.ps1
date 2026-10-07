@@ -80,7 +80,6 @@ $psInstallDirRelative = if ($psInstallSegments.Count -ge 2) {
 $pairs = @(
     @('TipClsid', (Get-RustGuidConst 'CLSID_ZHU_YE_TIP'), $psIdentity['TipClsid']),
     @('ProfileGuid', (Get-RustGuidConst 'PROFILE_GUID_ZHU_YE'), $psIdentity['ProfileGuid']),
-    @('ProfileGuidEn', (Get-RustGuidConst 'PROFILE_GUID_ZHU_YE_EN'), $psIdentity['ProfileGuidEn']),
     @('KeyboardCategoryGuid(TFCAT)', (Get-RustGuidConst 'TFCAT_ZHU_YE_KEYBOARD'),
         $psIdentity['KeyboardCategoryGuid']),
     @('LanguageIdHex', (Get-RustStrConst 'TSF_LANGUAGE_ID_HEX'), $psIdentity['LanguageIdHex']),

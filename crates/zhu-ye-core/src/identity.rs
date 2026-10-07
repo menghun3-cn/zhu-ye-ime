@@ -24,18 +24,6 @@ pub const EN_WORDBOOK_FILE_NAME: &str = "en.zyen";
 /// 与 `scripts/ime-identity.ps1` 中的 `ProfileGuid` 保持一致。
 pub const PROFILE_GUID_ZHU_YE: u128 = 0x6315FE74_92C3_439B_8CDF_FDB6E43EDAF1;
 
-/// 简体中文（zh-CN，LCID 0x0804）下的**英文态**语言配置文件 GUID
-/// （T-112 后续批四：任务栏"输入法禁用/未激活状态图标"）。
-///
-/// 系统任务栏输入指示器（Win11）显示"输入法禁用"斜杠圆圈图标发生在**没有
-/// 可用输入法被启用**时，第三方 TSF 无法自行注册该图标；仿微软拼音"英"态的
-/// 正规替代是注册第二个语言档案（同 TIP 树、同 0x0804 段，独立 GUID），
-/// 让 Win+Space 在"竹叶中文"与"竹叶英文"两个档案间切换，任务栏图标随档案
-/// 显示竹/英。引擎装配时读取激活档案决定新会话起始模式（见
-/// `zhu_ye_ime::tsf::start_mode_for_profile`）。与 `scripts/ime-identity.ps1`
-/// 的 `ProfileGuidEn` 保持一致。
-pub const PROFILE_GUID_ZHU_YE_EN: u128 = 0xEF42481A_233D_4035_A80A_7F416BE0E6CA;
-
 /// 键盘输入处理器（TIP）类别的 TFCAT GUID，与 `scripts/ime-identity.ps1` 中的
 /// `KeyboardCategoryGuid` 保持一致；二级修复重建 `Category\Category` 与
 /// `Category\Item` 两棵子树时使用。
@@ -73,8 +61,7 @@ pub fn guid_text(value: u128) -> String {
 mod tests {
     use super::{
         guid_text, CLSID_ZHU_YE_TIP, DICTIONARY_FILE_NAME, EN_WORDBOOK_FILE_NAME,
-        PROFILE_GUID_ZHU_YE, PROFILE_GUID_ZHU_YE_EN, TFCAT_ZHU_YE_KEYBOARD,
-        TSF_INSTALL_DIR_RELATIVE, TSF_LANGUAGE_ID_HEX,
+        PROFILE_GUID_ZHU_YE, TFCAT_ZHU_YE_KEYBOARD, TSF_INSTALL_DIR_RELATIVE, TSF_LANGUAGE_ID_HEX,
     };
 
     #[test]
@@ -88,10 +75,6 @@ mod tests {
         assert_eq!(
             guid_text(PROFILE_GUID_ZHU_YE),
             "{6315FE74-92C3-439B-8CDF-FDB6E43EDAF1}"
-        );
-        assert_eq!(
-            guid_text(PROFILE_GUID_ZHU_YE_EN),
-            "{EF42481A-233D-4035-A80A-7F416BE0E6CA}"
         );
         assert_eq!(
             guid_text(TFCAT_ZHU_YE_KEYBOARD),

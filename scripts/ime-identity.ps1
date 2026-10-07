@@ -20,8 +20,6 @@ $script:TsfIdentity = [ordered]@{
     DisplayName            = '竹叶输入法'
     TipClsid               = '{E54D6682-8650-40E7-A9EE-6FD1137849AE}'
     ProfileGuid            = '{6315FE74-92C3-439B-8CDF-FDB6E43EDAF1}'
-    ProfileGuidEn          = '{EF42481A-233D-4035-A80A-7F416BE0E6CA}'
-    DisplayNameEn          = '竹叶输入法（英文）'
     KeyboardCategoryGuid   = '{34745C63-B2F0-4784-8B67-5E12C8701A31}'
     LanguageIdHex          = '0x00000804'
     DllName                = 'zhu-ye-ime.dll'
@@ -94,19 +92,6 @@ function New-TsfRegistration {
     Set-TsfRegistryValue -Path $profilePath -Name 'IconFile' -Value $DllPath
     Set-TsfRegistryValue -Path $profilePath -Name 'IconIndex' -Value 0 -Kind ([Microsoft.Win32.RegistryValueKind]::DWord)
 
-    # 英文态语言档案（T-112 后续批四：任务栏"未激活状态"图标）：同 TIP 树、
-    # 同 0x0804 段第二个语言档案，Win+Space 可切换"竹叶中文⇄竹叶英文"，
-    # 任务栏指示器随档案显示竹/英图标；引擎按激活档案装配起始模式
-    # （tsf.rs start_mode_for_profile）。IconFile 指向独立 ying.ico 文件
-    # （部署位 tsf\ying.ico，与 install.ps1 分发动作保持一致）。
-    $profileEnPath = "$tipPath\LanguageProfile\$($tip['LanguageIdHex'])\$($tip['ProfileGuidEn'])"
-    $null = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($profileEnPath)
-    Set-TsfRegistryValue -Path $profileEnPath -Name 'Description' -Value $tip['DisplayNameEn']
-    Set-TsfRegistryValue -Path $profileEnPath -Name 'Display Description' -Value $tip['DisplayNameEn']
-    Set-TsfRegistryValue -Path $profileEnPath -Name 'Enable' -Value 1 -Kind ([Microsoft.Win32.RegistryValueKind]::DWord)
-    Set-TsfRegistryValue -Path $profileEnPath -Name 'IconFile' -Value (Join-Path (Get-TsfInstallDir) 'ying.ico')
-    Set-TsfRegistryValue -Path $profileEnPath -Name 'IconIndex' -Value 0 -Kind ([Microsoft.Win32.RegistryValueKind]::DWord)
-
     # 设置 GUI 入口（T-115 后续）：TIP 键 EnableConfiguration=1 让系统"按键
     # 选项/键盘选项"页对该输入法显示配置入口，点击经 ITfFnConfigure::Show
     # （T-114 已实现）拉起设置窗口。
@@ -141,17 +126,6 @@ function Test-TsfRegistration {
         if ($profileKey.GetValue('Enable', -1) -cne 1) { return $false }
     } finally {
         $profileKey.Dispose()
-    }
-
-    # 英文态档案（T-112 后续批四）：Enable=1 且 IconFile 指向存在的 ying.ico。
-    $profileEnPath = "$tipPath\LanguageProfile\$($script:TsfIdentity['LanguageIdHex'])\$($script:TsfIdentity['ProfileGuidEn'])"
-    $profileEnKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($profileEnPath, $false)
-    if ($null -eq $profileEnKey) { return $false }
-    try {
-        if ($profileEnKey.GetValue('Enable', -1) -cne 1) { return $false }
-        if (-not (Test-Path -LiteralPath ([string]$profileEnKey.GetValue('IconFile')))) { return $false }
-    } finally {
-        $profileEnKey.Dispose()
     }
 
     $tipKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($tipPath, $false)

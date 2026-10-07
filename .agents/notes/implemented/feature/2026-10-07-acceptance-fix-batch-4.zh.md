@@ -62,6 +62,10 @@ Status: implemented
 
 ### 2. 任务栏"未激活状态图标"：双语言档案（方向 a 的忠实子集）
 
+> **已被批五回退**（[2026-10-07-single-profile-revert.zh.md](2026-10-07-single-profile-revert.zh.md)）：
+> 用户明确要求语言列表保持单一条目，双档案全链（注册/引擎装配/
+> ying.ico/worker copy-icon）已移除；本段仅作决策记录保留。
+
 **平台事实（先查明）**：
 
 - Win11 任务栏的**斜杠圆圈"输入法禁用"图标**是由系统在
@@ -167,3 +171,5 @@ DLL），且与任务栏指示器是两套 UI，用户要求的是指示器本�
   [2026-09-28-language-bar-mode-icon.zh.md](2026-09-28-language-bar-mode-icon.zh.md)
 - CEDICT 真实词典导入与译文来源：
   [2026-09-21-real-dictionary-import.zh.md](../../implemented/architecture/2026-09-21-real-dictionary-import.zh.md)
+- 批五（本批 #2 双档案的回退记录）：
+  [2026-10-07-single-profile-revert.zh.md](2026-10-07-single-profile-revert.zh.md)
