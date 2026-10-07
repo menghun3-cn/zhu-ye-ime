@@ -35,6 +35,7 @@ pub mod theme_file;
 pub mod time;
 pub mod tone;
 pub mod translate;
+pub mod tray_state;
 pub mod units;
 pub mod update;
 pub mod update_status;

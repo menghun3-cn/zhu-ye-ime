@@ -440,9 +440,13 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
                 let state_weak = Arc::downgrade(&self.state.clone());
                 let click_handler = Box::new(move || {
                     let state = state_weak.upgrade()?;
-                    let mut guard = state.lock().ok()?;
-                    guard.engine.toggle_mode();
-                    Some(guard.engine.mode())
+                    let mode = {
+                        let mut guard = state.lock().ok()?;
+                        guard.engine.toggle_mode();
+                        guard.engine.mode()
+                    };
+                    notify_tray_state(mode);
+                    Some(mode)
                 });
                 match LangBarHandle::register(&thread_mgr, state.engine.mode(), click_handler) {
                     Ok(handle) => {
@@ -1136,6 +1140,10 @@ fn sync_engine(state: &Arc<SharedEngine>, action: KeyAction) {
         if let Some(handle) = lang_bar {
             handle.set_mode(mode);
         }
+        // 托盘状态桥（T-112 后续批六）：与语言栏同域——切换动作在锁内
+        // 完成、状态通知在锁外发送，放一行即覆盖所有走 sync_engine 的
+        // 切换入口（Shift 弹起/语言栏点击/设置回调）。
+        notify_tray_state(mode);
         return;
     }
 
@@ -1785,6 +1793,28 @@ fn config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("config.json"))
 }
 
+/// 把当前中英模式写进托盘状态桥
+/// （`%APPDATA%\zhu-ye-ime\tray-state`，T-112 后续批六）。
+///
+/// 输入法本体是 TSF DLL、被各宿主进程加载，无法自持托盘图标；常驻托盘
+/// 程序 `zhu-ye-tray`（bin\ 部署位，HKCU Run 自启）轮询该文件切换
+/// 中/英图标。写入原子（tmp+rename）、失败只记日志降级，绝不阻断输入。
+fn notify_tray_state(mode: crate::input::InputMode) {
+    let Some(root) = appdata_root() else {
+        return;
+    };
+    let text = match mode {
+        crate::input::InputMode::Chinese => zhu_ye_core::tray_state::MODE_CHINESE,
+        crate::input::InputMode::English => zhu_ye_core::tray_state::MODE_ENGLISH,
+    };
+    if let Err(error) = zhu_ye_core::tray_state::write_tray_state(&root, text) {
+        product_log(
+            zhu_ye_core::LogLevel::Info,
+            &format!("zhu-ye: tray-state-write-fail ({error})"),
+        );
+    }
+}
+
 /// 基础包目录解析（M6-R）：显式环境变量 > DLL 同目录（安装器写入）
 /// > 用户数据目录。返回目录由调用方拼接 `dictionary.zyct`。
 ///
@@ -1917,10 +1947,13 @@ fn create_class_factory(user_store: Option<UserDictStore>) -> IClassFactory {
 /// 创建文本服务并计入活动对象数；失败路径由 `Drop` 回滚计数。
 fn create_text_service(user_store: Option<UserDictStore>) -> IUnknown {
     object_created();
+    let mode = configured_default_mode();
+    // 托盘状态桥（T-112 后续批六）：新会话确定起始模式后立即同步一次，
+    // 让托盘从启动即反映"最近激活会话"的模式（多宿主并存时取最后一次）。
+    notify_tray_state(mode);
     TextService {
         state: Arc::new(SharedEngine(Mutex::new(EngineState::with_start_mode(
-            user_store,
-            configured_default_mode(),
+            user_store, mode,
         )))),
     }
     .into()
