@@ -13,6 +13,7 @@ use zhu_ye_core::candidate::{
 };
 use zhu_ye_core::dict::{Dictionary, InMemoryDictionary};
 use zhu_ye_core::pinyin::{segment_all, SyllableTable};
+use zhu_ye_core::tone::ToneMap;
 use zhu_ye_core::{unix_now, DictionaryFile, Result, UserDictStore, UserDictionary};
 
 use crate::candidate_ui::{CandidateUiItem, CandidateUiView};
@@ -119,6 +120,9 @@ pub struct InputEngine {
     /// 模糊音与纠错开关（FR-024；O-05 修订）。默认开；关闭后纠错组
     /// （模糊替换 + 少字母补全，`corrected_candidates`）不生成。
     enable_fuzzy: bool,
+    /// 带调拼音表（T-112 后续批四：候选窗拼音显示声调）。旁挂 tone 文件
+    /// 由调用方装配；未装配（默认空表）时候选拼音回退无调拼注。
+    tone: ToneMap,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -193,7 +197,25 @@ impl InputEngine {
             en_lexicon: None,
             enable_abbreviation: true,
             enable_fuzzy: true,
+            tone: ToneMap::default(),
         }
+    }
+
+    /// 装配带调拼音表（T-112 后续批四：候选窗拼音显示声调）。
+    #[must_use]
+    pub fn with_tone_map(mut self, tone: ToneMap) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    /// 候选词的带调空格拼音；无词级/字级带调数据时返回空串（回退无调拼注）。
+    fn tone_spaced(&self, word: &str) -> String {
+        self.tone.word_tone_spaced(word).unwrap_or_default()
+    }
+
+    /// 候选 → 候选窗条目（含带调拼音装配）。
+    fn ui_item_for(&self, candidate: &Candidate) -> CandidateUiItem {
+        candidate_ui_item_tone(candidate, &self.tone_spaced(&candidate.text))
     }
 
     /// 挂载英文词表文件（T-085，`en.zyen`）；`None`（默认）回退第五期内嵌静态表。
@@ -1040,6 +1062,27 @@ impl InputEngine {
         self.is_active().then(|| self.composing.clone())
     }
 
+    /// T-115 后续：错序容错追加组（主候选不足一页且 `enable_fuzzy` 时）。
+    /// 与 M7 纠错（FR-024）互补：FR-024 只能处理可完整切分串（模糊替换/
+    /// 少字母补全），错位串（`zhegnq→zhengq` 等）不可切分故漏掉——本组
+    /// 枚举相邻字母交换变体出候选，标注 Corrected、pinyin=变体（正确拼音）。
+    /// 主链路与前缀路径共用本入口，防止任一路径漏接。
+    #[must_use]
+    fn append_transposed_group(&self, mut main: Vec<Candidate>, composing: &str) -> Vec<Candidate> {
+        if self.enable_fuzzy && main.len() < self.page_size {
+            let transposed = zhu_ye_core::transposed_candidates(
+                &self.table,
+                self.dictionary.as_ref(),
+                composing,
+                PREFIX_COMPLETION_CAP,
+            );
+            if !transposed.is_empty() {
+                main = append_group(main, transposed);
+            }
+        }
+        main
+    }
+
     /// 构建候选窗快照；候选窗渲染与 TSF 联动都从这里取数。
     ///
     /// 上屏联想态（T-059）：组合串为空、联想候选置入 items，
@@ -1064,6 +1107,8 @@ impl InputEngine {
                     .map(|text| CandidateUiItem {
                         text: text.clone(),
                         translation: String::new(),
+                        pinyin: String::new(),
+                        pinyin_tone: String::new(),
                         source: zhu_ye_core::candidate::CandidateSource::Suggestion,
                     })
                     .collect(),
@@ -1078,7 +1123,11 @@ impl InputEngine {
                 page_count: 1,
                 selected: self.selected_on_page,
                 translation_mode: false,
-                items: self.candidates.iter().map(candidate_ui_item).collect(),
+                items: self
+                    .candidates
+                    .iter()
+                    .map(|c| self.ui_item_for(c))
+                    .collect(),
             };
         }
         if self.v_active() {
@@ -1090,7 +1139,11 @@ impl InputEngine {
                 page_count: 1,
                 selected: self.selected_on_page,
                 translation_mode: false,
-                items: self.candidates.iter().map(candidate_ui_item).collect(),
+                items: self
+                    .candidates
+                    .iter()
+                    .map(|c| self.ui_item_for(c))
+                    .collect(),
             };
         }
         if self.mode != InputMode::Chinese {
@@ -1119,7 +1172,7 @@ impl InputEngine {
             items: self
                 .current_layer_candidates()
                 .iter()
-                .map(candidate_ui_item)
+                .map(|c| self.ui_item_for(c))
                 .collect(),
         }
     }
@@ -1386,7 +1439,11 @@ impl InputEngine {
         if !groups.completions.is_empty() || !groups.completed.is_empty() {
             let completions = self.ranking.rank(groups.completions, &context);
             let completed = self.ranking.rank(groups.completed, &context);
-            self.candidates = zhu_ye_core::merge_candidate_groups(completions, completed);
+            let mut main = zhu_ye_core::merge_candidate_groups(completions, completed);
+            // T-115 后续：错序容错同样接入前缀路径——`zhegnq` 这类"完整音节+残尾"
+            // 串会走本分支（completed=这/者非空）而不到主链路，此前容错漏接。
+            main = self.append_transposed_group(main, &self.composing);
+            self.candidates = main;
         } else {
             let composing = self.composing.clone();
             let dictionary = self.dictionary.clone();
@@ -1437,6 +1494,12 @@ impl InputEngine {
                     if !corrected.is_empty() {
                         main = append_group(main, corrected);
                     }
+                    // T-115 后续：错序容错——快打常见的相邻字母颠倒（zhegnq→zhengq、
+                    // shegnc→shengc、xiagnzhe→xiangzhe、zhagnh→zhangh）使串无法完整
+                    // 切分，FR-024 只处理可切分串故漏掉；主候选不足一页时追加
+                    // 「错序组」于纠错组之后、缩写组之前（候选拼音为变体=正确拼音，
+                    // 供 UI 展示正确的拼音）。
+                    main = self.append_transposed_group(main, &composing);
                 }
             }
 
@@ -1492,12 +1555,19 @@ impl InputEngine {
             && self.composing.chars().count() >= EN_WORD_MIN_LEN
             && segment_all(&self.table, &self.composing).is_empty()
         {
-            let en = match &self.en_lexicon {
+            let mut en = match &self.en_lexicon {
                 Some(lexicon) => {
                     zhu_ye_core::en_word_candidates_from(lexicon, &self.composing, EN_WORD_CAP)
                 }
                 None => zhu_ye_core::en_word_candidates(&self.composing, EN_WORD_CAP),
             };
+            // FR-030 扩展：英文候选带中文释义（经词典反查索引 EnToZh；反查
+            // 不到的词保持无译文原样展示，例如英文专名）。
+            for candidate in &mut en {
+                if candidate.translation.is_none() {
+                    candidate.translation = self.dictionary.translate_en_to_zh(&candidate.text);
+                }
+            }
             if !en.is_empty() {
                 let main = std::mem::take(&mut self.candidates);
                 self.candidates = append_group(main, en);
@@ -1565,10 +1635,14 @@ impl InputEngine {
     }
 }
 
-fn candidate_ui_item(candidate: &Candidate) -> CandidateUiItem {
+/// 候选 → 候选窗条目；带调拼音（T-112 后续批四：声调显示）仅在候选文本
+/// 词级/字级带调音齐全时填入，否则留空回退无调拼注。
+fn candidate_ui_item_tone(candidate: &Candidate, tone_spaced: &str) -> CandidateUiItem {
     CandidateUiItem {
         text: candidate.text.clone(),
         translation: candidate.translation.clone().unwrap_or_default(),
+        pinyin: candidate.pinyin.clone().unwrap_or_default(),
+        pinyin_tone: tone_spaced.to_owned(),
         source: candidate.source.clone(),
     }
 }
@@ -1601,9 +1675,10 @@ mod tests {
     use zhu_ye_core::bigram::InMemoryBigramModel;
     use zhu_ye_core::generate_candidates;
     use zhu_ye_core::pinyin::SyllableTable;
+    use zhu_ye_core::tone::ToneMap;
     use zhu_ye_core::Dictionary;
     use zhu_ye_core::UserDictStore;
-    use zhu_ye_core::{build_v2, seed_bigrams, seed_entries};
+    use zhu_ye_core::{build_v2, seed_bigrams, seed_entries, DictionaryEntry};
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let now = std::time::SystemTime::now()
@@ -1724,14 +1799,19 @@ mod tests {
     }
 
     #[test]
-    fn 无完整音节开头的输入不出现前缀候选() {
+    fn 无完整音节开头的输入出补全候选() {
+        // T-115 后续：`z`/`zh` 等无完整音节首的单字母/声母前缀照常出补全候选
+        // （搜狗/微软同款：`d` 一按出现 的/多/到），补全组有词频排序即可见。
         let mut eng = engine();
         type_text(&mut eng, "zh");
-        assert!(eng.candidates().is_empty());
+        assert!(
+            !eng.candidates().is_empty(),
+            "zh 应给出补全候选（的中这之类）"
+        );
 
         let mut eng2 = engine();
         type_text(&mut eng2, "z");
-        assert!(eng2.candidates().is_empty());
+        assert!(!eng2.candidates().is_empty(), "z 应给出补全候选");
     }
 
     #[test]
@@ -2174,6 +2254,154 @@ mod tests {
 
         drop(engine);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 前缀路径下错序容错命中正确候选() {
+        // `zhegnq`：completed=这 非空 → 前缀分支；错序组漏接的历史 bug 回归封印
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("正确", "zhengque", 300));
+        entries.push(DictionaryEntry::new("这", "zhe", 250));
+        let dir = temp_dir("transposed-prefix");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "zhegnq");
+        let cands = engine.candidates();
+        let zh = cands.iter().find(|c| c.text == "正确");
+        assert!(
+            zh.is_some(),
+            "zhegnq 应经前缀路径命中错序候选 正确，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(zh.unwrap().pinyin.as_deref(), Some("zhengq"));
+    }
+
+    #[test]
+    fn 前缀路径下错序容错命中生成候选() {
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("生成", "shengcheng", 280));
+        entries.push(DictionaryEntry::new("设", "she", 220));
+        let dir = temp_dir("transposed-prefix2");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "shegnc");
+        let cands = engine.candidates();
+        let sc = cands.iter().find(|c| c.text == "生成");
+        assert!(
+            sc.is_some(),
+            "shegnc 应命中错序候选 生成，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(sc.unwrap().pinyin.as_deref(), Some("shengc"));
+    }
+
+    #[test]
+    fn 主链路路径错序容错命中账号与想着() {
+        // `zhagnh` 无任何完整音节压阵 → 主链路分支；`xiagnzhe` 的 xi=西 压阵 → 前缀分支
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("账号", "zhanghao", 260));
+        entries.push(DictionaryEntry::new("想着", "xiangzhe", 120));
+        let dir = temp_dir("transposed-main");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "zhagnh");
+        let cands = engine.candidates();
+        let zh = cands.iter().find(|c| c.text == "账号");
+        assert!(
+            zh.is_some(),
+            "zhagnh 应命中错序候选 账号，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(zh.unwrap().pinyin.as_deref(), Some("zhangh"));
+    }
+
+    #[test]
+    fn 带调拼音装配后候选视图携带声调() {
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("正确", "zhengque", 300));
+        let dir = temp_dir("tone-pin");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        // 未装配带调表 -> pinyin_tone 为空（回退无调拼注）
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        type_text(&mut engine, "zhengque");
+        let view = engine.candidate_ui_view();
+        let item = view.items.iter().find(|i| i.text == "正确").unwrap();
+        assert!(item.pinyin_tone.is_empty());
+
+        // 词级带调命中
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        engine = engine.with_tone_map(ToneMap::from_lines("#word\n正确\tzhèng què\n"));
+        type_text(&mut engine, "zhengque");
+        let view = engine.candidate_ui_view();
+        let item = view.items.iter().find(|i| i.text == "正确").unwrap();
+        assert_eq!(item.pinyin_tone, "zhèng què");
+
+        // 字级兜底逐字拼合
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        engine = engine.with_tone_map(ToneMap::from_lines("#char\n正\tzhèng\n确\tquè\n"));
+        type_text(&mut engine, "zhengque");
+        let view = engine.candidate_ui_view();
+        let item = view.items.iter().find(|i| i.text == "正确").unwrap();
+        assert_eq!(item.pinyin_tone, "zhèng què");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 前缀路径下错序容错命中想着() {
+        // `xiagnzhe`：xi=西 压阵 → 前缀分支，变体 xiangzhe 可切分 → 想着
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("想着", "xiangzhe", 120));
+        let dir = temp_dir("transposed-main2");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "xiagnzhe");
+        let cands = engine.candidates();
+        let xz = cands.iter().find(|c| c.text == "想着");
+        assert!(
+            xz.is_some(),
+            "xiagnzhe 应命中错序候选 想着，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(xz.unwrap().pinyin.as_deref(), Some("xiangzhe"));
+    }
+
+    #[test]
+    fn 英文候选带中文译文() {
+        // v2 词典（含 你好→hello 反查索引）驱动：英文候选 hello 应挂中文"你好"。
+        // 英文词表走静态表回退（测试环境无 en.zyen），反查来自 DictionaryFile。
+        let dir = temp_dir("en-trans");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "hello");
+        let cands = engine.candidates();
+        let hello = cands
+            .iter()
+            .find(|c| c.source == zhu_ye_core::candidate::CandidateSource::EnWord);
+        assert!(
+            hello.is_some(),
+            "hello 应命中英文候选，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(hello.unwrap().translation.as_deref(), Some("你好"));
     }
 
     #[test]

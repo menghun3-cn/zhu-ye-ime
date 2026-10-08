@@ -92,6 +92,11 @@ function New-TsfRegistration {
     Set-TsfRegistryValue -Path $profilePath -Name 'IconFile' -Value $DllPath
     Set-TsfRegistryValue -Path $profilePath -Name 'IconIndex' -Value 0 -Kind ([Microsoft.Win32.RegistryValueKind]::DWord)
 
+    # 设置 GUI 入口（T-115 后续）：TIP 键 EnableConfiguration=1 让系统"按键
+    # 选项/键盘选项"页对该输入法显示配置入口，点击经 ITfFnConfigure::Show
+    # （T-114 已实现）拉起设置窗口。
+    Set-TsfRegistryValue -Path $tipPath -Name 'EnableConfiguration' -Value 1 -Kind ([Microsoft.Win32.RegistryValueKind]::DWord)
+
     Set-TsfRegistryValue -Path $clsidPath -Name $null -Value $tip['DisplayName']
     Set-TsfRegistryValue -Path $inprocPath -Name $null -Value $DllPath
     Set-TsfRegistryValue -Path $inprocPath -Name 'ThreadingModel' -Value 'Apartment'
@@ -121,6 +126,14 @@ function Test-TsfRegistration {
         if ($profileKey.GetValue('Enable', -1) -cne 1) { return $false }
     } finally {
         $profileKey.Dispose()
+    }
+
+    $tipKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($tipPath, $false)
+    if ($null -eq $tipKey) { return $false }
+    try {
+        if ($tipKey.GetValue('EnableConfiguration', -1) -cne 1) { return $false }
+    } finally {
+        $tipKey.Dispose()
     }
 
     $inprocKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($inprocPath, $false)

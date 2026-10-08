@@ -21,6 +21,11 @@ pub struct CandidateUiItem {
     pub text: String,
     /// 译文；无译文时为空字符串。
     pub translation: String,
+    /// 拼音串（T-115 后续：候选窗按字展示"词（音节）"用；无拼音时为空）。
+    pub pinyin: String,
+    /// 空格分隔的带调拼音（T-112 后续批四：候选窗上方拼音行显示声调；
+    /// 如 `生成` → `shēng chéng`）。为空时回退 `pinyin` 的无调拼注。
+    pub pinyin_tone: String,
     /// 候选来源，用于 UI 弱化标识。
     pub source: CandidateSource,
 }
@@ -229,6 +234,10 @@ pub struct CandidateMetrics {
     pub corner_radius: i32,
     /// 字体像素高度。
     pub font_height: i32,
+    /// 拼音行小字体像素高度（T-115 后续：候选词上方拼音小字，仿微软拼音布局）。
+    pub pin_font_height: i32,
+    /// 拼音行与主文本的垂直间距（T-115 后续）。
+    pub pin_line_gap: i32,
 }
 
 impl CandidateMetrics {
@@ -255,6 +264,8 @@ impl CandidateMetrics {
             footer_height: dp(20.0),
             corner_radius: dp(8.0),
             font_height: dp(16.0),
+            pin_font_height: dp(11.0),
+            pin_line_gap: dp(3.0),
         }
     }
 
@@ -454,6 +465,8 @@ mod tests {
                     } else {
                         String::new()
                     },
+                    pinyin: String::new(),
+                    pinyin_tone: String::new(),
                     source: CandidateSource::Static,
                 })
                 .collect(),
@@ -464,6 +477,8 @@ mod tests {
         CandidateUiItem {
             text: text.to_owned(),
             translation: translation.to_owned(),
+            pinyin: String::new(),
+            pinyin_tone: String::new(),
             source: CandidateSource::Slang,
         }
     }
@@ -482,6 +497,8 @@ mod tests {
         let item = CandidateUiItem {
             text: "你好".to_owned(),
             translation: "hello".to_owned(),
+            pinyin: "nihao".to_owned(),
+            pinyin_tone: "nǐ hǎo".to_owned(),
             source: CandidateSource::Static,
         };
         assert_eq!(display_main_text(&item, false), "你好");

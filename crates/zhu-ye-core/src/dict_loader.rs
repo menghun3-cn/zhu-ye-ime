@@ -579,6 +579,10 @@ impl Dictionary for DictionaryFile {
         found.sort_by_key(|entry| std::cmp::Reverse(entry.frequency));
         found
     }
+
+    fn translate_en_to_zh(&self, word: &str) -> Option<String> {
+        self.find_en_to_zh(word)
+    }
 }
 
 impl BigramModel for DictionaryFile {
