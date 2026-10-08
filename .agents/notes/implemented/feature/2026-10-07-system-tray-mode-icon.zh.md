@@ -37,7 +37,11 @@ Status: implemented
   保证内容完整）——初版 message-only 窗口在 VM 验收中被否决：
   `Shell_NotifyIcon` `NIM_ADD` 成功但 Server 2019 通知区不渲染
   （截图槽位 0 彩色像素）；单实例互斥
-  （`Local\ZhuYeImeTraySingleton`，重复启动静默退出）；右键菜单
+  （`Local\ZhuYeImeTraySingleton`，重复启动静默退出）——互斥句柄必须
+  **保活到进程退出**：初版创建后立即 `CloseHandle` 销毁互斥对象，第二个
+  进程会新建同名对象并照常运行（用户实测托盘出现两个图标），现以
+  `_mutex` 绑定保持在 main 作用域（HANDLE 无 Drop，随进程退出回收）；
+  右键菜单
   （模式状态行 / 打开设置 / 退出），左键单击弹菜单、双击开设置；
   每次 `LoadImageW` 后立即 `DestroyIcon`（Shell 已取得副本）；
 - 部署位与自启：`C:\Program Files\zhu-ye-ime\bin\zhu-ye-tray.exe`
@@ -90,7 +94,12 @@ Status: implemented
   日志两条 `shift-up ToggleMode (lone shift)`、状态文件
   Chinese→English→Chinese 往返 ✓；
 - **message-only 窗口在 Server 2019 不渲染托盘图标**（详见决策节），
-  改普通隐藏顶层窗口。
+  改普通隐藏顶层窗口；
+- **单实例互斥被提前 CloseHandle 击穿（用户实测双托盘图标）**：初版
+  创建互斥后立即关闭句柄，互斥对象随之销毁，第二进程新建同名对象照常
+  运行 → 两进程各自 NIM_ADD 出两个图标。修复：`_mutex` 绑定保持句柄
+  到 main 退出；本地验证第二个实例 exit 0、进程数恒为 1，VM 部署位
+  同步（SHA256 35FF8091E553）。
 
 验收证据（截图存 VM `C:\zhu-ye-vm\shots-b6\`）：溢出窗格三态截图
 `s1-zh/s2-en/s3-zh2` MD5 两两不同，zh↔en 像素差异 bbox

@@ -285,11 +285,14 @@ fn main() -> windows::core::Result<()> {
     }
 
     // 单实例：已有托盘在跑则第二个进程直接返回 0（不弹窗、不重复注册图标）。
+    // 互斥句柄必须保持打开到进程结束：初版创建后立即 CloseHandle，导致互斥对象
+    // 在第一个进程里已被销毁，第二个进程会新建同名对象（GetLastError≠183）并照常
+    // 运行——用户实测托盘出现两个图标。HANDLE 无 Drop，`_mutex` 绑定在 main 作用域
+    // 内一直保活，句柄只随进程退出由系统回收。
     let mutex_name: Vec<u16> = MUTEX_NAME.encode_utf16().collect();
     unsafe {
-        let handle = CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr()))?;
+        let _mutex = CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr()))?;
         let already = GetLastError().0 == 183; // ERROR_ALREADY_EXISTS
-        let _ = windows::Win32::Foundation::CloseHandle(handle);
         if already {
             return Ok(());
         }
