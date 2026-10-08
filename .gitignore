@@ -22,3 +22,9 @@ Thumbs.db
 
 # VM 测试凭据（不提交）
 docs/vm-win-info.md
+
+# 本地部署工具（不提交：elevated worker 与指示器设置脚本，仅存在于开发机；历史决议不入库）
+elevate-setup.ps1
+elevated-worker.ps1
+set-indicator-zhu.ps1
+crates/zhu-ye-ime/assets/zhu-16.png
