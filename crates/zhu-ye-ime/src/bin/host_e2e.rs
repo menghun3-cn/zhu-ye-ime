@@ -378,11 +378,21 @@ fn m7_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
         println!("[SKIP] 三字简拼 wsm：词典无「为什么」词条");
     }
 
-    // 单字符防泛滥：n、w 均不触发（长度 <2）。
-    if type_and(&mut engine, "n").is_empty() && type_and(&mut engine, "w").is_empty() {
-        runner.pass("单字符不触发简拼");
+    // 单字符前缀候选（批二 9ab4cf4 行为）：n/w 属声母前缀，即时出候选
+    //（搜狗/微软拼音同款体验）；简拼 `initial_candidates` 对单字符仍不
+    // 触发（函数级拒绝不变），此处只断言前缀路径接管后候选非空。
+    let n_cands = type_and(&mut engine, "n");
+    let d_cands = type_and(&mut engine, "d");
+    if !n_cands.is_empty() && !d_cands.is_empty() {
+        runner.pass("单字符前缀候选即时出（批二行为）");
     } else {
-        runner.fail("单字符不触发简拼", "n/w 不应产出简拼候选");
+        runner.fail("单字符前缀候选即时出（批二行为）", &format!("n={n_cands:?} d={d_cands:?}"));
+    }
+    // 简拼函数级拒绝（T-029 语义不变）：单字符不产简拼组。
+    if zhu_ye_core::initial_candidates(dictionary.as_ref(), "n").is_empty() {
+        runner.pass("简拼函数对单字符拒绝");
+    } else {
+        runner.fail("简拼函数对单字符拒绝", "initial_candidates('n') 应返回空");
     }
     // 超长不触发（长度 >4）：简拼函数级直接拒绝（引擎对超长串走既有前缀/全拼路径）。
     if zhu_ye_core::initial_candidates(dictionary.as_ref(), "abcdefg").is_empty() {
@@ -2009,10 +2019,13 @@ fn seed_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     }
     engine.handle_escape();
     type_text(&mut engine, "zh");
+    // 声母前缀即时出候选（批二 9ab4cf4：单字母/声母前缀即时出候选，
+    // 搜狗/微软拼音同款体验，用户批二次验的收尾行为）；取代 T-029 时代
+    // 的“zh 不应出现候选”旧断言（彼时无前缀候选路径）。
     if engine.candidates().is_empty() {
-        runner.pass("无完整音节开头无前缀候选");
+        runner.fail("声母前缀即时出候选", "zh 应有候选（单字母/声母前缀即时出候选）");
     } else {
-        runner.fail("无完整音节开头无前缀候选", "zh 不应出现候选");
+        runner.pass("声母前缀即时出候选");
     }
     engine.handle_escape();
 
