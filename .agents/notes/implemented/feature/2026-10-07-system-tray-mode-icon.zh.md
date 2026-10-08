@@ -108,14 +108,24 @@ Status: implemented
   `竹叶输入法托盘`，uninstall 停进程删自启。同一修复批次把批四的带调拼音
   旁挂表 `dictionary.zyct.tones`（`<基础包路径>.tones` 约定）也纳入发布链：
   stage 复制、install 与词典同目录安装、assemble zip 守卫六件套校验。
+  **v0.1.2 同版本补发**：CI 重跑（run #37723763247，upload=true）产出
+  22.65MB zip（六件套守卫验证通过，含托盘与 tones）并上传既有 v0.1.2
+  Release + feed-v0.1.2 镜像；部署所用 DLL 为 CI 构建 f143c14e
+  （SHA256 F143C14E…，与本地重跑 8fb21f0a 同尺寸 2,195,456B 不同哈希，
+  可复现体积、哈希差异为构建时间戳所致，部署以 CI 哈希为准）。
 
 验收证据（截图存 VM `C:\zhu-ye-vm\shots-b6\`）：溢出窗格三态截图
 `s1-zh/s2-en/s3-zh2` MD5 两两不同，zh↔en 像素差异 bbox
 (765,744)-(773,752) 恰好 8×8 px 落在托盘槽 (758..782, 728..768)；
 端到端 `s4-shift-en/s5-shift-zh` 记事本激活→Shift×2 状态桥往返正常。
-验收后基线：VM `tsf-b6\zhu-ye-ime-8fb21f0a.dll` + 本地
-`zhu_ye_ime_8FB21F0A.dll`（2195456B）均注册生效；托盘进程在两环境
-运行正常。
+**补发后基线（2026-10-08 整体验收）**：用户机
+`C:\Program Files\zhu-ye-ime\tsf\zhu_ye_ime_F143C14E.dll`（CLSID/IconFile
+指针已切换）+ VM `tsf-b6\zhu-ye-ime-f143c14e.dll` 注册生效，
+托盘进程两环境单实例复核通过（第二实例 HasExited、进程数恒 1）；
+VM 整体 UI 验收 v4 共 57 项指标全绿——托盘单实例/三态图标、
+空格上屏「你好」、Enter 提交拼音原文、日期/金额/v/emoji/错位/混输
+候选电池、Shift 双翻转 + 英文态直通上屏、设置入口窗口、
+T-091 哨兵日志（shift-up ToggleMode ×2 + Activate 行）实测。
 
 ## 关联
 
