@@ -5,15 +5,6 @@
 
 ## [Unreleased]
 
-### 变更
-
-- 命名规范（T-108/T-109）：便携 zip 与全部产品目录去除 `ai-` 前缀——发布 zip
-  `zhu-ye-ime-<v>.zip`、安装目录 `Program Files\zhu-ye-ime`、数据目录 `%APPDATA%\zhu-ye-ime`、
-  日志目录 `%LOCALAPPDATA%\zhu-ye-ime\logs`、TSF 安装目录 `zhu-ye-ime\tsf`、便携包内顶层目录
-  `zhu-ye-ime-<v>-test/`；exe 文件名（`ai-zhu-ye-ime-setup-<v>.exe`）与产品名不变。**升级不兼容**：
-  v0.1.2 安装用户需卸载重装，旧 `ai-zhu-ye-ime` 目录不迁移不保留；v0.1.2 release 旧名 zip 资产
-  已删除（同日补发新名资产）
-
 ## [0.1.2] - 2026-10-05
 
 ### 新增
@@ -36,6 +27,25 @@
 ### 变更
 
 - 正式定版与状态口径：v0.1.2 去除 alpha 预发布标记（`releases/latest` 语义指向正式版），官网六页状态行/llms.txt/agents.txt 同步为正式版（T-099）
+- 命名规范（T-108/T-109）：便携 zip 与全部产品目录去除 `ai-` 前缀——发布 zip
+  `zhu-ye-ime-<v>.zip`、安装目录 `Program Files\zhu-ye-ime`、数据目录 `%APPDATA%\zhu-ye-ime`、
+  日志目录 `%LOCALAPPDATA%\zhu-ye-ime\logs`、TSF 安装目录 `zhu-ye-ime\tsf`、便携包内顶层目录
+  `zhu-ye-ime-<v>-test/`；exe 文件名（`ai-zhu-ye-ime-setup-<v>.exe`）与产品名不变。**升级不兼容**：
+  v0.1.2 安装用户需卸载重装，旧 `ai-zhu-ye-ime` 目录不迁移不保留；v0.1.2 release 旧名 zip 资产
+  已删除（同日补发新名资产）
+
+### 修复
+
+- 验收修复批次（2026-10-08 同版本补发，PR #121）：以下条目相对 2026-10-05 首发 v0.1.2 属补发内容
+
+- 指示器"竹"、上屏 NUL、设置入口（T-112/T-113/T-114）：任务栏语言栏指示器显示"竹"（DLL 内嵌图标 `assets/zhu.ico` + 语言档 `IconFile`）；上屏文本 NUL 结尾符修复（`to_wide_no_term` 专供 `ITfRange::SetText`）；设置入口可及化（`ITfFnConfigure` + 语言栏按钮/右击菜单 + `EnableConfiguration=1` 注册，Win11 经系统键盘选项页拉起）
+- 批二（2026-10-07）：顿号直出（`VK_OEM_5` 无 Shift → `KeyAction::PunctDun`，中文全角"、"，英文放行）、快打错位容错（`transposed_candidates`：zhegnq→正确 等）、候选拼音显示、CEDICT 译文补齐（pin 三次重锁，125,238 行）
+- 批三（2026-10-07）：错序容错补全（前缀分支共用 `append_transposed_group`）、候选拼音上置小号字体、**词典部署目录修正**（base 落 `%APPDATA%\zhu-ye-ime\`）、译文/词频精修、英文候选带中文译文（`translate_en_to_zh`）、词性标注前移（jieba 词性→传统缩写）
+- 批四（2026-10-07）：候选拼音横截断修复与带调拼音（`zhu_ye_core::tone::ToneMap` + `base.zyct.tones`，词级 118,842 + 字级 8,102）、输入法禁用图标处理（双语言档案，批五按用户要求回退）
+- 批五（2026-10-07）：按用户要求回退英文态双语言档案，系统键盘布局恢复单输入法条目（提交 9e986f0）
+- 批六（2026-10-07）：新增系统托盘"中/英"状态图标（常驻进程 `zhu-ye-tray` + `tray-state` 状态桥原子写、500ms 轮询、单实例互斥、右键菜单；平台边界：系统任务栏指示器仍恒显"竹")
+- VM 验收修复（2026-10-08，vm-accept-sop 首次实战）：状态桥干净机器目录自建（`create_dir_all` + pid 后缀 tmp）、lone-shift 弹起切换（`OnTestKeyUp` 对 `VK_SHIFT` 返 TRUE，TSF 才转发弹起事件）、message-only 窗口改普通隐藏顶层窗口（Server 2019 通知区不渲染问题）
+- 托盘单实例互斥句柄保活（2026-10-08）：创建后立即 `CloseHandle` 使互斥对象销毁、两进程并存双托盘图标；句柄以 `_mutex` 绑定保活至进程退出（提交 c4b307e）
 
 ## [0.1.1-alpha] - 2026-10-04
 
