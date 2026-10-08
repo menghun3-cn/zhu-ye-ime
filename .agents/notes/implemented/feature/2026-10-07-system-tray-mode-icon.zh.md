@@ -105,7 +105,9 @@ Status: implemented
   zhu-ye-tray.exe，产出的 zip 会缺托盘。修复（fix/T-112-release-tray-packaging）：
   assemble-release 纳入构建与产物校验 + zip 四件套完整性守卫（缺一即中止发布），
   stage/package-portable 复制托盘，install 装三 exe 并注册 HKCU Run
-  `竹叶输入法托盘`，uninstall 停进程删自启。
+  `竹叶输入法托盘`，uninstall 停进程删自启。同一修复批次把批四的带调拼音
+  旁挂表 `dictionary.zyct.tones`（`<基础包路径>.tones` 约定）也纳入发布链：
+  stage 复制、install 与词典同目录安装、assemble zip 守卫六件套校验。
 
 验收证据（截图存 VM `C:\zhu-ye-vm\shots-b6\`）：溢出窗格三态截图
 `s1-zh/s2-en/s3-zh2` MD5 两两不同，zh↔en 像素差异 bbox

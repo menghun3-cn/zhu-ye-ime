@@ -180,6 +180,18 @@ if (Test-Path -LiteralPath $legacyDictionary -PathType Leaf) {
     Remove-Item -LiteralPath $legacyDictionary -Force
 }
 
+# ---- 2.5 带调拼音旁挂表（批四：候选窗拼音声调显示；随基础词典同目录部署，缺失只降级） ----
+$toneSource = Join-Path $binDir 'dictionary.zyct.tones'
+if (Test-Path -LiteralPath $toneSource -PathType Leaf) {
+    $targetTone = "$targetDictionary.tones"
+    try {
+        Copy-Item -LiteralPath $toneSource -Destination $targetTone -Force
+        Write-Host "已安装带调拼音旁挂表: $targetTone"
+    } catch {
+        Write-Warning "带调拼音旁挂表复制失败（候选声调显示降级为无调）: $($_.Exception.Message)"
+    }
+}
+
 # ---- 2.5 复制英文词表 en.zyen（T-085：英文前缀候选；缺失即跳过，引擎回退内嵌静态表） ----
 $enWordbook = Join-Path $binDir 'en.zyen'
 if (Test-Path -LiteralPath $enWordbook -PathType Leaf) {

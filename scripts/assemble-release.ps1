@@ -125,13 +125,13 @@ if (-not (Test-Path -LiteralPath $portableZip -PathType Leaf)) {
 }
 $zipDest = Join-Path $relDir "zhu-ye-ime-$Version.zip"
 Copy-Item -LiteralPath $portableZip -Destination $zipDest -Force
-# 载荷完整性守卫：zip 必须含三个 exe（设置/更新器/托盘，T-078 + 批六）；缺一即中止，
-# 避免把缺组件的发布包上传出去。
+# 载荷完整性守卫：zip 必须含基础词典与带调拼音旁挂表（批四）、三个 exe（设置/更新器/
+# 托盘，T-078 + 批六）与 DLL；缺一即中止，避免把缺组件的发布包上传出去。
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zipRead = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zipDest))
 try {
     $zipNames = @($zipRead.Entries | ForEach-Object { $_.FullName })
-    foreach ($entry in @('bin/zhu-ye-tray.exe', 'bin/zhu-ye-settings.exe', 'bin/zhu-ye-updater.exe', 'bin/zhu_ye_ime.dll')) {
+    foreach ($entry in @('bin/zhu-ye-tray.exe', 'bin/zhu-ye-settings.exe', 'bin/zhu-ye-updater.exe', 'bin/zhu_ye_ime.dll', 'bin/dictionary.zyct', 'bin/dictionary.zyct.tones')) {
         if ($zipNames -notcontains $entry) {
             throw "发布 zip 缺少组件 $entry —— 发行包组装有缺口，中止发布。"
         }

@@ -12,6 +12,7 @@ staging 布局（与便携 zip 完全一致，保证 zip/exe 同源同哈希）�
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
       bin/zhu-ye-tray.exe            托盘常驻进程（批六，中英状态图标）
       bin/dictionary.zyct            基础词典（data/artifacts/base.zyct，随安装只读）
+      bin/dictionary.zyct.tones      带调拼音旁挂表（base.zyct.tones，批四候选声调显示）
       bin/en.zyen                    英文词表（T-085，data/artifacts/en.zyen，随安装只读）
       packs/it.zyct med.zyct slang.zyct  预置领域包（D-46，可离线验收）
       scripts/ime-identity.ps1 install.ps1 uninstall.ps1 verify-tsf-dll.ps1 verify-tsf-identity.ps1
@@ -48,6 +49,10 @@ foreach ($artifact in $needed) {
 $baseDictionary = Join-Path $repoRoot 'data\artifacts\base.zyct'
 if (-not (Test-Path -LiteralPath $baseDictionary -PathType Leaf)) {
     throw "基础词典缺失：$baseDictionary（先运行 zhu-ye-dict build-base）"
+}
+$toneSource = Join-Path $repoRoot 'data\artifacts\base.zyct.tones'
+if (-not (Test-Path -LiteralPath $toneSource -PathType Leaf)) {
+    throw "带调拼音旁挂表缺失：$toneSource（先运行 zhu-ye-dict build-base）"
 }
 $enWordbook = Join-Path $repoRoot 'data\artifacts\en.zyen'
 if (-not (Test-Path -LiteralPath $enWordbook -PathType Leaf)) {
@@ -87,6 +92,7 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe'
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe') -Destination $binDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe') -Destination $binDir
 Copy-Item -LiteralPath $baseDictionary -Destination (Join-Path $binDir 'dictionary.zyct')
+Copy-Item -LiteralPath $toneSource -Destination (Join-Path $binDir 'dictionary.zyct.tones')
 Copy-Item -LiteralPath $enWordbook -Destination (Join-Path $binDir 'en.zyen')
 
 # ---- packs：三个领域包（D-46，可离线验收） ----
@@ -117,6 +123,7 @@ $testGuide = @'
     bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
     bin/zhu-ye-tray.exe            托盘常驻进程（中英状态图标，批六）
     bin/dictionary.zyct            基础词典
+    bin/dictionary.zyct.tones      带调拼音旁挂表（候选拼音声调，批四）
     bin/en.zyen                    英文词表（英文前缀候选，T-085）
     packs/                         三个领域包（安装时预置到 %APPDATA%）
     scripts/                       安装/卸载/校验脚本
