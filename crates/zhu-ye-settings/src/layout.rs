@@ -192,6 +192,8 @@ pub enum ChipValue {
     Mode(ModeChoice),
     /// 在线更新开关（关闭 / 开启，P-03 默认关）。
     OnlineUpdate(bool),
+    /// 候选框拼音行开关（关闭 / 显示，T-127 默认开）。
+    CandidatePin(bool),
 }
 
 /// 二选一控件块：取值决定绘制时的选中状态与点击后的动作。
@@ -251,6 +253,7 @@ pub fn item_rows(
             ItemControl::ThemeChoice => theme_chips(metrics, rect),
             ItemControl::ModeChoice => mode_chips(metrics, rect),
             ItemControl::OnlineUpdate => online_update_chips(metrics, rect),
+            ItemControl::CandidatePin => candidate_pin_chips(metrics, rect),
             _ => Vec::new(),
         };
         rows.push(ItemRow {
@@ -291,6 +294,16 @@ fn online_update_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
         row,
         ("关闭", ChipValue::OnlineUpdate(false)),
         ("开启", ChipValue::OnlineUpdate(true)),
+    )
+}
+
+/// 候选框拼音行开关（T-127）：关闭在前、显示在后（默认开，保持历史行为）。
+fn candidate_pin_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
+    two_chips(
+        metrics,
+        row,
+        ("关闭", ChipValue::CandidatePin(false)),
+        ("显示", ChipValue::CandidatePin(true)),
     )
 }
 
@@ -1066,7 +1079,7 @@ mod tests {
         let metrics = SettingsMetrics::new(96);
         let items = Page::Common.items();
         // 「简繁切换」仍是规划中条目：点击可展开。
-        let expand_index = 12;
+        let expand_index = 13;
         let plain = item_rows(&metrics, CLIENT, items, None);
         let expanded = item_rows(&metrics, CLIENT, items, Some(expand_index));
         // 展开项自身多出说明区。
@@ -1169,10 +1182,32 @@ mod tests {
     }
 
     #[test]
-    fn 英文输入法条目有两个中英模式控件块() {
+    fn 候选拼音条目有两个开关控件块且关闭在先显示在后() {
         let metrics = SettingsMetrics::new(96);
         let rows = item_rows(&metrics, CLIENT, Page::Common.items(), None);
         let chips = &rows[2].chips;
+        assert_eq!(chips.len(), 2, "候选拼音是二选一开关（T-127）");
+        assert_eq!(
+            chips[0].value,
+            super::ChipValue::CandidatePin(false),
+            "关闭在前"
+        );
+        assert_eq!(
+            chips[1].value,
+            super::ChipValue::CandidatePin(true),
+            "显示在后"
+        );
+        assert_eq!(chips[0].label, "关闭");
+        assert_eq!(chips[1].label, "显示");
+        assert!(chips[0].rect.right <= chips[1].rect.left);
+        assert_eq!(chips[1].rect.right, rows[2].rect.right - metrics.gap);
+    }
+
+    #[test]
+    fn 英文输入法条目有两个中英模式控件块() {
+        let metrics = SettingsMetrics::new(96);
+        let rows = item_rows(&metrics, CLIENT, Page::Common.items(), None);
+        let chips = &rows[3].chips;
         assert_eq!(chips.len(), 2, "英文输入法是 D-32 装配项二选一");
         assert_eq!(
             chips[0].value,
@@ -1185,7 +1220,7 @@ mod tests {
         assert_eq!(chips[0].label, "中文");
         assert_eq!(chips[1].label, "英文");
         assert!(chips[0].rect.right <= chips[1].rect.left);
-        assert_eq!(chips[1].rect.right, rows[2].rect.right - metrics.gap);
+        assert_eq!(chips[1].rect.right, rows[3].rect.right - metrics.gap);
     }
 
     #[test]

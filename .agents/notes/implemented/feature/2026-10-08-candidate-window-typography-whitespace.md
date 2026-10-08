@@ -149,6 +149,40 @@ Related: [candidate-window horizontal layout and pinyin typography](../../implem
 face, main text bold, row height) in place; the index right-alignment and dedicated
 `pin` theme key decisions are unchanged.
 
+## Show-pin toggle (T-127)
+
+User request: "设置里面可以设置候选框是否显示拼音及声调" — a settings toggle
+for the candidate-window pinyin (with tone marks) line.
+
+Decision and shape (followed the FR-023/FR-024 switch precedent, T-103):
+
+- **Config format**: `ConfigFile.candidate_show_pin: bool`, default `true`
+  (current behaviour preserved; old configs without the field load as on —
+  lenient parse, no `CONFIG_FORMAT_VERSION` bump, same pattern as
+  `enable_abbreviation`/`enable_fuzzy`).
+- **Assembly item, same contract as theme**: the TSF side reads the flag once at
+  assembly (`configured_candidate_window`), so the setting takes effect after
+  restarting the input method — the settings window says so instead of faking
+  an instant effect.
+- **Wiring**: `CandidateWindow`/`CandidateWindowOptions`/`CandidateWindowState`
+  all carry `show_pin`; the paint short-circuit is
+  `self.show_pin && !pin_text.is_empty() && pin_text != base`. When off, the row
+  falls back to the existing no-pin paint path (main text and index number
+  full-row vertically centred) — no new layout math, translation mode pin
+  suppression and long-pinyin behaviour untouched. New constructors
+  `with_theme_and_show_pin` / `with_custom_theme_and_show_pin`; the old ones
+  keep default on. Demo gets `--no-pin` for screenshot verification.
+- **Settings UI**: new 「候选拼音」 row on the 常用设置 page (between
+  自定义主题 and 英文输入法), 关闭/显示 two-chip control reusing the
+  theme/mode/online-update chip machinery (`ItemControl::CandidatePin`,
+  `ChipValue::CandidatePin`, `candidate_pin_chips`); `load_/save_candidate_show_pin`
+  follow the S-8 re-read-before-save rule like every other single-field writer.
+
+Verified: unit tests across core (serde default-on + round trip), settings
+(state load, chips geometry, persistence preserve-fields), ime suite; pixel
+probe on 96dpi demo shots — `--no-pin` shows 0 grey pixels in the pin band
+(y117–127) vs 25 with pinyin on, main-text band intact in both.
+
 ## Deployment-channel note (process, batteries)
 
 The user machine deploy channel is the scheduled task `ZhuYeImeElevated`

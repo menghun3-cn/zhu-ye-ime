@@ -97,6 +97,9 @@ pub struct CandidateWindowOptions {
     pub shot_path: Option<PathBuf>,
     /// 自定义主题文件（T-088 / FR-048）；`Some` 时叠加 `candidate` 节配色。
     pub custom_theme: Option<zhu_ye_core::ThemeFile>,
+    /// 是否显示拼音行及声调（T-127）；TSF 侧由 `config.json` 的
+    /// `candidate_show_pin` 决定，演示工具默认 `true`。
+    pub show_pin: bool,
 }
 
 /// 候选窗放置点：`anchor` 为组成区屏幕坐标左边界/底部，窗口显示在其下方。
@@ -116,6 +119,9 @@ pub struct CandidateWindow {
     theme_pref: ThemePreference,
     /// 自定义主题文件（T-088 / FR-048）；`Some` 时解析配色叠加 `candidate` 节。
     custom_theme: Option<zhu_ye_core::ThemeFile>,
+    /// 是否显示拼音行及声调（T-127）；`false` 时候选行回到无拼音形态
+    /// （主文本与序号整行垂直居中）。
+    show_pin: bool,
 }
 
 impl CandidateWindow {
@@ -131,11 +137,18 @@ impl CandidateWindow {
     /// （P-12，设置窗口的"主题"条目即通过重写 `config.json` 达成）。
     #[must_use]
     pub fn with_theme(theme_pref: ThemePreference) -> Self {
+        Self::with_theme_and_show_pin(theme_pref, true)
+    }
+
+    /// 按指定主题偏好与拼音行开关创建控制器（T-127）。
+    #[must_use]
+    pub fn with_theme_and_show_pin(theme_pref: ThemePreference, show_pin: bool) -> Self {
         Self {
             hwnd: HWND::default(),
             state_ptr: std::ptr::null_mut(),
             theme_pref,
             custom_theme: None,
+            show_pin,
         }
     }
 
@@ -145,11 +158,18 @@ impl CandidateWindow {
     /// 主题文件的 `candidate` 节在解析时叠加：缺键回退基础预设。
     #[must_use]
     pub fn with_custom_theme(file: zhu_ye_core::ThemeFile) -> Self {
+        Self::with_custom_theme_and_show_pin(file, true)
+    }
+
+    /// 按自定义主题文件与拼音行开关创建控制器（T-127）。
+    #[must_use]
+    pub fn with_custom_theme_and_show_pin(file: zhu_ye_core::ThemeFile, show_pin: bool) -> Self {
         Self {
             hwnd: HWND::default(),
             state_ptr: std::ptr::null_mut(),
             theme_pref: ThemePreference::Auto,
             custom_theme: Some(file),
+            show_pin,
         }
     }
 
@@ -228,6 +248,7 @@ impl CandidateWindow {
                 seconds: None,
                 shot_path: None,
                 custom_theme: self.custom_theme.clone(),
+                show_pin: self.show_pin,
             };
             let state = Box::new(CandidateWindowState::new_with_quit(
                 view.clone(),
@@ -343,6 +364,8 @@ struct CandidateWindowState {
     theme_pref: ThemePreference,
     forced_dpi: Option<u32>,
     quit_on_destroy: bool,
+    /// 是否显示拼音行及声调（T-127）；关闭时 `paint` 的拼音分支被短路。
+    show_pin: bool,
 }
 
 impl CandidateWindowState {
@@ -374,6 +397,7 @@ impl CandidateWindowState {
             theme_pref: options.theme,
             forced_dpi: options.dpi,
             quit_on_destroy,
+            show_pin: options.show_pin,
         }
     }
 
@@ -472,7 +496,9 @@ impl CandidateWindowState {
             } else {
                 spell_pinyin(&base, &item.pinyin)
             };
-            let show_pin = !pin_text.is_empty() && pin_text != base;
+            // T-127：设置开关 `candidate_show_pin`（装配项）关闭后短路——
+            // 候选行整体回到无拼音形态（主文本/序号整行垂直居中）。
+            let show_pin = self.show_pin && !pin_text.is_empty() && pin_text != base;
             let main = base.as_str();
             let secondary = if self.view.translation_mode && !item.translation.is_empty() {
                 if item.text == item.translation {

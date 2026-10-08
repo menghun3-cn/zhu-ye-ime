@@ -170,6 +170,8 @@ pub enum ItemControl {
     RestoreLangBar,
     /// 在线更新开/关二选一（T-077 / FR-044；写 `config.json` 的 `online_update`，P-03 默认关）。
     OnlineUpdate,
+    /// 候选框拼音行开/关二选一（T-127；写 `config.json` 的 `candidate_show_pin`，默认开）。
+    CandidatePin,
     /// 进入"检查更新"子视图（T-077 / FR-044）。
     OpenUpdate,
     /// 进入"版本与诊断信息"子视图（T-077 / FR-044）。
@@ -246,6 +248,12 @@ static COMMON_ITEMS: &[Item] = &[
         "从 themes\\*.json 加载配色；缺键回退预设，系统高对比度仍由系统接管（D-31）",
         ItemState::Ready,
         ItemControl::OpenThemes,
+    ),
+    item(
+        "候选拼音",
+        "候选框显示汉字上方的拼音及声调；保存后重启输入法生效",
+        ItemState::Ready,
+        ItemControl::CandidatePin,
     ),
     item(
         "英文输入法",
@@ -368,6 +376,8 @@ pub struct SettingsState {
     pub default_mode: ModeChoice,
     /// 在线更新开关（来自 `config.json`，P-03 默认关）。
     pub online_update: bool,
+    /// 候选框拼音行开关（来自 `config.json`，T-127 默认开；装配项）。
+    pub candidate_show_pin: bool,
     /// 当前子视图（互斥）；子视图数据在窗口层，这里只记状态。
     pub subview: Subview,
 }
@@ -380,6 +390,7 @@ impl Default for SettingsState {
             theme: ThemeChoice::Light,
             default_mode: ModeChoice::Chinese,
             online_update: false,
+            candidate_show_pin: true,
             subview: Subview::None,
         }
     }
@@ -405,13 +416,19 @@ impl SettingsState {
         }
     }
 
-    /// 按已保存的主题、默认中英模式与在线更新开关建立状态。
+    /// 按已保存的主题、默认中英模式、在线更新与候选拼音开关建立状态。
     #[must_use]
-    pub fn with_config(theme: ThemeChoice, default_mode: ModeChoice, online_update: bool) -> Self {
+    pub fn with_config(
+        theme: ThemeChoice,
+        default_mode: ModeChoice,
+        online_update: bool,
+        candidate_show_pin: bool,
+    ) -> Self {
         Self {
             theme,
             default_mode,
             online_update,
+            candidate_show_pin,
             ..Self::default()
         }
     }
@@ -584,6 +601,7 @@ mod tests {
                 "符号大全",
                 "主题",
                 "自定义主题",
+                "候选拼音",
                 "英文输入法",
                 "添加词库",
                 "用户词表",
@@ -687,9 +705,9 @@ mod tests {
         assert_eq!(state.expanded, None, "展开态属于页内下标，切页必须清空");
         // 同页重复选择不清空（关于页现已全接入，用常用设置的规划中条目复验）。
         state.select_page(Page::Common);
-        state.click_item(12);
+        state.click_item(13);
         state.select_page(Page::Common);
-        assert_eq!(state.expanded, Some(12));
+        assert_eq!(state.expanded, Some(13));
     }
 
     #[test]
@@ -697,7 +715,7 @@ mod tests {
         let mut state = SettingsState::new(ThemeChoice::Light);
         state.select_page(Page::Common);
         // 「简繁切换」仍是规划中条目：点击产生展开。
-        let planned = 12;
+        let planned = 13;
         state.click_item(planned);
         assert_eq!(state.expanded, Some(planned));
         assert!(state
@@ -707,9 +725,9 @@ mod tests {
         // 再点同一项收起。
         state.click_item(planned);
         assert_eq!(state.expanded, None);
-        // 主题（index 0）与恢复状态栏（index 9）已接入：点击不产生展开。
+        // 主题（index 0）与恢复状态栏（index 10）已接入：点击不产生展开。
         state.click_item(0);
-        state.click_item(9);
+        state.click_item(10);
         assert_eq!(state.expanded, None);
         assert_eq!(state.expanded_message(), None);
     }
@@ -724,7 +742,7 @@ mod tests {
         state.open_packs();
         assert_eq!(state.subview, Subview::Packs, "进入添加词库子视图");
         // 进入时清空展开态，避免与子视图叠加。
-        state.click_item(12);
+        state.click_item(13);
         state.open_manage();
         assert_eq!(state.subview, Subview::Manage, "管理输入法覆盖词库子视图");
         assert_eq!(state.expanded, None);
@@ -785,8 +803,23 @@ mod tests {
             "online_update 默认必须为 false（P-03）"
         );
         assert!(!SettingsState::new(ThemeChoice::Light).online_update);
-        let state = SettingsState::with_config(ThemeChoice::Dark, ModeChoice::English, true);
+        let state = SettingsState::with_config(ThemeChoice::Dark, ModeChoice::English, true, false);
         assert!(state.online_update, "显式开启后应为 true");
+        assert!(!state.candidate_show_pin, "候选拼音开关随配置装载（T-127）");
+    }
+
+    #[test]
+    fn 候选拼音开关默认显示且随配置装载() {
+        // T-127：默认显示（历史行为）；显式关闭随配置装载。
+        let state = SettingsState::default();
+        assert!(state.candidate_show_pin);
+        assert!(SettingsState::new(ThemeChoice::Light).candidate_show_pin);
+        let state =
+            SettingsState::with_config(ThemeChoice::Light, ModeChoice::Chinese, false, false);
+        assert!(!state.candidate_show_pin, "显式关闭后应为 false");
+        let state =
+            SettingsState::with_config(ThemeChoice::Light, ModeChoice::Chinese, false, true);
+        assert!(state.candidate_show_pin, "显式开启后应为 true");
     }
 
     #[test]

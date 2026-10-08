@@ -99,6 +99,23 @@ pub fn load_online_update(path: &Path) -> (bool, Option<String>) {
     (config.online_update, diagnostic)
 }
 
+/// 读取候选框拼音行开关；缺失或损坏回退显示（T-127 默认开，历史行为）。
+#[must_use]
+pub fn load_candidate_show_pin(path: &Path) -> (bool, Option<String>) {
+    let (config, diagnostic) = load_config(path);
+    (config.candidate_show_pin, diagnostic)
+}
+
+/// 只更新候选框拼音行开关并原子保存（T-127，S-8 同口径）。
+///
+/// 装配项：写进 `config.json` 后由 TSF DLL 下次装配读取；保存前重读避免
+/// 覆盖其他写入方（更新器 `last_check` 等）的字段。
+pub fn save_candidate_show_pin(path: &Path, show_pin: bool) -> Result<(), String> {
+    let (mut config, _) = load_config(path);
+    config.candidate_show_pin = show_pin;
+    save_config(path, &config)
+}
+
 /// 读取通讯录 vCard 路径列表；缺失或损坏回退空（附件为会话期收集，不作为默认配置）。
 #[must_use]
 pub fn load_contact_vcards(path: &Path) -> (Vec<PathBuf>, Option<String>) {
@@ -259,6 +276,55 @@ mod tests {
             Some(1_759_420_800),
             "提交前重读，更新器写入的 last_check 必须保留（S-8）"
         );
+    }
+
+    #[test]
+    fn 缺失配置候选拼音开关默认显示() {
+        let path = temp_dir("pin-missing").join("config.json");
+        let (show, diagnostic) = super::load_candidate_show_pin(&path);
+        assert!(show, "缺失配置默认显示拼音（历史行为）");
+        assert_eq!(diagnostic, None);
+    }
+
+    #[test]
+    fn 只改候选拼音开关不动其他字段且可回读() {
+        let dir = temp_dir("pin-preserve");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "enabled_packs": ["it"],
+                "theme": "dark",
+                "last_check": 1759420800,
+                "default_mode": "english"
+            }"#,
+        )
+        .unwrap();
+
+        super::save_candidate_show_pin(&path, false).unwrap();
+
+        let (config, diagnostic) = super::load(&path);
+        assert_eq!(diagnostic, None);
+        assert!(!config.candidate_show_pin, "关闭应被写入");
+        assert_eq!(config.enabled_packs, vec!["it"], "领域包勾选不得丢失");
+        assert_eq!(
+            config.theme,
+            zhu_ye_core::ThemeChoice::Dark,
+            "主题不得被重置"
+        );
+        assert_eq!(
+            config.default_mode,
+            zhu_ye_core::ModeChoice::English,
+            "默认模式不得被重置"
+        );
+        assert_eq!(
+            config.last_check,
+            Some(1_759_420_800),
+            "提交前重读，更新器写入的 last_check 必须保留（S-8）"
+        );
+        // 关闭后重新打开并回读（开关双向可切换）。
+        super::save_candidate_show_pin(&path, true).unwrap();
+        assert!(super::load_candidate_show_pin(&path).0);
     }
 
     #[test]

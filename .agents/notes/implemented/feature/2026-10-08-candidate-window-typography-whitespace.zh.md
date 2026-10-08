@@ -115,6 +115,36 @@ CJK 1.0→1.06em，`fit_text` 同步）—— 所有消费方矩形（行分栏�
 
 Related：[候选窗水平布局与拼音行排版](../../implemented/feature/2026-10-08-candidate-window-layout-pinyin-typography.zh.md)（T-122）保持 active —— 本 note 原位更新其拼音参数（字重/颜色/间距/字体、主文本加粗、行高）；序号右对齐与独立 `pin` 主题键决策不变。
 
+## 候选拼音显示开关（T-127）
+
+用户指令："设置里面可以设置候选框是否显示拼音及声调" —— 候选窗拼音行
+（含声调）的显示开关。
+
+决策与形态（沿用 FR-023/FR-024 开关先例，T-103）：
+
+- **配置格式**：`ConfigFile.candidate_show_pin: bool`，缺省 `true`
+  （保持历史行为；旧配置无该字段按开加载 —— 宽松解析、不递增
+  `CONFIG_FORMAT_VERSION`，与 `enable_abbreviation`/`enable_fuzzy` 同模式）。
+- **装配项，与主题同口径**：TSF 侧在装配期读一次（`configured_candidate_window`），
+  设置重启输入法后生效 —— 设置窗口如实提示，不假装即时生效。
+- **接线**：`CandidateWindow`/`CandidateWindowOptions`/`CandidateWindowState`
+  三层携带 `show_pin`；paint 短路条件为
+  `self.show_pin && !pin_text.is_empty() && pin_text != base`。关闭后候选行
+  走既有无拼音绘制路径（主文本与序号整行垂直居中）—— 无新增布局计算，
+  译文层拼音抑制与长拼音行为不受影响。新增构造
+  `with_theme_and_show_pin`/`with_custom_theme_and_show_pin`，旧构造保持
+  默认开；demo 增 `--no-pin` 便于截图验收。
+- **设置 UI**：常用设置页新增「候选拼音」条目（自定义主题与英文输入法
+  之间），关闭/显示二选一控件复用主题/模式/在线更新同一套 chips 机制
+  （`ItemControl::CandidatePin`/`ChipValue::CandidatePin`/
+  `candidate_pin_chips`）；`load_/save_candidate_show_pin` 与所有单字段
+  写入方一致遵循 S-8 提交前重读。
+
+验证：core（serde 默认开 + 往返）、settings（状态装载、chips 几何、
+持久化保留字段）、ime 套件单测全绿；96dpi demo 截图像素探针 ——
+`--no-pin` 拼音带（y117-127）灰像素 0 对默认 25（拼音行确实消失），
+主文本带两态均正常。
+
 ## 部署通道备忘（流程、电池供电）
 
 用户机部署通道是计划任务 `ZhuYeImeElevated`（`InteractiveToken` +

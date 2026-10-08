@@ -201,7 +201,17 @@ impl WindowState {
             Some(path) => config::load_online_update(path).0,
             None => false,
         };
-        let mut settings = SettingsState::with_config(theme.clone(), default_mode, online_update);
+        // T-127：候选框拼音行默认显示（历史行为）；从配置装载，窗口如实反映。
+        let candidate_show_pin = match &config_path {
+            Some(path) => config::load_candidate_show_pin(path).0,
+            None => true,
+        };
+        let mut settings = SettingsState::with_config(
+            theme.clone(),
+            default_mode,
+            online_update,
+            candidate_show_pin,
+        );
         if let Some(page) = options.shot_page {
             settings.page = page;
             settings.expanded = options.shot_expanded;
@@ -628,7 +638,7 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
         if layout::contains(row.rect, x, y) {
             match items[row.index].control {
                 // 二选一行本身不切换展开，避免与控件块点击混淆。
-                ItemControl::ThemeChoice | ItemControl::ModeChoice => {}
+                ItemControl::ThemeChoice | ItemControl::ModeChoice | ItemControl::CandidatePin => {}
                 ItemControl::OpenPanel(kind) => open_panel(hwnd, state, kind),
                 ItemControl::OpenPath(target) => open_target(state, target),
                 ItemControl::OpenPacks => {
@@ -1162,13 +1172,36 @@ const fn mode_label(mode: ModeChoice) -> &'static str {
     }
 }
 
-/// 二选一控件命中后的分发：主题、默认中英模式（D-32）或在线更新开关（P-03）。
+/// 二选一控件命中后的分发：主题、默认中英模式（D-32）、在线更新开关（P-03）
+/// 或候选框拼音行开关（T-127）。
 fn apply_chip(state: &mut WindowState, chip: &Chip) {
     match &chip.value {
         ChipValue::Theme(choice) => apply_theme(state, choice.clone()),
         ChipValue::Mode(mode) => apply_mode(state, *mode),
         ChipValue::OnlineUpdate(on) => apply_online_update(state, *on),
+        ChipValue::CandidatePin(show) => apply_candidate_show_pin(state, *show),
     }
+}
+
+/// 应用候选框拼音行开关并持久化（T-127）。
+///
+/// 装配项：写进 `config.json` 的 `candidate_show_pin`，由 TSF DLL 下次装配读取
+/// （候选窗随输入法实例创建），设置窗口不回传"立即生效"的假象——与主题同口径。
+fn apply_candidate_show_pin(state: &mut WindowState, show: bool) {
+    state.settings.candidate_show_pin = show;
+    state.hint = Some(match &state.config_path {
+        Some(path) => match config::save_candidate_show_pin(path, show) {
+            Ok(()) => {
+                if show {
+                    "已开启候选拼音：候选框显示汉字上方的拼音及声调，重启输入法后生效".to_owned()
+                } else {
+                    "已关闭候选拼音：候选框不再显示拼音及声调，重启输入法后生效".to_owned()
+                }
+            }
+            Err(error) => format!("保存失败：{error}"),
+        },
+        None => "未找到配置目录（APPDATA 未设置），本次选择不会保留".to_owned(),
+    });
 }
 
 /// 应用在线更新开关并持久化（T-077 / FR-044，P-03）。
@@ -2240,6 +2273,7 @@ unsafe fn draw_items(
                 ChipValue::Theme(choice) => *choice == state.settings.theme,
                 ChipValue::Mode(mode) => *mode == state.settings.default_mode,
                 ChipValue::OnlineUpdate(on) => *on == state.settings.online_update,
+                ChipValue::CandidatePin(show) => *show == state.settings.candidate_show_pin,
             };
             let background = if selected {
                 theme.control_selected
