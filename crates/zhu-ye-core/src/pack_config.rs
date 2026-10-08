@@ -251,6 +251,10 @@ pub struct ConfigFile {
     /// **不递增 `CONFIG_FORMAT_VERSION`**（旧配置无此字段按默认处理）。
     #[serde(default, deserialize_with = "crate::log_level::deserialize_log_level")]
     pub log_level: crate::log_level::LogLevel,
+    /// 候选框是否显示拼音及声调（T-127）；默认 `true`（显示，历史行为）。
+    /// 关闭后候选窗不画拼音行：行内主文本/序号回到整行垂直居中形态。
+    #[serde(default = "default_candidate_show_pin")]
+    pub candidate_show_pin: bool,
 }
 
 fn default_version() -> u32 {
@@ -269,6 +273,10 @@ fn default_enable_fuzzy() -> bool {
     true
 }
 
+fn default_candidate_show_pin() -> bool {
+    true
+}
+
 impl Default for ConfigFile {
     fn default() -> Self {
         Self {
@@ -283,6 +291,7 @@ impl Default for ConfigFile {
             theme: ThemeChoice::Light,
             default_mode: ModeChoice::Chinese,
             log_level: crate::log_level::LogLevel::default(),
+            candidate_show_pin: true,
         }
     }
 }
@@ -683,6 +692,22 @@ mod tests {
         // 单开关独立生效。
         let only_fuzzy = ConfigFile::from_json(r#"{"enable_fuzzy": false}"#).unwrap();
         assert!(only_fuzzy.enable_abbreviation && !only_fuzzy.enable_fuzzy);
+    }
+
+    #[test]
+    fn 候选拼音开关默认开且可关闭往返() {
+        // T-127：新字段默认 true（显示拼音及声调，历史行为），旧配置无字段按默认。
+        let config = ConfigFile::default();
+        assert!(config.candidate_show_pin);
+        let legacy = ConfigFile::from_json(r#"{"enabled_packs": ["it"]}"#).unwrap();
+        assert!(legacy.candidate_show_pin, "旧配置（无该字段）应默认为开");
+        // 显式关闭序列化往返一致。
+        let off = ConfigFile::from_json(r#"{"candidate_show_pin": false}"#).unwrap();
+        assert!(!off.candidate_show_pin);
+        let text = off.to_json().unwrap();
+        assert_eq!(ConfigFile::from_json(&text).unwrap(), off);
+        // 序列化写出布尔值（而非缺失键），供设置窗口/TSF 双侧读取。
+        assert!(text.contains(r#""candidate_show_pin": false"#), "{text}");
     }
 
     #[test]

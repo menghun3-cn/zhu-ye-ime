@@ -265,11 +265,18 @@ fn configured_custom_theme() -> Option<zhu_ye_core::ThemeFile> {
     zhu_ye_core::load_theme_file(&themes.join(format!("{name}.json"))).ok()
 }
 
-/// 从配置解析装配候选窗的控制器：无自定义主题走偏好路径，有则用主题文件（T-088）。
+/// 从配置解析装配候选窗的控制器：无自定义主题走偏好路径，有则用主题文件（T-088）；
+/// 拼音行是否显示（T-127）随装配项 `candidate_show_pin` 一并传入。
 fn configured_candidate_window() -> CandidateWindow {
+    let (config, _) = zhu_ye_core::load_config(&config_path());
     match configured_custom_theme() {
-        Some(file) => CandidateWindow::with_custom_theme(file),
-        None => CandidateWindow::with_theme(configured_theme_preference()),
+        Some(file) => {
+            CandidateWindow::with_custom_theme_and_show_pin(file, config.candidate_show_pin)
+        }
+        None => CandidateWindow::with_theme_and_show_pin(
+            configured_theme_preference(),
+            config.candidate_show_pin,
+        ),
     }
 }
 

@@ -39,6 +39,7 @@ fn run() -> Result<(), String> {
     let mut translation_mode = false;
     let mut emoji_row = false;
     let mut long_input = false;
+    let mut no_pin = false;
 
     let mut index = 0usize;
     while index < args.len() {
@@ -70,11 +71,12 @@ fn run() -> Result<(), String> {
             "--translation-mode" => translation_mode = true,
             "--emoji" => emoji_row = true,
             "--long" => long_input = true,
+            "--no-pin" => no_pin = true,
             "--help" | "-h" => {
                 println!(
                     "用法: candidate-demo [--theme auto|light|dark|high-contrast] \
                      [--dpi <px>] [--seconds <s>] [--shot <bmp>] [--translation-mode] \
-                     [--emoji] [--long]"
+                     [--emoji] [--long] [--no-pin]"
                 );
                 return Ok(());
             }
@@ -89,6 +91,7 @@ fn run() -> Result<(), String> {
         seconds,
         shot_path,
         custom_theme: None,
+        show_pin: !no_pin,
     };
     run_candidate_demo(demo_view(translation_mode, emoji_row, long_input), &options)
 }
