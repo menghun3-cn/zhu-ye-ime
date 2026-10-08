@@ -69,3 +69,13 @@ to the font set (`gdi.rs`), the layout constants (`layout.rs`), and the paint co
   95px = **76dp**; nav row pitch 67px = **54dp**; selected 工具箱 glyph span per char
   +16% vs unselected rows (bold); divider 1px line with ≈30px whitespace below the
   description.
+- VM acceptance (Server 2019, 96dpi, `--shot` 880×700): toolbox/common/about pages
+  captured; item title ink bands at pitches of exactly 76px, page title ink height
+  23px ≈ **24dp**, selected nav 工具箱 blue bold glyphs span 50px (16px regular
+  three-char ≈48-56px) — matching the local 125% results.
+- One VM quirk recorded for future runs: on that remote-session VM the *first*
+  frame of a settings `--shot` occasionally paints no item text (everything else —
+  nav/title/backgrounds — renders), i.e. the item text rasterizes only after the
+  font cache warms. Re-running the same binary captures full text; not observed
+  locally or on the user machine; not a code path difference (fonts verified valid,
+  `DrawTextW` returns positive height, layouts identical).
