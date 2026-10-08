@@ -20,9 +20,9 @@ use windows::Win32::Graphics::Gdi::{
     BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_GRAYTEXT,
     COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET,
     DEFAULT_GUI_FONT, DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
-    DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW,
-    MONITORINFO, MONITOR_DEFAULTTONEAREST, OBJ_FONT, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL,
-    PS_SOLID, SRCCOPY, TRANSPARENT,
+    DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC, HFONT, HGDIOBJ,
+    LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, OBJ_FONT, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -351,8 +351,9 @@ impl CandidateWindowState {
         quit_on_destroy: bool,
     ) -> Self {
         let metrics = CandidateMetrics::new(initial_dpi.max(BASE_DPI));
-        let (font, font_is_stock) = create_font(metrics.font_height);
-        let (pin_font, pin_font_is_stock) = create_font(metrics.pin_font_height);
+        let (font, font_is_stock) = create_font(metrics.font_height, FW_NORMAL.0 as i32);
+        let (pin_font, pin_font_is_stock) =
+            create_font(metrics.pin_font_height, FW_SEMIBOLD.0 as i32);
         Self {
             view,
             theme: resolve_with_custom(options.theme, options.custom_theme.as_ref()),
@@ -379,7 +380,7 @@ impl CandidateWindowState {
                 let _ = DeleteObject(old_font.into());
             }
         }
-        let (font, font_is_stock) = create_font(metrics.font_height);
+        let (font, font_is_stock) = create_font(metrics.font_height, FW_NORMAL.0 as i32);
         self.font = font;
         self.font_is_stock = font_is_stock;
         let old_pin_font = mem::take(&mut self.pin_font);
@@ -388,7 +389,8 @@ impl CandidateWindowState {
                 let _ = DeleteObject(old_pin_font.into());
             }
         }
-        let (pin_font, pin_font_is_stock) = create_font(metrics.pin_font_height);
+        let (pin_font, pin_font_is_stock) =
+            create_font(metrics.pin_font_height, FW_SEMIBOLD.0 as i32);
         self.pin_font = pin_font;
         self.pin_font_is_stock = pin_font_is_stock;
         self.metrics = metrics;
@@ -440,12 +442,11 @@ impl CandidateWindowState {
             } else {
                 self.theme.marker
             };
-            draw_text(
-                hdc,
-                &index_marker(index),
-                self.metrics.marker_rect(row_ui),
-                marker_color,
-            );
+            // T-122：序号右对齐到标记列右缘（再让出 `marker_text_gap` 间距），
+            // 单/双位数字都紧贴候选词、留白稳定在 4-8px 档，不再随数字宽度漂移。
+            let mut marker_rect = self.metrics.marker_rect(row_ui);
+            marker_rect.right -= self.metrics.marker_text_gap;
+            draw_text_right(hdc, &index_marker(index), marker_rect, marker_color);
 
             // M6-R：网络语缩写候选在主文本后追加 `[网络]` 标注；
             // 标注并入主文本，宽度估算（row_split）自然把它计入。
@@ -503,7 +504,9 @@ impl CandidateWindowState {
                     bottom: pin_bottom,
                 };
                 let _ = unsafe { SelectObject(hdc, self.pin_font.into()) };
-                draw_text(hdc, &pin_text, pin_rect, self.theme.secondary);
+                // T-122：拼音行颜色独立为 `theme.pin`（加深灰），不再用译文/序号
+                // 的 `secondary` 浅灰——小字在候选词上方仍保持清晰对比。
+                draw_text(hdc, &pin_text, pin_rect, self.theme.pin);
                 let _ = unsafe { SelectObject(hdc, self.font.into()) };
                 (
                     UiRect {
@@ -1059,7 +1062,7 @@ fn draw_text_right(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
     }
 }
 
-fn create_font(height: i32) -> (HFONT, bool) {
+fn create_font(height: i32, weight: i32) -> (HFONT, bool) {
     unsafe {
         let mut face = [0u16; 32];
         // T-034：候选框字体为宋体（SimSun）。此前字体名虽设为雅黑却从未
@@ -1069,7 +1072,8 @@ fn create_font(height: i32) -> (HFONT, bool) {
         }
         let metrics = LOGFONTW {
             lfHeight: -height,
-            lfWeight: FW_NORMAL.0 as i32,
+            // T-122：拼音行半粗（FW_SEMIBOLD）提升小字可读性；主文本保持常规。
+            lfWeight: weight,
             lfCharSet: DEFAULT_CHARSET,
             lfOutPrecision: OUT_DEFAULT_PRECIS,
             lfClipPrecision: CLIP_DEFAULT_PRECIS,

@@ -119,8 +119,10 @@ pub struct CandidateUiTheme {
     pub background: UiColor,
     /// 主文本。
     pub foreground: UiColor,
-    /// 弱化文本（译文、提示、拼音）。
+    /// 弱化文本（译文、提示、序号）。
     pub secondary: UiColor,
+    /// 拼音行小字专用色（T-122：加深灰独立于译文/序号，保证小字对比度）。
+    pub pin: UiColor,
     /// 边框。
     pub border: UiColor,
     /// 选中行背景。
@@ -140,6 +142,8 @@ pub fn theme(kind: UiThemeKind) -> CandidateUiTheme {
             background: UiColor::rgb(0xFF, 0xFF, 0xFF),
             foreground: UiColor::rgb(0x1E, 0x88, 0xE5),
             secondary: UiColor::rgb(0x99, 0x99, 0x99),
+            // T-122：拼音行深灰（对比度 ≈7:1，小字清晰；仍弱于主文本蓝色）。
+            pin: UiColor::rgb(0x55, 0x55, 0x55),
             border: UiColor::rgb(0x1E, 0x88, 0xE5),
             highlight_background: UiColor::rgb(0xE6, 0xF2, 0xFE),
             highlight_foreground: UiColor::rgb(0xD3, 0x2F, 0x2F),
@@ -150,6 +154,8 @@ pub fn theme(kind: UiThemeKind) -> CandidateUiTheme {
             background: UiColor::rgb(0x20, 0x20, 0x20),
             foreground: UiColor::rgb(0x64, 0xB5, 0xF6),
             secondary: UiColor::rgb(0x9E, 0x9E, 0x9E),
+            // T-122：拼音行亮灰（比译文/序号更亮一档，深底上保持可读）。
+            pin: UiColor::rgb(0xC9, 0xC9, 0xC9),
             border: UiColor::rgb(0x42, 0xA5, 0xF5),
             highlight_background: UiColor::rgb(0x3A, 0x4A, 0x5C),
             highlight_foreground: UiColor::rgb(0xFF, 0x8A, 0x80),
@@ -173,6 +179,9 @@ pub fn theme_from_system_colors(colors: SystemColors) -> CandidateUiTheme {
         background: UiColor(bgr_to_rgb(colors.window)),
         foreground: UiColor(bgr_to_rgb(colors.window_text)),
         secondary: UiColor(bgr_to_rgb(colors.gray_text)),
+        // T-122：高对比度下拼音行沿用系统 gray_text（与译文/序号同色），
+        // 不另起对比度——系统高对比方案本身保证前景可辨。
+        pin: UiColor(bgr_to_rgb(colors.gray_text)),
         border: UiColor(bgr_to_rgb(colors.btn_face)),
         highlight_background: UiColor(bgr_to_rgb(colors.highlight)),
         highlight_foreground: UiColor(bgr_to_rgb(colors.highlight_text)),
@@ -194,6 +203,7 @@ pub fn theme_with_candidate(
         background: overlay(base.background, palette.background),
         foreground: overlay(base.foreground, palette.foreground),
         secondary: overlay(base.secondary, palette.secondary),
+        pin: overlay(base.pin, palette.pin),
         border: overlay(base.border, palette.border),
         highlight_background: overlay(base.highlight_background, palette.highlight_background),
         highlight_foreground: overlay(base.highlight_foreground, palette.highlight_foreground),
@@ -218,8 +228,10 @@ pub struct CandidateMetrics {
     pub row_height: i32,
     /// 行间距。
     pub row_gap: i32,
-    /// 数字标记列宽。
+    /// 数字标记列宽（= 主文本左对齐起点偏移）。
     pub marker_width: i32,
+    /// 数字与候选词的固定间距（T-122：序号右对齐到列右缘后与词的间距）。
+    pub marker_text_gap: i32,
     /// 主文本与译文分栏间距。
     pub translation_gap: i32,
     /// 选中块相对面板左右边框的内缩量（T-043）。
@@ -256,7 +268,10 @@ impl CandidateMetrics {
             row_height: dp(36.0),
             row_gap: dp(2.0),
             // T-037：序号列收窄使候选词更贴近序号；译文紧随主文本间距减小。
-            marker_width: dp(26.0),
+            // T-122：列宽 26→22（词起点左移 4px）并让序号右对齐、词起点固定
+            // 留 `marker_text_gap` 间距（4-8px 档），消除数字后多余留白。
+            marker_width: dp(22.0),
+            marker_text_gap: dp(6.0),
             translation_gap: dp(8.0),
             // T-043：选中块贴面板左右边框（仅保留 1px 边框线内缩）。
             highlight_inset_x: 1,
@@ -264,8 +279,9 @@ impl CandidateMetrics {
             footer_height: dp(20.0),
             corner_radius: dp(8.0),
             font_height: dp(16.0),
-            pin_font_height: dp(11.0),
-            pin_line_gap: dp(3.0),
+            // T-122：拼音行字 11→13、与主文本间距 3→4（小尺寸下更清晰、留出呼吸感）。
+            pin_font_height: dp(13.0),
+            pin_line_gap: dp(4.0),
         }
     }
 
@@ -800,5 +816,45 @@ mod tests {
         assert_eq!(dark.highlight_foreground, UiColor::rgb(0xFF, 0x8A, 0x80));
         assert_eq!(dark.marker, dark.secondary);
         assert_ne!(dark.marker, dark.foreground);
+    }
+
+    #[test]
+    fn 拼音行色独立于序号译文且对比更强() {
+        // T-122：拼音行用专用加深灰——浅色底下比 secondary 更暗、深色底下更亮，
+        // 保证小字可读；高对比度沿用系统 gray_text（与译文同源）。
+        let light = theme(UiThemeKind::Light);
+        let dark = theme(UiThemeKind::Dark);
+        assert_ne!(light.pin, light.secondary, "拼音行不得沿用译文浅灰");
+        assert_ne!(dark.pin, dark.secondary, "拼音行不得沿用译文浅灰");
+        // 浅色底：pin 应比 secondary 更暗（灰度分量更低）。
+        assert!((light.pin.0 >> 16) < (light.secondary.0 >> 16));
+        assert!((light.pin.0 & 0xFF) < (light.secondary.0 & 0xFF));
+        // 深色底：pin 应比 secondary 更亮。
+        assert!(
+            (dark.pin.0 & 0xFF) > (dark.secondary.0 & 0xFF),
+            "深色底拼音行应亮于译文/序号"
+        );
+    }
+
+    #[test]
+    fn 序号与候选词间距稳定在四到八像素() {
+        // T-122：数字右对齐于标记列右缘并让出 marker_text_gap，96dpi 下
+        // 单/双位数字与候选词间距都落在用户要求的 4-8px 档。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        assert!(
+            (4..=8).contains(&metrics.marker_text_gap),
+            "marker_text_gap 应在 4-8px，实际 {}",
+            metrics.marker_text_gap
+        );
+        // 词起点比旧值（26px）明显左移，且标记列仍留有双位数字空间。
+        assert!(metrics.marker_width < 26, "词起点应比旧版更靠左");
+        assert!(metrics.marker_width - metrics.marker_text_gap >= 14);
+        // 拼音行字号提升且仍小于主文本（层级：主文本 > 拼音）。
+        assert!(metrics.pin_font_height > 12, "拼音行应大于 12px");
+        assert!(metrics.pin_font_height < metrics.font_height);
+        assert!(metrics.pin_line_gap >= 4, "拼音行与主文本间距应 ≥4px");
+        // 拼音带（字号+行距）不应挤占主文本区：行高 36 ≥ 拼音带 + 16px 主字。
+        let pin_band = metrics.pin_font_height + metrics.pin_line_gap;
+        assert!(metrics.row_height - pin_band >= metrics.font_height);
     }
 }

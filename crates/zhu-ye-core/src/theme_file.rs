@@ -2,7 +2,8 @@
 //!
 //! 主题文件存于 `%APPDATA%\zhu-ye-ime\themes\<名称>.json`，一份文件同时描述候选窗
 //! 与设置窗口两组配色（"候选窗与设置窗口同源读取"，S-2），键集分别对齐
-//! `CandidateUiTheme`（7 键）与 `SettingsTheme`（15 键）：
+//! `CandidateUiTheme`（8 键，`pin` 拼音行色为可选键，缺省回退加深灰默认）
+//! 与 `SettingsTheme`（15 键）：
 //!
 //! ```json
 //! {
@@ -11,7 +12,7 @@
 //!   "candidate": {
 //!     "background": "#202020", "foreground": "#64B5F6", "secondary": "#9E9E9E",
 //!     "border": "#42A5F5", "highlight_background": "#3A4A5C",
-//!     "highlight_foreground": "#FF8A80", "marker": "#9E9E9E"
+//!     "highlight_foreground": "#FF8A80", "marker": "#9E9E9E", "pin": "#C9C9C9"
 //!   },
 //!   "settings": { "window": "#1F1F1F", "...": "..." }
 //! }
@@ -35,7 +36,7 @@ pub const THEME_FILE_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemeColor(pub u32);
 
-/// 候选窗配色节（键集 = `CandidateUiTheme` 7 键）。
+/// 候选窗配色节（键集 = `CandidateUiTheme` 8 键）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CandidatePalette {
     pub background: Option<ThemeColor>,
@@ -45,6 +46,9 @@ pub struct CandidatePalette {
     pub highlight_background: Option<ThemeColor>,
     pub highlight_foreground: Option<ThemeColor>,
     pub marker: Option<ThemeColor>,
+    /// 拼音行专用色（T-122 候选窗视觉批次：拼音小字对比度独立于译文/序号）。
+    /// 可选键：缺省时回退 `CandidateUiTheme::pin` 默认加深灰。
+    pub pin: Option<ThemeColor>,
 }
 
 /// 设置窗口配色节（键集 = `SettingsTheme` 15 键）。
@@ -133,6 +137,7 @@ fn parse_candidate(value: Option<&serde_json::Value>) -> CandidatePalette {
         highlight_background: get("highlight_background"),
         highlight_foreground: get("highlight_foreground"),
         marker: get("marker"),
+        pin: get("pin"),
     }
 }
 
@@ -218,6 +223,7 @@ mod tests {
         );
         // 未写的键为 None（调用方回退默认值）。
         assert_eq!(file.candidate.marker, None);
+        assert_eq!(file.candidate.pin, None);
         assert_eq!(file.settings.window, Some(super::ThemeColor(0x1F_1F_1F)));
         assert_eq!(file.settings.accent, Some(super::ThemeColor(0x42_A5_F5)));
         assert_eq!(file.settings.warn_text, None);
@@ -232,6 +238,7 @@ mod tests {
                 "candidate": {
                     "background": "202020",
                     "foreground": "64b5f6",
+                    "pin": "#6F6F6F",
                     "unknown_key": "#123456"
                 }
             }"##,
@@ -246,6 +253,7 @@ mod tests {
             Some(super::ThemeColor(0x64_B5_F6))
         );
         assert_eq!(file.candidate.secondary, None);
+        assert_eq!(file.candidate.pin, Some(super::ThemeColor(0x6F_6F_6F)));
     }
 
     #[test]
