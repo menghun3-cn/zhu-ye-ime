@@ -69,7 +69,15 @@ row_height`).
 - The gap between index and word is now visually stable at ~6px at 96dpi for every
   page, matching the user's 4-8px request; word start moves 4px left.
 - Pinyin/tone text reads clearly at small size: deeper grey (or brighter grey on
-  dark), 13px, semi-bold, with a 4px gap above the word.
+  dark), 13px, semi-bold, with a 4px gap above the word. (T-126 later superseded
+  these parameters: shipped pinyin line is now Segoe UI 13px `FW_NORMAL` #888888
+  on light (user asked for a light auxiliary hint instead of a high-contrast
+  detail), gap 4dp with ≈6px visible ink spacing, and the main text became 16px
+  `FW_SEMIBOLD` with the width-estimate coefficients widened (ASCII 0.55→0.58em,
+  CJK 1.0→1.06em) so the estimated rects fit the synthetic bold ink — see the
+  [typography-whitespace](../../implemented/feature/2026-10-08-candidate-window-typography-whitespace.md)
+  note; its pool of decisions supersedes the ones listed here.) The dedicated
+  `pin` theme key, the index right-alignment, and word-start x=34 remain valid.
 - Theme authors may optionally add `"pin"` to the `candidate` section of a theme
   file; old files are unaffected (key missing → default).
 - `CandidateUiTheme` is now an 8-key structure; every construction site was updated

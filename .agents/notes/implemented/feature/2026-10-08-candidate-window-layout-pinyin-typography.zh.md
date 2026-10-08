@@ -33,7 +33,7 @@ Status: implemented
 ## Consequences
 
 - 序号与词的间距在所有页码下稳定在 ~6px（96dpi），满足用户 4-8px 要求；词起点左移 4px。
-- 拼音/声调小字清晰可辨：更深灰（深色下更亮灰）、13px、半粗、词上方留 4px 行距。
+- 拼音/声调小字清晰可辨：更深灰（深色下更亮灰）、13px、半粗、词上方留 4px 行距。（T-126 已覆盖这些参数：现行拼音行为 Segoe UI 13px `FW_NORMAL`、浅色 #888888（用户要浅色辅助提示而非高对比细节）、间距 4dp（视觉墨迹 ≈6px），主文本改 16px `FW_SEMIBOLD` 且宽度估算系数加宽（ASCII 0.55→0.58em、CJK 1.0→1.06em）以容纳假粗墨迹 —— 见 [排版与留白美化](../../implemented/feature/2026-10-08-candidate-window-typography-whitespace.zh.md)（T-126）笔记，其决策池覆盖此处所列；独立 `pin` 主题键、序号右对齐、词起点 x=34 仍有效。）
 - 主题作者可在主题文件 `candidate` 节可选添加 `"pin"`；旧文件不受影响（缺键 → 默认）。
 - `CandidateUiTheme` 变为 8 键结构，所有构造点已同步（`theme()` ×3、`theme_from_system_colors`、`theme_with_candidate`）；candidate-demo 演示项携带带调拼音（你好 → nǐ hǎo），截图可覆盖拼音行。
 

@@ -455,12 +455,6 @@ impl CandidateWindowState {
             } else {
                 self.theme.marker
             };
-            // T-122：序号右对齐到标记列右缘（再让出 `marker_text_gap` 间距），
-            // 单/双位数字都紧贴候选词、留白稳定在 4-8px 档，不再随数字宽度漂移。
-            let mut marker_rect = metrics.marker_rect(row_ui);
-            marker_rect.right -= metrics.marker_text_gap;
-            draw_text_right(hdc, &index_marker(index), marker_rect, marker_color);
-
             // M6-R：网络语缩写候选在主文本后追加 `[网络]` 标注；
             // 标注并入主文本，宽度估算（row_split）自然把它计入。
             let base = display_main_text(item, self.view.translation_mode);
@@ -497,14 +491,22 @@ impl CandidateWindowState {
             // T-037：动态分栏——译文紧跟主文本（不再固定右侧 1/3 列），
             // 英文译文更靠左、可用宽度更大。
             let (main_col, translation_col) = metrics.row_split(row_ui, main, secondary);
-            let (main_rect, translation_rect) = if show_pin {
-                // 拼音行占行首上方区（小字体），主文本与译文下移至其下方，
-                // 两段互不重叠；无拼音行保持原样（整行垂直居中）。
+            let pin_rect = if show_pin {
+                Some(metrics.pin_row_rect(row_ui, main_col, &pin_text))
+            } else {
+                None
+            };
+            let (main_rect, translation_rect) = if let Some(pin_rect) = pin_rect {
+                // 拼音行占行首上方字形区（小字体），主文本与译文区从
+                // 「拼音字形区底 + pin_line_gap」起（视觉间距精确 = 4px，
+                // `DT_VCENTER` 不会吃掉间距——矩形高=字高，无居中余量）；
+                // 主文本矩形高度=字高，顶/底均锚定字形带（汉字与序号
+                // 同带垂直居中）。无拼音行保持原样（整行垂直居中）。
                 // T-126：拼音矩形由 `pin_row_rect` 计算——左缘与汉字列严格
-                // 对齐、宽度容纳拼音内容（超出汉字宽时不截断）、底部 = 行顶
-                // + 拼音带（字高 + 8px 间距），主文本区随之整体下移。
-                let pin_rect = metrics.pin_row_rect(row_ui, main_col, &pin_text);
+                // 对齐、宽度容纳拼音内容（超出汉字宽时不截断）。
                 let pin_bottom = pin_rect.bottom;
+                let main_top = pin_bottom.saturating_add(metrics.pin_line_gap);
+                let main_bottom = main_top.saturating_add(metrics.font_height);
                 let _ = unsafe { SelectObject(hdc, self.pin_font.into()) };
                 // T-122：拼音行颜色独立为 `theme.pin`；
                 // T-126：浅色主题下为辅助提示淡灰 #888888（Segoe UI 渲染声调）。
@@ -513,20 +515,33 @@ impl CandidateWindowState {
                 (
                     UiRect {
                         left: main_col.left,
-                        top: pin_bottom,
+                        top: main_top,
                         right: main_col.right,
-                        bottom: row_ui.bottom,
+                        bottom: main_bottom,
                     },
                     UiRect {
                         left: translation_col.left,
-                        top: pin_bottom,
+                        top: main_top,
                         right: translation_col.right,
-                        bottom: row_ui.bottom,
+                        bottom: main_bottom,
                     },
                 )
             } else {
                 (main_col, translation_col)
             };
+            // T-122：序号右对齐到标记列右缘（再让出 `marker_text_gap` 间距），
+            // 单/双位数字都紧贴候选词、留白稳定在 4-8px 档，不再随数字宽度漂移。
+            // T-126 用户后续指令："序号和中文那行对齐，不要和拼音对齐"——
+            // 有拼音行时序号随主文本带移动，与汉字同竖直中心；无拼音行
+            // （译文模式）仍整行垂直居中。
+            let mut marker_rect = metrics.marker_rect(row_ui);
+            if let Some(pin_rect) = pin_rect {
+                let main_top = pin_rect.bottom.saturating_add(metrics.pin_line_gap);
+                marker_rect.top = main_top;
+                marker_rect.bottom = main_top.saturating_add(metrics.font_height);
+            }
+            marker_rect.right -= metrics.marker_text_gap;
+            draw_text_right(hdc, &index_marker(index), marker_rect, marker_color);
             draw_text(hdc, main, main_rect, text_color);
             draw_text(hdc, secondary, translation_rect, self.theme.secondary);
         }

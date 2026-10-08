@@ -251,7 +251,8 @@ pub struct CandidateMetrics {
     pub font_height: i32,
     /// 拼音行小字体像素高度（T-115 后续：候选词上方拼音小字，仿微软拼音布局）。
     pub pin_font_height: i32,
-    /// 拼音行与主文本的垂直间距（T-115 后续）。
+    /// 拼音行与主文本的垂直间距（T-115 后续；T-126 定稿 4dp——用户要求
+    /// "拼音和中文距离减少一半"，原 8dp 减半）。
     pub pin_line_gap: i32,
 }
 
@@ -288,10 +289,11 @@ impl CandidateMetrics {
             corner_radius: dp(8.0),
             font_height: dp(16.0),
             // T-122：拼音行字 11→13、与主文本间距 3→4（小尺寸下更清晰、留出呼吸感）。
-            // T-126：拼音-主文本间距 4→8（用户 margin-bottom 4-8px 档取上限，
-            // 拼音与汉字彻底拉开）；字号保持 13dp（用户 12/13px 档）。
+            // T-126：拼音-主文本间距取用户 4-8px 档上限 8px；用户此后要求
+            // "拼音和中文距离减少一半"，定稿 4px（档内偏紧凑，拼音贴近汉字）。
+            // 字号保持 13dp（用户 12/13px 档）。
             pin_font_height: dp(13.0),
-            pin_line_gap: dp(8.0),
+            pin_line_gap: dp(4.0),
         }
     }
 
@@ -500,7 +502,9 @@ impl CandidateMetrics {
     /// 左缘与主文本列严格对齐（序号、拼音、汉字同一左缘，上下对齐关系
     /// 稳定）；宽度取「主文本列宽」与「拼音内容估算宽」的较大者（不超行
     /// 右缘）——拼音比汉字窄时与汉字同宽，拼音比汉字宽时完整容纳不截断，
-    /// 拼音因此不会"乱跑"。顶边=行顶，底边=顶边+拼音带（字高+间距）。
+    /// 拼音因此不会"乱跑"。顶边=行顶，底边=顶边+拼音字高（**纯字形区**，
+    /// 不含间距：拼音-汉字视觉间距由主文本区顶边 = 本矩形底 + `pin_line_gap`
+    /// 提供，`DT_VCENTER` 不会被带高吸收，间距精确可测）。
     #[must_use]
     pub fn pin_row_rect(&self, row: UiRect, main_col: UiRect, pin: &str) -> UiRect {
         let pin_width = estimate_text_width(pin, self.pin_font_height)
@@ -512,14 +516,12 @@ impl CandidateMetrics {
             .max(main_col.right)
             .min(row.right)
             .max(main_col.left + 1);
-        let band_bottom = row
-            .top
-            .saturating_add(self.pin_font_height + self.pin_line_gap);
+        let glyph_bottom = row.top.saturating_add(self.pin_font_height);
         UiRect {
             left: main_col.left,
             top: row.top,
             right,
-            bottom: band_bottom.min(row.bottom).max(row.top + 1),
+            bottom: glyph_bottom.min(row.bottom).max(row.top + 1),
         }
     }
 
@@ -1044,13 +1046,14 @@ mod tests {
         // 拼音行字号提升且仍小于主文本（层级：主文本 > 拼音）。
         assert!(metrics.pin_font_height > 12, "拼音行应大于 12px");
         assert!(metrics.pin_font_height < metrics.font_height);
-        // T-126：拼音与汉字的垂直间距取用户 4-8px 档上限 8px。
+        // T-126：拼音与汉字垂直间距先取 4-8px 档上限 8px，用户随后要求
+        // "拼音和中文距离减少一半"→ 定稿 4px（档内偏紧凑）。
         assert!(
             (4..=8).contains(&metrics.pin_line_gap),
             "拼音行与主文本间距应在 4-8px，实际 {}",
             metrics.pin_line_gap
         );
-        assert_eq!(metrics.pin_line_gap, 8, "取 4-8px 档上限拉开拼音与汉字");
+        assert_eq!(metrics.pin_line_gap, 4, "用户要求间距减半，定稿 4px");
         // 拼音带（字号+行距）不应挤占主文本区：行高 48 ≥ 拼音带 + 16px 主字。
         let pin_band = metrics.pin_font_height + metrics.pin_line_gap;
         assert!(metrics.row_height - pin_band >= metrics.font_height);
@@ -1058,8 +1061,9 @@ mod tests {
 
     #[test]
     fn 拼音与主文本对齐且行内留呼吸空间() {
-        // T-126 ①④：拼音行整带（字高+间距）从行顶开始，主文本区在其后——
-        // 拼音与汉字垂直间距=pin_line_gap；行内剩余高度作为主文本上下内边距，
+        // T-126 ①④：拼音字形区从行顶开始、高度=字高（不含间距），主文本区
+        // 顶边 = 拼音字形区底 + pin_line_gap —— 视觉间距精确等于 pin_line_gap
+        // （`DT_VCENTER` 无居中余量可吸收）；行内剩余高度作为主文本下方留白，
         // 让候选项不拥挤。
         let metrics = CandidateMetrics::new(BASE_DPI);
         let row = metrics.row_rect(0);
@@ -1067,11 +1071,8 @@ mod tests {
         let pin_rect = metrics.pin_row_rect(row, main_col, "nǐ hǎo");
         // 拼音行与汉字列同左缘（上下严格对齐）。
         assert_eq!(pin_rect.left, main_col.left);
-        // 拼音带底部 = 行顶 + 字高 + 间距。
-        assert_eq!(
-            pin_rect.bottom,
-            row.top + metrics.pin_font_height + metrics.pin_line_gap
-        );
+        // 拼音字形区底 = 行顶 + 字高（间距不含在拼音矩形内）。
+        assert_eq!(pin_rect.bottom, row.top + metrics.pin_font_height);
         // 拼音宽于汉字时右缘 = 内容估算宽（按内容放宽、不截断），
         // 左缘保持与汉字列对齐（上下严格对齐关系）。
         let est = estimate_text_width("nǐ hǎo", metrics.pin_font_height).ceil() as i32;
@@ -1080,13 +1081,17 @@ mod tests {
         // 拼音窄于汉字时与汉字列同宽（宽度对齐，拼音不乱跑）。
         let short = metrics.pin_row_rect(row, main_col, "ni");
         assert_eq!(short.right, main_col.right);
-        // 主文本区与拼音带间距 = pin_line_gap。
-        let main_top = pin_rect.bottom;
+        // 主文本区顶边 = 拼音字形区底 + pin_line_gap（视觉间距精确 = 4px）。
+        let main_top = pin_rect.bottom + metrics.pin_line_gap;
         assert!(main_top - row.top >= metrics.pin_font_height + 4);
-        // 行内呼吸：主文本区高度 ≥ 主字号 + 4px（上下各 ≥2px 内边距）。
+        assert_eq!(
+            main_top - row.top,
+            metrics.pin_font_height + metrics.pin_line_gap
+        );
+        // 行内呼吸：主文本字形带下方仍留有 ≥ 主字号 + 4px 的行内空间。
         let main_zone = row.bottom - main_top;
         assert!(main_zone >= metrics.font_height + 4, "行内应留呼吸空间");
-        // 整个拼音带不越出行底。
+        // 整个拼音字形区不越出行底。
         assert!(pin_rect.bottom <= row.bottom);
     }
 
