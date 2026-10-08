@@ -23,10 +23,21 @@ pub const MODE_CHINESE: &str = "Chinese";
 pub const MODE_ENGLISH: &str = "English";
 
 /// 原子写模式状态：先写临时文件再改名，托盘轮询读到的永远是整行内容，
-/// 不会撞上半写文件。
+/// 不会撞上半写文件。目录不存在时自动创建（全新安装的机器 `%APPDATA%\
+/// zhu-ye-ime` 可能尚未由其它模块建出；VM 验收实测引擎首写因此失败，
+/// os error 3）。
 pub fn write_tray_state(dir: &std::path::Path, mode: &str) -> std::io::Result<()> {
+    if mode != MODE_CHINESE && mode != MODE_ENGLISH {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown tray state mode: {mode}"),
+        ));
+    }
+    std::fs::create_dir_all(dir)?;
+    // 临时文件名带进程号：多宿主并发写时避免互相踩掉同一临时文件；
+    // rename 是原子替换，最终态仍是"最后写者胜"。
     let target = dir.join(TRAY_STATE_FILE_NAME);
-    let tmp = dir.join(format!("{TRAY_STATE_FILE_NAME}.tmp"));
+    let tmp = dir.join(format!("{TRAY_STATE_FILE_NAME}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, format!("{mode}\n"))?;
     std::fs::rename(&tmp, &target)?;
     Ok(())
@@ -61,8 +72,14 @@ mod tests {
         let text = std::fs::read_to_string(dir.join(TRAY_STATE_FILE_NAME)).unwrap();
         assert_eq!(parse_tray_state(&text), Some(MODE_ENGLISH));
 
-        // 原子写：临时文件不得残留。
-        assert!(!dir.join(format!("{TRAY_STATE_FILE_NAME}.tmp")).exists());
+        // 原子写：临时文件不得残留（pid 后缀的 tmp 也清干净）。
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tray-state"))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(leftovers, vec![TRAY_STATE_FILE_NAME.to_string()]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -76,10 +93,25 @@ mod tests {
     }
 
     #[test]
-    fn 目录不存在时原子写报错且不产生半文件() {
-        let dir = std::env::temp_dir().join("zhu-ye-tray-state-no-such-dir");
+    fn 目录不存在时自动创建并写入() {
+        let dir =
+            std::env::temp_dir().join(format!("zhu-ye-tray-state-mkdir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(write_tray_state(&dir, MODE_CHINESE).is_err());
+        assert!(!dir.exists());
+        write_tray_state(&dir, MODE_CHINESE).unwrap();
+        assert!(dir.is_dir());
+        let text = std::fs::read_to_string(dir.join(TRAY_STATE_FILE_NAME)).unwrap();
+        assert_eq!(parse_tray_state(&text), Some(MODE_CHINESE));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 非法模式拒绝写入() {
+        let dir =
+            std::env::temp_dir().join(format!("zhu-ye-tray-state-invalid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(write_tray_state(&dir, "German").is_err());
+        assert!(!dir.join(TRAY_STATE_FILE_NAME).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

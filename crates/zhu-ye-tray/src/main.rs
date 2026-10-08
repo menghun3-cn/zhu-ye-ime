@@ -319,7 +319,7 @@ fn main() -> windows::core::Result<()> {
             CW_USEDEFAULT,
             0,
             0,
-            Some(HWND((-3isize) as *mut c_void)), // HWND_MESSAGE：仅收消息、不进任务栏。
+            None,
             None,
             Some(hinstance.into()),
             None,

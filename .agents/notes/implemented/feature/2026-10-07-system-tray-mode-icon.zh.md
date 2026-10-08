@@ -18,7 +18,10 @@ Status: implemented
 
 - 桥梁：`zhu_ye_core::tray_state`——引擎在切换时原子写
   `%APPDATA%\zhu-ye-ime\tray-state`（tmp+rename，单行 `Chinese`/
-  `English`，解析只认两值）；写入失败只降级，绝不阻断输入；
+  `English`，解析只认两值）；写入失败只降级，绝不阻断输入；写入前
+  自动建目录（干净机器无 `%APPDATA%\zhu-ye-ime`，VM 验收实测
+  os error 3）、tmp 文件带 pid 后缀（`tray-state.<pid>.tmp`，多宿主
+  并发不互相覆盖 tmp，rename 保证后写者胜）；
 - 引擎接入点（三处，覆盖模式变化全路径）：
   1. `sync_engine` 的 `ToggleMode` 分支——锁内切换、锁外通知，与
      语言栏通知同域（覆盖 Shift 弹起 / 设置回调等所有经统一入口的
@@ -29,8 +32,11 @@ Status: implemented
      启动就反映"最近激活会话"的模式（多宿主并存时取最后一次写者）；
 - 托盘进程：白"中"（资源 101）/白"英"（资源 102）两枚内嵌图标
   （`winresource` `set_icon_with_id`，assets/tray-zh.ico 与 tray-en.ico，
-  橙底白字与 DLL 品牌同风格）；message-only 窗口 + `WM_TIMER` 500ms
-  轮询状态文件（mtime 判变，原子写保证内容完整）；单实例互斥
+  橙底白字与 DLL 品牌同风格）；**普通隐藏顶层窗口**（无 WS_VISIBLE
+  不进任务栏）+ `WM_TIMER` 500ms 轮询状态文件（mtime 判变，原子写
+  保证内容完整）——初版 message-only 窗口在 VM 验收中被否决：
+  `Shell_NotifyIcon` `NIM_ADD` 成功但 Server 2019 通知区不渲染
+  （截图槽位 0 彩色像素）；单实例互斥
   （`Local\ZhuYeImeTraySingleton`，重复启动静默退出）；右键菜单
   （模式状态行 / 打开设置 / 退出），左键单击弹菜单、双击开设置；
   每次 `LoadImageW` 后立即 `DestroyIcon`（Shell 已取得副本）；
@@ -68,6 +74,31 @@ Status: implemented
   同步引擎与托盘；
 - 新 crate 进入 workspace（`crates/zhu-ye-tray`），发布产物加
   `bin\zhu-ye-tray.exe`（261,632B）。
+
+## VM 验收修订（2026-10-08，vm-accept-sop 首次实战）
+
+初版引擎完成于开发机（目录预存、窗口可见性无从目视），VM 交互会话
+验收实测暴露三处，均已修复并复验：
+
+- **状态桥干净机器写失败**：`%APPDATA%\zhu-ye-ime` 不存在 → os error 3
+  → `tray_state::write_tray_state` 增 `create_dir_all` + pid 后缀 tmp
+  （4 项单测重写通过）；
+- **lone-shift 永不触发（引擎 bug）**：`OnTestKeyUp` 恒返 `BOOL(0)`，
+  TSF 只在 `OnTestKeyUp` 返回 TRUE 时才把弹起事件转发给 `OnKeyUp`；
+  实测日志只有 `shift-down pending`、没有 `shift-up ToggleMode`。
+  修复：`OnTestKeyUp` 对 `VK_SHIFT` 返回 TRUE，其余键放行宿主。复验
+  日志两条 `shift-up ToggleMode (lone shift)`、状态文件
+  Chinese→English→Chinese 往返 ✓；
+- **message-only 窗口在 Server 2019 不渲染托盘图标**（详见决策节），
+  改普通隐藏顶层窗口。
+
+验收证据（截图存 VM `C:\zhu-ye-vm\shots-b6\`）：溢出窗格三态截图
+`s1-zh/s2-en/s3-zh2` MD5 两两不同，zh↔en 像素差异 bbox
+(765,744)-(773,752) 恰好 8×8 px 落在托盘槽 (758..782, 728..768)；
+端到端 `s4-shift-en/s5-shift-zh` 记事本激活→Shift×2 状态桥往返正常。
+验收后基线：VM `tsf-b6\zhu-ye-ime-8fb21f0a.dll` + 本地
+`zhu_ye_ime_8FB21F0A.dll`（2195456B）均注册生效；托盘进程在两环境
+运行正常。
 
 ## 关联
 

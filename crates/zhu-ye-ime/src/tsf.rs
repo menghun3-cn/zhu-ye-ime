@@ -533,9 +533,17 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnTestKeyUp(
         &self,
         _pic: Ref<'_, ITfContext>,
-        _wparam: WPARAM,
+        wparam: WPARAM,
         _lparam: LPARAM,
     ) -> Result<BOOL> {
+        // T-114 后续：中英切换在"单独 Shift 弹起"时判定（OnKeyUp）。
+        // TSF 只在 OnTestKeyUp 返回 TRUE 时才把弹起事件转发给 OnKeyUp；
+        // 若恒返回 FALSE，Shift 弹起永远不会到达切换入口（VM UI 验收实测：
+        // 日志只有 shift-down pending，无 shift-up ToggleMode）。
+        // 这里只接受 Shift 弹起；其余键放行宿主。
+        if VIRTUAL_KEY(wparam.0 as u16).0 == VK_SHIFT.0 {
+            return Ok(BOOL(1));
+        }
         Ok(BOOL(0))
     }
 
