@@ -21,6 +21,8 @@ Status: implemented
 
 `CandidateMetrics::pin_font_height` 由 11dp 增至 13dp、`pin_line_gap` 由 3dp 增至 4dp；`create_font` 增加 `weight` 参数，拼音字体以 `FW_SEMIBOLD`（600）创建，主文本保持 `FW_NORMAL`。拼音行不再复用译文/序号的 `secondary` 色：`CandidateUiTheme` 新增第 8 键 `pin`——浅色 #555555（深灰，白底对比度 ≈7:1，仍弱于蓝色主文本）、深色 #C9C9C9（更亮灰）、高对比度沿用系统 `gray_text`。主题文件配色节（`CandidatePalette`/`parse_candidate`）新增可选第 8 键 `pin`；缺键经既有 `theme_with_candidate` 叠加回退默认，已有主题文件完全不受影响。
 
+> T-126（排版与留白 note）后续原位更新了落地参数：拼音字体 宋体→Segoe UI、字重 FW_SEMIBOLD→FW_NORMAL、浅色 #555555→#888888（用户现在要辅助浅层级）、`pin_line_gap` 4→8dp、`row_height` 36→48dp、主文本字重 FW_NORMAL→FW_SEMIBOLD（16px 加粗作视觉焦点）。序号右对齐与独立 `pin` 主题键两项决策不变。
+
 两个布局常量均有新单测覆盖（间距在 4..=8、词起点早于旧 26dp、拼音字号 >12dp 且仍低于主字 16dp、`pin_band + font_height ≤ row_height`）。
 
 ## Alternatives considered
@@ -33,7 +35,7 @@ Status: implemented
 ## Consequences
 
 - 序号与词的间距在所有页码下稳定在 ~6px（96dpi），满足用户 4-8px 要求；词起点左移 4px。
-- 拼音/声调小字清晰可辨：更深灰（深色下更亮灰）、13px、半粗、词上方留 4px 行距。
+- 拼音/声调小字清晰可辨：更深灰（深色下更亮灰）、13px、半粗、词上方留 4px 行距。（T-126 后落地形态改为 Segoe UI 13px 常规、浅色 #888888、8px 间距，主文本 16px 半粗 —— 见 T-126 note。）
 - 主题作者可在主题文件 `candidate` 节可选添加 `"pin"`；旧文件不受影响（缺键 → 默认）。
 - `CandidateUiTheme` 变为 8 键结构，所有构造点已同步（`theme()` ×3、`theme_from_system_colors`、`theme_with_candidate`）；candidate-demo 演示项携带带调拼音（你好 → nǐ hǎo），截图可覆盖拼音行。
 

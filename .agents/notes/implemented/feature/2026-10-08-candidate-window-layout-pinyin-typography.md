@@ -43,6 +43,13 @@ HighContrast. The theme-file palette (`CandidatePalette`/`parse_candidate`) gain
 optional 8th `pin` key; missing keys fall back to the defaults via the existing
 `theme_with_candidate` overlay, so existing theme files keep working unchanged.
 
+> T-126 (typography-whitespace note) later changed the shipped parameters in place:
+> pin face SimSun → Segoe UI, pin weight FW_SEMIBOLD → FW_NORMAL, pin light color
+> #555555 → #888888 (user now wants an auxiliary-light tier), `pin_line_gap` 4→8dp,
+> `row_height` 36→48dp, and the main text weight FW_NORMAL → FW_SEMIBOLD (16px
+> bold as the visual focus). The index right-alignment and the dedicated `pin`
+> theme key decisions below are unchanged.
+
 Both layout constants are covered by new unit tests (gap in 4..=8, word start left of
 the old 26dp, pin size >12dp and still below main 16dp, `pin_band + font_height ≤
 row_height`).
@@ -69,7 +76,9 @@ row_height`).
 - The gap between index and word is now visually stable at ~6px at 96dpi for every
   page, matching the user's 4-8px request; word start moves 4px left.
 - Pinyin/tone text reads clearly at small size: deeper grey (or brighter grey on
-  dark), 13px, semi-bold, with a 4px gap above the word.
+  dark), 13px, semi-bold, with a 4px gap above the word. (As of T-126 the shipped
+  pinyin line is instead Segoe UI 13px regular #888888 on light with an 8px gap,
+  and the main text is semibold 16px — see the T-126 note.)
 - Theme authors may optionally add `"pin"` to the `candidate` section of a theme
   file; old files are unaffected (key missing → default).
 - `CandidateUiTheme` is now an 8-key structure; every construction site was updated
