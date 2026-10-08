@@ -110,23 +110,29 @@ fn parse_theme(value: &str) -> Result<ThemePreference, String> {
 }
 
 fn demo_view(translation_mode: bool, emoji_row: bool) -> CandidateUiView {
+    // T-122：演示项带带调拼音，便于截图验收拼音行（字号/字重/对比度/行距）。
     let mut items = vec![
-        item("你好", "Hello", CandidateSource::Static),
-        item("你们好", "Hello everyone", CandidateSource::Static),
-        item("你好呀", "Hi there", CandidateSource::User),
-        item("耐火", "Fire-resistant", CandidateSource::Static),
-        item("拟稿", "Draft", CandidateSource::Static),
+        item("你好", "Hello", "nǐ hǎo", CandidateSource::Static),
+        item(
+            "你们好",
+            "Hello everyone",
+            "nǐ men hǎo",
+            CandidateSource::Static,
+        ),
+        item("你好呀", "Hi there", "", CandidateSource::User),
+        item("耐火", "Fire-resistant", "", CandidateSource::Static),
+        item("拟稿", "Draft", "", CandidateSource::Static),
     ];
     if emoji_row {
         // T-074：注入彩色 emoji 候选行供截图验收（其余行保持 GDI 基线）。
-        items.insert(2, item("😂 笑声😀 开心", "", CandidateSource::Static));
-        items.push(item("完成 🚀", "", CandidateSource::Static));
+        items.insert(2, item("😂 笑声😀 开心", "", "", CandidateSource::Static));
+        items.push(item("完成 🚀", "", "", CandidateSource::Static));
     }
     items.extend([
-        item("溺爱", "Dote on", CandidateSource::Static),
-        item("逆光", "Backlight", CandidateSource::Static),
-        item("泥泞", "Muddy", CandidateSource::Static),
-        item("妮好", "", CandidateSource::Static),
+        item("溺爱", "Dote on", "", CandidateSource::Static),
+        item("逆光", "Backlight", "", CandidateSource::Static),
+        item("泥泞", "Muddy", "", CandidateSource::Static),
+        item("妮好", "", "", CandidateSource::Static),
     ]);
     CandidateUiView {
         composition: "ni hao".to_owned(),
@@ -140,12 +146,17 @@ fn demo_view(translation_mode: bool, emoji_row: bool) -> CandidateUiView {
     }
 }
 
-fn item(text: &str, translation: &str, source: CandidateSource) -> CandidateUiItem {
+fn item(
+    text: &str,
+    translation: &str,
+    pinyin_tone: &str,
+    source: CandidateSource,
+) -> CandidateUiItem {
     CandidateUiItem {
         text: text.to_owned(),
         translation: translation.to_owned(),
         pinyin: String::new(),
-        pinyin_tone: String::new(),
+        pinyin_tone: pinyin_tone.to_owned(),
         source,
     }
 }

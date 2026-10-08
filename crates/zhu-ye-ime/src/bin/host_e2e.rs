@@ -386,7 +386,10 @@ fn m7_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     if !n_cands.is_empty() && !d_cands.is_empty() {
         runner.pass("单字符前缀候选即时出（批二行为）");
     } else {
-        runner.fail("单字符前缀候选即时出（批二行为）", &format!("n={n_cands:?} d={d_cands:?}"));
+        runner.fail(
+            "单字符前缀候选即时出（批二行为）",
+            &format!("n={n_cands:?} d={d_cands:?}"),
+        );
     }
     // 简拼函数级拒绝（T-029 语义不变）：单字符不产简拼组。
     if zhu_ye_core::initial_candidates(dictionary.as_ref(), "n").is_empty() {
@@ -2023,7 +2026,10 @@ fn seed_checks(path: &Path, runner: &mut Runner) -> Result<(), String> {
     // 搜狗/微软拼音同款体验，用户批二次验的收尾行为）；取代 T-029 时代
     // 的“zh 不应出现候选”旧断言（彼时无前缀候选路径）。
     if engine.candidates().is_empty() {
-        runner.fail("声母前缀即时出候选", "zh 应有候选（单字母/声母前缀即时出候选）");
+        runner.fail(
+            "声母前缀即时出候选",
+            "zh 应有候选（单字母/声母前缀即时出候选）",
+        );
     } else {
         runner.pass("声母前缀即时出候选");
     }
