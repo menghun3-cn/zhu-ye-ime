@@ -11,24 +11,24 @@ use crate::panel::{PANEL_COLUMNS, PANEL_ROWS};
 
 /// 期望客户区逻辑尺寸。
 const LOGICAL_WIDTH: i32 = 880;
-const LOGICAL_HEIGHT: i32 = 620;
+const LOGICAL_HEIGHT: i32 = 700;
 /// 左侧导航列宽。
-const LOGICAL_NAV_WIDTH: i32 = 184;
+const LOGICAL_NAV_WIDTH: i32 = 200;
 /// 导航行高。
-const LOGICAL_NAV_ROW: i32 = 46;
+const LOGICAL_NAV_ROW: i32 = 54;
 /// 页标题区高度。
-const LOGICAL_TITLE: i32 = 60;
+const LOGICAL_TITLE: i32 = 80;
 /// 条目行高。
-const LOGICAL_ITEM: i32 = 62;
+const LOGICAL_ITEM: i32 = 76;
 /// 展开说明区高度。
-const LOGICAL_EXPANDED: i32 = 46;
+const LOGICAL_EXPANDED: i32 = 54;
 /// 内容区内边距。
-const LOGICAL_PADDING: i32 = 22;
+const LOGICAL_PADDING: i32 = 26;
 /// 底部提示条高度。
-const LOGICAL_HINT: i32 = 34;
+const LOGICAL_HINT: i32 = 36;
 /// 二选一控件单块宽高。
-const LOGICAL_CHIP_WIDTH: i32 = 82;
-const LOGICAL_CHIP_HEIGHT: i32 = 30;
+const LOGICAL_CHIP_WIDTH: i32 = 88;
+const LOGICAL_CHIP_HEIGHT: i32 = 32;
 /// 控件块间距与通用小间距。
 const LOGICAL_CHIP_GAP: i32 = 10;
 const LOGICAL_GAP: i32 = 8;
@@ -329,16 +329,16 @@ pub fn contains(rect: UiRect, x: i32, y: i32) -> bool {
 // ---------------------------------------------------------------------------
 
 /// 词库行高。
-const LOGICAL_PACK_ROW: i32 = 52;
+const LOGICAL_PACK_ROW: i32 = 56;
 /// "导入不验签"说明区高度。
-const LOGICAL_PACK_NOTE: i32 = 42;
+const LOGICAL_PACK_NOTE: i32 = 44;
 /// 启用开关块宽。
-const LOGICAL_PACK_TOGGLE_WIDTH: i32 = 92;
+const LOGICAL_PACK_TOGGLE_WIDTH: i32 = 96;
 /// 词条数/体积/版本元信息列宽。
-const LOGICAL_PACK_META_WIDTH: i32 = 190;
+const LOGICAL_PACK_META_WIDTH: i32 = 200;
 /// 底部按钮宽高。
-const LOGICAL_PACK_BUTTON_WIDTH: i32 = 172;
-const LOGICAL_PACK_BUTTON_HEIGHT: i32 = 30;
+const LOGICAL_PACK_BUTTON_WIDTH: i32 = 180;
+const LOGICAL_PACK_BUTTON_HEIGHT: i32 = 32;
 
 /// 词库子视图的一行：行矩形供命中整行，分区供绘制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -802,16 +802,16 @@ pub fn themes_layout(metrics: &SettingsMetrics, client: UiRect, row_count: usize
 
 /// 面板逻辑尺寸。
 const LOGICAL_PANEL_WIDTH: i32 = 700;
-const LOGICAL_PANEL_PADDING: i32 = 18;
+const LOGICAL_PANEL_PADDING: i32 = 20;
 const LOGICAL_PANEL_GAP: i32 = 6;
-const LOGICAL_PANEL_HEADER: i32 = 46;
-const LOGICAL_PANEL_FOOTER: i32 = 48;
-const LOGICAL_PANEL_CELL_HEIGHT: i32 = 52;
-const LOGICAL_PANEL_CELL_MIN_WIDTH: i32 = 34;
-const LOGICAL_PANEL_BUTTON_WIDTH: i32 = 96;
-const LOGICAL_PANEL_BUTTON_HEIGHT: i32 = 30;
-const LOGICAL_PANEL_PAGE_LABEL_WIDTH: i32 = 72;
-const LOGICAL_PANEL_HINT: i32 = 26;
+const LOGICAL_PANEL_HEADER: i32 = 54;
+const LOGICAL_PANEL_FOOTER: i32 = 50;
+const LOGICAL_PANEL_CELL_HEIGHT: i32 = 58;
+const LOGICAL_PANEL_CELL_MIN_WIDTH: i32 = 36;
+const LOGICAL_PANEL_BUTTON_WIDTH: i32 = 100;
+const LOGICAL_PANEL_BUTTON_HEIGHT: i32 = 32;
+const LOGICAL_PANEL_PAGE_LABEL_WIDTH: i32 = 76;
+const LOGICAL_PANEL_HINT: i32 = 28;
 
 /// 面板布局尺寸；格子宽度由期望宽度与列数反推，保证一整页刚好铺满一行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1432,5 +1432,24 @@ mod tests {
         for cell in &layout.cells {
             assert!(cell.bottom <= layout.hint.top);
         }
+    }
+
+    #[test]
+    fn 默认窗口高度下常用设置页至少显示八行() {
+        // T-125：窗口 880×700、条目行 76 —— 常用设置 15 项至少可见 8 行（顶部标题区与
+        // 底部提示条之外的可见行数），保证列表排版大气且核心功能全部可达。
+        let metrics = SettingsMetrics::new(96);
+        let client = UiRect {
+            left: 0,
+            top: 0,
+            right: metrics.desired_width,
+            bottom: metrics.desired_height,
+        };
+        let rows = item_rows(&metrics, client, Page::Common.items(), None);
+        let visible = rows
+            .iter()
+            .filter(|row| row.rect.bottom <= content_rect(&metrics, client).bottom)
+            .count();
+        assert!(visible >= 7, "常用设置页可见行不足 7 行：{visible}");
     }
 }

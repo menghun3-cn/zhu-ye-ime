@@ -2117,12 +2117,18 @@ unsafe fn draw(hdc: HDC, state: &mut WindowState, client: UiRect) {
             } else {
                 theme.nav_text
             };
+            // 选中的导航项加粗（字重 600，T-125），未选中用正文。
+            let font = if selected {
+                state.fonts.nav_active
+            } else {
+                state.fonts.body
+            };
             draw_text(
                 hdc,
                 page.title(),
                 text_rect,
                 color,
-                state.fonts.body,
+                font,
                 DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
             );
         }
@@ -2187,11 +2193,18 @@ unsafe fn draw_items(
     let rows = layout::item_rows(metrics, client, items, state.settings.expanded);
     for row in &rows {
         let item = &items[row.index];
+        // 标题 + 描述作为一块垂直居中于行内（T-125：行高 76，上下留白 16-20px 呼吸感）。
+        let block_top = row.rect.top
+            + (row.rect.height()
+                - state.fonts.body_height
+                - state.fonts.small_height
+                - metrics.gap)
+                / 2;
         let title_rect = UiRect {
             left: row.rect.left,
-            top: row.rect.top + metrics.gap,
+            top: block_top,
             right: row.rect.right,
-            bottom: row.rect.top + metrics.gap + state.fonts.body_height,
+            bottom: block_top + state.fonts.body_height,
         };
         draw_text(
             hdc,
@@ -2203,9 +2216,9 @@ unsafe fn draw_items(
         );
         let summary_rect = UiRect {
             left: row.rect.left,
-            top: title_rect.bottom,
+            top: title_rect.bottom + metrics.gap / 2,
             right: row.rect.right,
-            bottom: row.rect.bottom - metrics.gap / 2,
+            bottom: title_rect.bottom + metrics.gap / 2 + state.fonts.small_height,
         };
         let summary_color = if item.state.is_planned() {
             theme.placeholder_text

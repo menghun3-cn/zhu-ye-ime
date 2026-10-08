@@ -11,8 +11,8 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW, CreatePen, CreateSolidBrush,
     DeleteDC, DeleteObject, DrawTextW, FillRect, GetDIBits, RoundRect, SelectObject, SetBkMode,
     SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBITMAP,
-    HDC, HFONT, HGDIOBJ, LOGFONTW, PS_NULL, TRANSPARENT,
+    DEFAULT_PITCH, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, FF_DONTCARE, FW_BOLD, FW_NORMAL, FW_SEMIBOLD,
+    HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW, PS_NULL, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
@@ -205,6 +205,8 @@ pub(crate) struct Fonts {
     pub(crate) title: HFONT,
     pub(crate) body: HFONT,
     pub(crate) small: HFONT,
+    /// 选中导航项专用：与 `body` 同字号、字重加粗（T-125 排版规范化）。
+    pub(crate) nav_active: HFONT,
     pub(crate) body_height: i32,
     pub(crate) small_height: i32,
     dpi: u32,
@@ -228,17 +230,22 @@ impl Fonts {
             // 否则 `.max(1)` 会把负值钳成 1，字体退化成 1 像素高。
             let base_height = base.lfHeight.abs().max(1);
 
+            // T-125 排版规范化：正文 16px（基础字号 14-16px 区间上限）、主标题 24px 加粗、
+            // 说明文字 13px；相对系统消息字体（96dpi 通常 12px）换算。
             let mut body_font = base;
-            body_font.lfHeight = -scale(base_height, 1, 1);
+            body_font.lfHeight = -scale(base_height, 4, 3);
             let mut title_font = base;
-            title_font.lfHeight = -scale(base_height, 5, 4);
-            title_font.lfWeight = FW_SEMIBOLD.0 as i32;
+            title_font.lfHeight = -scale(base_height, 6, 3);
+            title_font.lfWeight = FW_BOLD.0 as i32;
             let mut small_font = base;
-            small_font.lfHeight = -scale(base_height, 4, 5);
+            small_font.lfHeight = -scale(base_height, 13, 12);
+            let mut nav_active_font = body_font;
+            nav_active_font.lfWeight = FW_SEMIBOLD.0 as i32;
 
             self.body = CreateFontIndirectW(&body_font);
             self.title = CreateFontIndirectW(&title_font);
             self.small = CreateFontIndirectW(&small_font);
+            self.nav_active = CreateFontIndirectW(&nav_active_font);
             self.body_height = body_font.lfHeight.abs();
             self.small_height = small_font.lfHeight.abs();
             self.dpi = dpi;
@@ -248,7 +255,7 @@ impl Fonts {
     /// 释放字体；DPI 变化或窗口销毁时调用。
     pub(crate) unsafe fn release(&mut self) {
         unsafe {
-            for font in [self.title, self.body, self.small] {
+            for font in [self.title, self.body, self.small, self.nav_active] {
                 if !font.is_invalid() {
                     let _ = DeleteObject(font.into());
                 }
@@ -256,6 +263,7 @@ impl Fonts {
             self.title = HFONT::default();
             self.body = HFONT::default();
             self.small = HFONT::default();
+            self.nav_active = HFONT::default();
             self.body_height = 0;
             self.small_height = 0;
             self.dpi = 0;
