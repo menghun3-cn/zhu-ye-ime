@@ -1,5 +1,7 @@
 # Agent Note: Square tray state icons — orange badge with white 中/英 (T-123)
 
+Status: implemented
+
 [中文](2026-10-08-tray-icon-square.zh.md) | English | bilingual mirror
 
 ## Problem
@@ -60,8 +62,13 @@ icon family already used by the IME DLL:
   assets — identical.
 - Gates: `cargo fmt --check`, `cargo clippy -p zhu-ye-tray -- -D warnings`,
   `git diff --check`, and the generator script's `ParseInput` all pass.
-- Deployment: user machine `copy-exe` overwrites `bin\zhu-ye-tray.exe` and the
-  tray process restarts; the VM gets the same binary with a screenshot check.
+- Deployment: user machine worker `copy-exe` overwrote
+  `bin\zhu-ye-tray.exe` (262,144B, sha256
+  `BC6CFFC9C34F9710608C08E879AA78A3539F458F99FD8B1CE3560A236C217580`) and the
+  tray restarted with normal 中/英 polling; the VM got the same binary. VM tray
+  pixel probe: 16×16 orange square bbox (x62..77, y40..55) with white glyph —
+  Chinese mode 190 orange / 168 white px, English mode 174 / 165 px (shots:
+  `target/t122-deploy/t123-shots/tray-zh.png`, `tray-en.png`).
 
 Related: [Batch-6 system-tray 中/英 mode icon](../../implemented/feature/2026-10-07-system-tray-mode-icon.md)
 — mechanism unchanged; only the icon look moves from "white glyph on transparent"

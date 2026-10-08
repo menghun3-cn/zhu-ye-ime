@@ -1,5 +1,7 @@
 # Agent Note: 托盘状态图标方形化——品牌橙底白字"中/英"（T-123）
 
+Status: implemented
+
 [English](2026-10-08-tray-icon-square.md) | 中文 | 中英镜像
 
 ## Problem
@@ -48,8 +50,12 @@
   （3×zh + 3×en），与生成资产逐一字节比对一致。
 - 门禁：`cargo fmt --check`、`cargo clippy -p zhu-ye-tray -- -D warnings`、
   `git diff --check`、生成脚本 ParseInput 解析全部通过。
-- 部署：用户机 `copy-exe` 覆盖 `bin\zhu-ye-tray.exe` 后重启托盘进程，
-  VM 同步部署并截图核对。
+- 部署：用户机 worker `copy-exe` 覆盖 `bin\zhu-ye-tray.exe`
+  （262,144B，sha256 `BC6CFFC9C34F9710608C08E879AA78A3539F458F99FD8B1CE3560A236C217580`）、
+  托盘重启后中/英状态轮询正常；VM 同步替换同一二进制并截图核对：
+  **托盘槽像素探针**——16×16 橙色方块 bbox (x62..77, y40..55) + 白色字形
+  （中态橙 190px/白 168px，英态橙 174px/白 165px），中/英两态均为方形橙底
+  白字（截图：`target/t122-deploy/t123-shots/tray-zh.png` / `tray-en.png`）。
 
 Related: [批六系统托盘"中/英"状态图标](../../implemented/feature/2026-10-07-system-tray-mode-icon.md)
 ——机制未变，仅图标视觉由"白字透明底"更新为"橙底白字方形"（该笔记同一
