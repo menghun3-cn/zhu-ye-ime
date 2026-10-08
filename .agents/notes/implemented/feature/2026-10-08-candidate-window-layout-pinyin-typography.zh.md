@@ -42,5 +42,9 @@ Status: implemented
 - `candidate-demo --shot` BMP 像素取证（96dpi 浅色）：首候选词蓝色左缘 x=38 → x=34；深灰（0x55 档）像素 0 → 377（拼音行改色生效），0x99 浅灰档仍驱动译文/序号。
 - 单测：`candidate_ui` 20/20（含新增间距/排版断言）；`theme_file` 解析测试覆盖 `pin` 键与缺省（`None`）回退。
 - 门禁：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --workspace`、`git diff --check` 全绿；host-e2e 复跑全绿。
+- 以 PR #128 合入 develop（merge 3786e00）；发布重建 run 37735245588 成功，v0.1.2 zip/资产刷新（zip 22,653,533 B）。
+- 本地构建 release DLL（AEE25CA1，2,196,480 B，TSF 导出校验通过）经用户机提权 worker `copy-dll-ver` 部署（CLSID InprocServer32 + 语言档 IconFile 指针切换，落地 `C:\Program Files\zhu-ye-ime\tsf\zhu_ye_ime_AEE25CA1.dll`，ctfmon 重启）；`verify-tsf-identity` 7/7 PASS。
+- VM（Server 2019）经发行包契约安装（install.ps1，f143c14e → `tsf\zhu-ye-ime-aee25ca1.dll` 升级），并在 VM 截图上复跑同一像素探针：词左缘 x=34、序号-词视觉间距 8px（4-8px 档内）、深灰拼音像素存在（before 0 → after 两行 377px）。
+- 说明：发布 zip 资产因网络侧 SNI 限制无法从 `release-assets.githubusercontent.com` 下载（可达 GitHub 边缘 IP 均拒绝该域）；本地构建 DLL 与 CI 产物同 commit 同工具链二进制等价，且本批未改词典三件套（SHA 不变），故 VM 包复用既有 v0.1.2 便携 zip 仅替换 `bin\zhu_ye_ime.dll`。
 
 Related: [批四候选拼音截断与声调表](../../implemented/feature/2026-10-07-acceptance-fix-batch-4.md) 保持活跃——本笔记只改拼音行的外观参数，不涉及按行截断或声调来源语义。

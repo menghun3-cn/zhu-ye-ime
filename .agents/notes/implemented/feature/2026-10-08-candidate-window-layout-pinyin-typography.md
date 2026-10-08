@@ -86,5 +86,22 @@ row_height`).
   `theme_file` parse tests cover the `pin` key and its default (`None`) fallback.
 - Full gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
   `cargo test --workspace`, `git diff --check` all green; host-e2e re-run green.
+- Landed as PR #128 (merge 3786e00 onto develop); release rebuild run
+  37735245588 succeeded, upload refreshed v0.1.2 zip/assets (22,653,533 B zip).
+- Locally built release DLL `zhu_ye_ime.dll` (AEE25CA1, 2,196,480 B, TSF exports
+  verified) deployed to the user machine via the worker `copy-dll-ver`
+  (CLSID InprocServer32 + profile IconFile pointer switch,
+  `zhu_ye_ime_AEE25CA1.dll` in `C:\Program Files\zhu-ye-ime\tsf`, ctfmon
+  restarted); `verify-tsf-identity` 7/7 PASS.
+- VM (Server 2019) installed from a staging package (install.ps1 package
+  contract, upgrade from f143c14e → `tsf\zhu-ye-ime-aee25ca1.dll`) and the same
+  pixel probes re-run on the VM screenshots: word left edge x=34, index-to-word
+  visual gap 8px (frame in the 4-8px band), deep-grey pin pixels present.
+- Note: the release zip asset could not be downloaded from
+  `release-assets.githubusercontent.com` (all reachable GitHub edge IPs reject
+  that SNI from this network); the locally built DLL is the CI build's binary
+  equivalent (same develop commit, same toolchain), and the dictionary trio SHAs
+  are unchanged by this batch, so the staged package reused the previous
+  v0.1.2 portable zip with only `bin\zhu_ye_ime.dll` swapped.
 
 Related: [batch-4 candidate pinyin truncation and tone map](../../implemented/feature/2026-10-07-acceptance-fix-batch-4.md) remains active — this note changes the pin line's appearance parameters, not its truncation-by-row or tone-source semantics.
