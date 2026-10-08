@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
 生成发行包 staging 目录（zip 便携包与 Inno exe 安装包共用载荷，T-097）。
@@ -10,6 +10,7 @@ staging 布局（与便携 zip 完全一致，保证 zip/exe 同源同哈希）�
       bin/zhu_ye_ime.dll             TSF 服务 DLL
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
+      bin/zhu-ye-tray.exe            托盘常驻进程（批六，中英状态图标）
       bin/dictionary.zyct            基础词典（data/artifacts/base.zyct，随安装只读）
       bin/en.zyen                    英文词表（T-085，data/artifacts/en.zyen，随安装只读）
       packs/it.zyct med.zyct slang.zyct  预置领域包（D-46，可离线验收）
@@ -35,11 +36,12 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $needed = @(
     (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll'),
     (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe'),
-    (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe')
+    (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'),
+    (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe')
 )
 foreach ($artifact in $needed) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
-        throw "release 产物缺失：$artifact（先运行 cargo build --release -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater）"
+        throw "release 产物缺失：$artifact（先运行 cargo build --release -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater -p zhu-ye-tray）"
     }
 }
 
@@ -79,10 +81,11 @@ foreach ($script in @(
     )
 }
 
-# ---- bin：DLL、设置窗口、更新器、基础词典 ----
+# ---- bin：DLL、设置窗口、更新器、托盘、基础词典 ----
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll') -Destination $binDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe') -Destination $binDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe') -Destination $binDir
+Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe') -Destination $binDir
 Copy-Item -LiteralPath $baseDictionary -Destination (Join-Path $binDir 'dictionary.zyct')
 Copy-Item -LiteralPath $enWordbook -Destination (Join-Path $binDir 'en.zyen')
 
@@ -112,6 +115,7 @@ $testGuide = @'
     bin/zhu_ye_ime.dll             TSF 服务 DLL
     bin/zhu-ye-settings.exe        设置窗口
     bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
+    bin/zhu-ye-tray.exe            托盘常驻进程（中英状态图标，批六）
     bin/dictionary.zyct            基础词典
     bin/en.zyen                    英文词表（英文前缀候选，T-085）
     packs/                         三个领域包（安装时预置到 %APPDATA%）

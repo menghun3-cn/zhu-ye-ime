@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
 从发行包安装竹叶输入法：TSF 服务（版本化 DLL）+ 设置窗口 + 领域包 + 快捷方式。
@@ -10,6 +10,7 @@
       bin/zhu_ye_ime.dll             TSF 服务 DLL（版本化复制到安装目录）
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
+      bin/zhu-ye-tray.exe            托盘常驻进程（批六，中英状态图标）
       bin/dictionary.zyct            基础词典
       bin/en.zyen                    英文词表（T-085，英文前缀候选）
       packs/it.zyct med.zyct slang.zyct   预置领域包（D-46，可离线验收）
@@ -20,7 +21,8 @@
 1. 从发行包 bin\ 读取文件，不再依赖源码树与 cargo（T-078）
 2. 版本化复制 zhu-ye-ime.dll 到安装目录并校验导出（沿用原事务与失败回滚）
 3. 复制基础词典与英文词表（en.zyen，T-085）
-4. 安装 zhu-ye-settings.exe / zhu-ye-updater.exe 到 Program Files\zhu-ye-ime\bin
+4. 安装 zhu-ye-settings.exe / zhu-ye-updater.exe / zhu-ye-tray.exe 到 Program Files\zhu-ye-ime\bin，
+   并注册 HKCU 自启"竹叶输入法托盘"（批六，常驻托盘）
 5. 预置三个领域包到 %APPDATA%\zhu-ye-ime\packs\（不覆盖用户已有包以外的动作：
    同名覆盖，保证幂等）
 6. 注册 HKLM TSF TIP/Category/LanguageProfile/CLSID 树并校验（失败回滚，沿用原逻辑）
@@ -113,7 +115,8 @@ $packsDir = Join-Path $PackageRoot 'packs'
 $sourceDll = Join-Path $binDir 'zhu_ye_ime.dll'
 $settingsExe = Join-Path $binDir 'zhu-ye-settings.exe'
 $updaterExe = Join-Path $binDir 'zhu-ye-updater.exe'
-$requireExe = @($settingsExe, $updaterExe)
+$trayExe = Join-Path $binDir 'zhu-ye-tray.exe'
+$requireExe = @($settingsExe, $updaterExe, $trayExe)
 foreach ($exe in $requireExe) {
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
         throw "发行包缺少可执行文件：$exe（请先用 package-portable.ps1 生成发行包，或检查 -PackageRoot）"
@@ -194,12 +197,20 @@ if (Test-Path -LiteralPath $enWordbook -PathType Leaf) {
     Write-Host '发行包未含 en.zyen（英文前缀候选回退内嵌静态表，不阻断安装）。'
 }
 
-# ---- 3. 安装设置窗口与更新器 ----
+# ---- 3. 安装设置窗口、更新器与托盘 ----
 $null = New-Item -ItemType Directory -Path $exeDir -Force
 foreach ($exe in $requireExe) {
     Copy-Item -LiteralPath $exe -Destination $exeDir -Force
     Write-Host "已安装: $(Join-Path $exeDir (Split-Path -Leaf $exe))"
 }
+
+# ---- 3.5 托盘自启（HKCU Run；批六：常驻托盘依赖登录会话，装到当前用户自启） ----
+$runPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$runName = '竹叶输入法托盘'
+$runValue = '"{0}"' -f (Join-Path $exeDir 'zhu-ye-tray.exe')
+if (-not (Test-Path -LiteralPath $runPath)) { $null = New-Item -Path $runPath -Force }
+Set-ItemProperty -LiteralPath $runPath -Name $runName -Value $runValue -Force
+Write-Host "已注册托盘自启（HKCU Run）: $runName = $runValue"
 
 # ---- 4. 预置领域包（同名覆盖，幂等） ----
 $null = New-Item -ItemType Directory -Path $packsDataDir -Force

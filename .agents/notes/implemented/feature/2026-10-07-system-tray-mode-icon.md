@@ -99,6 +99,12 @@ English | [中文](2026-10-07-system-tray-mode-icon.zh.md) | 中英镜像
   运行 → 两进程各自 NIM_ADD 出两个图标。修复：`_mutex` 绑定保持句柄
   到 main 退出；本地验证第二个实例 exit 0、进程数恒为 1，VM 部署位
   同步（SHA256 35FF8091E553）。
+- **发布链缺托盘整合（v0.1.2 补发发现）**：批六新增 crate 后 release
+  链未跟进（T-078 早于批六）——构建/便携包/安装/卸载均不含
+  zhu-ye-tray.exe，产出的 zip 会缺托盘。修复（fix/T-112-release-tray-packaging）：
+  assemble-release 纳入构建与产物校验 + zip 四件套完整性守卫（缺一即中止发布），
+  stage/package-portable 复制托盘，install 装三 exe 并注册 HKCU Run
+  `竹叶输入法托盘`，uninstall 停进程删自启。
 
 验收证据（截图存 VM `C:\zhu-ye-vm\shots-b6\`）：溢出窗格三态截图
 `s1-zh/s2-en/s3-zh2` MD5 两两不同，zh↔en 像素差异 bbox

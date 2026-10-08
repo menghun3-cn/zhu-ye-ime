@@ -68,7 +68,7 @@ if (-not $SkipBuild) {
     try {
         # 强制重编 updater：增量缓存无法感知 option_env! 的公钥变化。
         & cargo clean -p zhu-ye-updater 2>$null
-        & cargo build --release -p zhu-ye-dict -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater
+        & cargo build --release -p zhu-ye-dict -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater -p zhu-ye-tray
         if ($LASTEXITCODE -ne 0) {
             throw 'cargo build 失败，无法生成发布产物。'
         }
@@ -78,7 +78,8 @@ if (-not $SkipBuild) {
 }
 foreach ($artifact in @($dictExe, (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll'),
         (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe'),
-        (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'))) {
+        (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'),
+        (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe'))) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         throw "release 产物缺失：$artifact（请勿使用 -SkipBuild）"
     }
@@ -124,6 +125,20 @@ if (-not (Test-Path -LiteralPath $portableZip -PathType Leaf)) {
 }
 $zipDest = Join-Path $relDir "zhu-ye-ime-$Version.zip"
 Copy-Item -LiteralPath $portableZip -Destination $zipDest -Force
+# 载荷完整性守卫：zip 必须含三个 exe（设置/更新器/托盘，T-078 + 批六）；缺一即中止，
+# 避免把缺组件的发布包上传出去。
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zipRead = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zipDest))
+try {
+    $zipNames = @($zipRead.Entries | ForEach-Object { $_.FullName })
+    foreach ($entry in @('bin/zhu-ye-tray.exe', 'bin/zhu-ye-settings.exe', 'bin/zhu-ye-updater.exe', 'bin/zhu_ye_ime.dll')) {
+        if ($zipNames -notcontains $entry) {
+            throw "发布 zip 缺少组件 $entry —— 发行包组装有缺口，中止发布。"
+        }
+    }
+} finally {
+    $zipRead.Dispose()
+}
 
 # ---- 7. 上传核对清单 ----
 $sums = Join-Path $relDir 'SHA256SUMS.txt'
