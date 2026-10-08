@@ -38,6 +38,7 @@ fn run() -> Result<(), String> {
     let mut shot_path = None;
     let mut translation_mode = false;
     let mut emoji_row = false;
+    let mut long_input = false;
 
     let mut index = 0usize;
     while index < args.len() {
@@ -68,10 +69,12 @@ fn run() -> Result<(), String> {
             }
             "--translation-mode" => translation_mode = true,
             "--emoji" => emoji_row = true,
+            "--long" => long_input = true,
             "--help" | "-h" => {
                 println!(
                     "用法: candidate-demo [--theme auto|light|dark|high-contrast] \
-                     [--dpi <px>] [--seconds <s>] [--shot <bmp>] [--translation-mode] [--emoji]"
+                     [--dpi <px>] [--seconds <s>] [--shot <bmp>] [--translation-mode] \
+                     [--emoji] [--long]"
                 );
                 return Ok(());
             }
@@ -87,7 +90,7 @@ fn run() -> Result<(), String> {
         shot_path,
         custom_theme: None,
     };
-    run_candidate_demo(demo_view(translation_mode, emoji_row), &options)
+    run_candidate_demo(demo_view(translation_mode, emoji_row, long_input), &options)
 }
 
 fn take_value(args: &[String], index: &mut usize, arg: &str) -> Result<String, String> {
@@ -109,7 +112,7 @@ fn parse_theme(value: &str) -> Result<ThemePreference, String> {
     }
 }
 
-fn demo_view(translation_mode: bool, emoji_row: bool) -> CandidateUiView {
+fn demo_view(translation_mode: bool, emoji_row: bool, long_input: bool) -> CandidateUiView {
     // T-122：演示项带带调拼音，便于截图验收拼音行（字号/字重/对比度/行距）。
     let mut items = vec![
         item("你好", "Hello", "nǐ hǎo", CandidateSource::Static),
@@ -134,9 +137,20 @@ fn demo_view(translation_mode: bool, emoji_row: bool) -> CandidateUiView {
         item("泥泞", "Muddy", "", CandidateSource::Static),
         item("妮好", "", "", CandidateSource::Static),
     ]);
+    // T-124：长拼音输入场景——组合串超固定 360dp 面板输入串区
+    // （约 141dp）会被右侧省略号截断；带调提示同时存在以复现用户反馈
+    // （`youmeiyoushenmeren` → `youmeiyoushenmere...`）。
+    let (composition, pinyin_hint) = if long_input {
+        (
+            "youmeiyoushenmeren".to_owned(),
+            "yǒu méi yǒu shén me rén".to_owned(),
+        )
+    } else {
+        ("ni hao".to_owned(), "ni hao".to_owned())
+    };
     CandidateUiView {
-        composition: "ni hao".to_owned(),
-        pinyin_hint: "ni hao".to_owned(),
+        composition,
+        pinyin_hint,
         page: 0,
         page_size: DEFAULT_PAGE_SIZE,
         page_count: 1,

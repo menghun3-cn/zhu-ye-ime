@@ -175,11 +175,14 @@ impl CandidateWindow {
         }
         unsafe {
             if let Some(state) = state_mut(self.hwnd) {
-                state.view = view;
-                let rows = state.view.panel_rows();
-                let (width, height) = state.metrics.panel_size(rows);
+                let rows = view.panel_rows();
+                let (width, height) =
+                    state
+                        .metrics
+                        .panel_size_for(rows, &view.composition, &view.pinyin_hint);
                 let width = width.max(1);
                 let height = height.max(1);
+                state.view = view;
                 if let Some(placement) = placement {
                     place_at(self.hwnd, placement.anchor, width, height);
                 } else {
@@ -235,7 +238,11 @@ impl CandidateWindow {
             if state.view.composition.is_empty() {
                 return;
             }
-            let (width, height) = state.metrics.panel_size(state.view.panel_rows());
+            let (width, height) = state.metrics.panel_size_for(
+                state.view.panel_rows(),
+                &state.view.composition,
+                &state.view.pinyin_hint,
+            );
             let state_ptr = Box::into_raw(state);
             let Ok(hwnd) = CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -405,6 +412,9 @@ impl CandidateWindowState {
         // 关键修复（T-034）：此前创建了 `create_font` 的 HFONT 却从未
         // `SelectObject` 进绘制 DC，所有 DrawTextW 都用了 DC 默认字体
         // （现代中文 Windows 上为微软雅黑），字体名改动因此不生效。
+        // T-124：长拼音输入时面板宽按内容扩展，本帧全部矩形按实际
+        // 客户区宽度布局（页眉输入串/提示不再按固定 360dp 面板截断）。
+        let metrics = self.metrics.with_panel_width(width);
         let old_font = unsafe { SelectObject(hdc, self.font.into()) };
         let selected = self.view.selected_on_page();
         let page_rows = self.view.panel_rows();
@@ -414,7 +424,7 @@ impl CandidateWindowState {
             hdc,
             width,
             height,
-            self.metrics.corner_radius,
+            metrics.corner_radius,
             self.theme.background,
             self.theme.border,
         );
@@ -427,16 +437,16 @@ impl CandidateWindowState {
                 // 布局，摆脱"序号贴高亮块左缘"的局促观感。
                 fill_round_rect(
                     hdc,
-                    to_win_rect(self.metrics.highlight_rect(index)),
+                    to_win_rect(metrics.highlight_rect(index)),
                     self.theme.highlight_background,
-                    self.metrics.corner_radius,
+                    metrics.corner_radius,
                 );
             }
             let Some(item) = visible.get(index) else {
                 continue;
             };
 
-            let row_ui = self.metrics.row_rect(index);
+            let row_ui = metrics.row_rect(index);
             let marker_color = if is_selected {
                 self.theme.highlight_foreground
             } else {
@@ -444,8 +454,8 @@ impl CandidateWindowState {
             };
             // T-122：序号右对齐到标记列右缘（再让出 `marker_text_gap` 间距），
             // 单/双位数字都紧贴候选词、留白稳定在 4-8px 档，不再随数字宽度漂移。
-            let mut marker_rect = self.metrics.marker_rect(row_ui);
-            marker_rect.right -= self.metrics.marker_text_gap;
+            let mut marker_rect = metrics.marker_rect(row_ui);
+            marker_rect.right -= metrics.marker_text_gap;
             draw_text_right(hdc, &index_marker(index), marker_rect, marker_color);
 
             // M6-R：网络语缩写候选在主文本后追加 `[网络]` 标注；
@@ -483,18 +493,15 @@ impl CandidateWindowState {
             };
             // T-037：动态分栏——译文紧跟主文本（不再固定右侧 1/3 列），
             // 英文译文更靠左、可用宽度更大。
-            let (main_col, translation_col) = self.metrics.row_split(row_ui, main, secondary);
+            let (main_col, translation_col) = metrics.row_split(row_ui, main, secondary);
             let (main_rect, translation_rect) = if show_pin {
                 // 拼音行占行首上方区（小字体），主文本与译文下移至其下方，
                 // 两段互不重叠；无拼音行保持原样（整行垂直居中）。
-                let pin_band = self
-                    .metrics
-                    .pin_font_height
-                    .saturating_add(self.metrics.pin_line_gap);
+                let pin_band = metrics.pin_font_height.saturating_add(metrics.pin_line_gap);
                 let pin_bottom = row_ui
                     .top
                     .saturating_add(pin_band)
-                    .min(row_ui.bottom - self.metrics.font_height.min(row_ui.height()));
+                    .min(row_ui.bottom - metrics.font_height.min(row_ui.height()));
                 let pin_rect = UiRect {
                     left: main_col.left,
                     top: row_ui.top,
@@ -534,13 +541,16 @@ impl CandidateWindowState {
         } else {
             self.view.pinyin_hint.as_str()
         };
+        // T-124：页眉提示区按内容分配宽度（长拼音输入时输入串完整优先，
+        // 面板随内容扩宽；提示为空/与输入串相同时为 0，输入串占整行）。
+        let (_, hint_alloc) = metrics.header_widths(header_text, &self.view.pinyin_hint);
         // T-040：页脚 m/n 翻页指示（总页数 >1 时在面板底部右端显示）。
         if page_rows > 0 {
             if let Some(label) = self.view.footer_label() {
                 draw_text_right(
                     hdc,
                     &label,
-                    self.metrics.footer_rect(page_rows),
+                    metrics.footer_rect(page_rows),
                     self.theme.secondary,
                 );
             }
@@ -548,14 +558,14 @@ impl CandidateWindowState {
         draw_text(
             hdc,
             header_text,
-            self.metrics.header_text_rect(),
+            metrics.header_text_rect_with(hint_alloc),
             self.theme.foreground,
         );
         if !self.view.pinyin_hint.is_empty() && self.view.pinyin_hint != header_text {
             draw_text(
                 hdc,
                 &self.view.pinyin_hint,
-                self.metrics.header_hint_rect(),
+                metrics.header_hint_rect_with(hint_alloc),
                 self.theme.secondary,
             );
         }
@@ -595,7 +605,11 @@ pub fn run_candidate_demo(
 
         let initial_dpi = options.dpi.unwrap_or_else(|| GetDpiForSystem());
         let state = CandidateWindowState::new(view, options, initial_dpi);
-        let (width, height) = state.metrics.panel_size(state.view.panel_rows());
+        let (width, height) = state.metrics.panel_size_for(
+            state.view.panel_rows(),
+            &state.view.composition,
+            &state.view.pinyin_hint,
+        );
         let state_ptr = Box::into_raw(Box::new(state));
 
         let hwnd = match CreateWindowExW(
