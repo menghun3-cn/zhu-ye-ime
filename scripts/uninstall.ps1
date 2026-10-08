@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
 卸载竹叶输入法：TSF 服务（注册表与全部版本化 DLL）+ 设置窗口/更新器 + 快捷方式。
@@ -9,7 +9,8 @@
 3. 删除注册指向的 DLL 与安装目录中全部 zhu-ye-ime*.dll（含历史版本与固定名）；
    被进程占用的文件改为 MoveFileEx 重启后延迟清理，不再中止卸载
 4. 删除安装目录中的词典（占用时同样延迟清理）
-5. 删除 bin 下的 zhu-ye-settings.exe 与 zhu-ye-updater.exe（占用时延迟清理）
+5. 删除 bin 下的 zhu-ye-settings.exe / zhu-ye-updater.exe / zhu-ye-tray.exe（占用时延迟清理），
+   停止托盘进程并移除 HKCU Run 自启
 6. 删除开始菜单快捷方式
 7. 目录为空时一并移除；**用户数据目录（%APPDATA%\zhu-ye-ime）保留**——
    配置、领域包与用户词库属用户数据，卸载程序文件不动数据（口径见 T-078）
@@ -53,6 +54,14 @@ if (Test-Path -LiteralPath $shortcut -PathType Leaf) {
     Write-Host "已删除快捷方式: $shortcut"
 }
 
+# ---- 托盘：停进程、删自启、删 exe（批六） ----
+Get-Process zhu-ye-tray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+$runPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+if (Test-Path -LiteralPath $runPath) {
+    Remove-ItemProperty -LiteralPath $runPath -Name '竹叶输入法托盘' -ErrorAction SilentlyContinue
+}
+Write-Host '已停止托盘进程并移除 HKCU Run 自启。'
+
 $activeDll = Get-TsfInprocServerDefault
 if ($activeDll) {
     Write-Host "卸载前注册指向: $activeDll"
@@ -95,9 +104,9 @@ foreach ($dictionaryFile in @($targetDictionary, (Join-Path $InstallDir 'seed.zy
     }
 }
 
-# ---- 设置窗口与更新器（bin\，T-078 新增） ----
+# ---- 设置窗口、更新器与托盘（bin\，T-078 新增；托盘为批六新增） ----
 $exeDir = Join-Path (Split-Path -Parent $InstallDir) 'bin'
-foreach ($exeName in @('zhu-ye-settings.exe', 'zhu-ye-updater.exe')) {
+foreach ($exeName in @('zhu-ye-settings.exe', 'zhu-ye-updater.exe', 'zhu-ye-tray.exe')) {
     $exePath = Join-Path $exeDir $exeName
     if (Test-Path -LiteralPath $exePath -PathType Leaf) {
         try {

@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
 生成发行包：包含 TSF 服务、设置窗口、更新器、基础词典与三个领域包（T-078）。
@@ -18,7 +18,7 @@
       README-测试.txt
 
 打包步骤：
-1. 若缺失 release 产物，先构建 zhu-ye-ime / zhu-ye-settings / zhu-ye-updater
+1. 若缺失 release 产物，先构建 zhu-ye-ime / zhu-ye-settings / zhu-ye-updater / zhu-ye-tray
 2. 复制二进制、基础词典与领域包到 target/portable 暂存目录
 3. 生成 zip；干净机解压后以管理员运行 scripts/install.ps1（无需 -SkipBuild，
    发行包模式不构建）
@@ -49,13 +49,14 @@ if (-not $Version) {
 $needed = @(
     (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll'),
     (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe'),
-    (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe')
+    (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'),
+    (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe')
 )
 if (-not ($needed | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) {
     Write-Host '未找到 release 产物，先执行构建...'
     Push-Location $repoRoot
     try {
-        & cargo build --release -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater
+        & cargo build --release -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater -p zhu-ye-tray
         if ($LASTEXITCODE -ne 0) {
             throw 'cargo build 失败，无法生成发行包。'
         }
