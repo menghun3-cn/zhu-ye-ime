@@ -285,6 +285,16 @@ impl CandidateMetrics {
         }
     }
 
+    /// 以给定面板宽度布局（T-124 长拼音自适应）：候选窗宽度随页眉内容
+    /// 扩展后，本帧所有矩形（页眉/行/页脚）按实际客户区宽度计算。
+    /// 其余尺寸（字高/内边距/行高）保持不变。
+    #[must_use]
+    pub fn with_panel_width(&self, panel_width: i32) -> Self {
+        let mut layout = *self;
+        layout.panel_width = panel_width.max(1);
+        layout
+    }
+
     /// 面板总尺寸；`rows` 为页面预留行数，0 表示无候选（只显示页眉条）。
     /// 有候选行时底部追加页脚条（T-040）。
     #[must_use]
@@ -338,6 +348,88 @@ impl CandidateMetrics {
             right,
             bottom: header.bottom,
         }
+    }
+
+    /// 页眉两栏宽度分配（T-124 长拼音自适应）：返回 (输入串宽, 提示宽)。
+    ///
+    /// 输入串完整优先：短输入（估算总宽仍在固定面板宽内）时不扩面板，
+    /// 提示按其内容宽度完整分配；长输入（超出固定宽）时面板按内容扩展，
+    /// 输入串完整容纳，提示最多占两者总和的 2/3（输入串至少保底 1/3，
+    /// 提示超限截断——提示是辅助信息，用户输入串不可省略）。
+    /// 提示为空或与输入串相同时提示宽返回 0（输入串单独占整行）。
+    #[must_use]
+    pub fn header_widths(&self, composition: &str, hint: &str) -> (i32, i32) {
+        let main_w = estimate_text_width(composition, self.font_height)
+            .ceil()
+            .max(1.0) as i32;
+        if hint.is_empty() || hint == composition {
+            return (main_w, 0);
+        }
+        let hint_w = estimate_text_width(hint, self.font_height).ceil().max(1.0) as i32;
+        let gap = self.translation_gap.max(1);
+        let need = main_w + gap + hint_w + self.padding_x * 2;
+        let hint_alloc = if need > self.panel_width {
+            // 超固定宽：输入串完整，提示最多占 (输入+间距+提示) 的 2/3。
+            hint_w.min(((main_w + gap + hint_w) * 2 / 3).max(1))
+        } else {
+            hint_w
+        };
+        (main_w, hint_alloc)
+    }
+
+    /// 按 `hint_alloc`（见 [`Self::header_widths`]）布局页眉输入串矩形；
+    /// 提示不显示时（alloc=0）输入串占满页眉整行。
+    #[must_use]
+    pub fn header_text_rect_with(&self, hint_alloc: i32) -> UiRect {
+        let header = self.header_rect();
+        let right = if hint_alloc > 0 {
+            header
+                .right
+                .saturating_sub(hint_alloc)
+                .saturating_sub(self.translation_gap.max(1))
+                .max(header.left + 1)
+        } else {
+            header.right
+        };
+        UiRect {
+            left: header.left,
+            top: header.top,
+            right,
+            bottom: header.bottom,
+        }
+    }
+
+    /// 按 `hint_alloc` 布局页眉右侧提示矩形（右对齐）；`hint_alloc<=0`
+    /// 时返回零宽矩形（左侧输入串占满整行）。
+    #[must_use]
+    pub fn header_hint_rect_with(&self, hint_alloc: i32) -> UiRect {
+        let header = self.header_rect();
+        let hint_width = hint_alloc.clamp(1, header.width());
+        UiRect {
+            left: header.right - hint_width,
+            top: header.top,
+            right: header.right,
+            bottom: header.bottom,
+        }
+    }
+
+    /// 面板总尺寸（内容自适应宽，T-124）；`rows` 为页面预留行数，
+    /// 0 表示无候选（只显示页眉条）。宽度按页眉输入串/提示内容扩展，
+    /// 不低于固定 `panel_width`（保底 360dp）；高度与 [`Self::panel_size`]
+    /// 一致（有候选行时底部追加页脚条，T-040）。
+    #[must_use]
+    pub fn panel_size_for(&self, rows: usize, composition: &str, hint: &str) -> (i32, i32) {
+        let (_, height) = self.panel_size(rows);
+        let (main_w, hint_alloc) = self.header_widths(composition, hint);
+        let gap = if hint_alloc > 0 {
+            self.translation_gap.max(1)
+        } else {
+            0
+        };
+        let width = self
+            .panel_width
+            .max(main_w + gap + hint_alloc + self.padding_x * 2);
+        (width, height)
     }
 
     /// 页眉右侧拼音提示矩形。
@@ -705,7 +797,6 @@ mod tests {
         assert!(text.right <= hint.left);
         assert!(text.left < text.right);
         assert!(hint.left < hint.right);
-
         let row = metrics.row_rect(0);
         let (main, translation) = metrics.row_split(row, "你好", "hello world");
         // 译文紧跟主文本（恰为间距，而非旧的固定 1/3 右列）。
@@ -713,6 +804,65 @@ mod tests {
         assert!(main.left - row.left == metrics.marker_width);
         // 序号列收窄于旧值（T-037 回归保护：候选词更贴近序号）。
         assert!(metrics.marker_width < 34);
+    }
+
+    #[test]
+    fn 长拼音输入时窗口自适应扩展且输入串完整() {
+        // T-124：固定 360dp 面板下，长拼音输入串 + 带调提示并存时输入串区
+        // 被提示区挤压（约 141dp），17 字符 ASCII 拼音（估算 ≈150px @16px
+        // 字高）放不下 → `DT_END_ELLIPSIS` 右侧省略号；此后窗口按内容扩展。
+        let metrics = CandidateMetrics::new(96);
+        let long = "youmeiyoushenmeren";
+        let long_hint = "yǒu méi yǒu shén me rén";
+        let est = estimate_text_width(long, metrics.font_height).ceil() as i32;
+        let (main_w, hint_alloc) = metrics.header_widths(long, long_hint);
+        assert!(hint_alloc >= 1, "提示应分配非零宽度");
+        let (width, _) = metrics.panel_size_for(1, long, long_hint);
+        assert!(width > metrics.panel_width, "长输入+提示应扩展面板宽度");
+        // 与 paint 一致：布局按实际客户区宽度（with_panel_width）。
+        let layout = metrics.with_panel_width(width);
+        let main_rect = layout.header_text_rect_with(hint_alloc);
+        assert!(main_rect.width() >= est, "输入串区应容纳完整拼音");
+        assert!(main_w == est);
+        let hint_rect = layout.header_hint_rect_with(hint_alloc);
+        assert!(main_rect.right <= hint_rect.left, "输入串与提示不得重叠");
+        assert!(hint_rect.left < hint_rect.right);
+    }
+
+    #[test]
+    fn 页眉提示按内容分配且输入串完整优先() {
+        let metrics = CandidateMetrics::new(96);
+        let long = "youmeiyoushenmeren";
+        let long_hint = "yǒu méi yǒu shén me rén";
+        let hint_full = estimate_text_width(long_hint, metrics.font_height).ceil() as i32;
+        let gap = metrics.translation_gap.max(1);
+        let (main_w, hint_alloc) = metrics.header_widths(long, long_hint);
+        assert!(hint_alloc >= 1, "提示应分配非零宽度");
+        assert!(
+            hint_alloc <= (main_w + gap + hint_full) * 2 / 3,
+            "提示不得挤占输入串至 1/3 以下"
+        );
+        // 提示未超上限时按内容完整分配（不无故压缩提示）。
+        assert!(
+            hint_alloc >= hint_full.min(main_w + gap + hint_full),
+            "未超限的提示应完整分配"
+        );
+        let (width, _) = metrics.panel_size_for(1, long, long_hint);
+        let layout = metrics.with_panel_width(width);
+        let text = layout.header_text_rect_with(hint_alloc);
+        assert!(
+            text.width() >= estimate_text_width(long, metrics.font_height) as i32,
+            "输入串完整容纳"
+        );
+        let hint = layout.header_hint_rect_with(hint_alloc);
+        assert!(text.right <= hint.left, "输入串与提示不得重叠");
+        assert!(hint.left < hint.right);
+        // 短输入 + 短提示：保持固定面板宽，提示完整分配。
+        let (main2, hint2) = metrics.header_widths("你好", "nǐ hǎo");
+        let need2 = main2 + gap + hint2 + metrics.padding_x * 2;
+        let (width, _) = metrics.panel_size_for(1, "你好", "nǐ hǎo");
+        assert_eq!(width, metrics.panel_width, "短输入保持固定宽");
+        assert!(need2 <= metrics.panel_width, "短输入提示完整放得下");
     }
 
     #[test]
