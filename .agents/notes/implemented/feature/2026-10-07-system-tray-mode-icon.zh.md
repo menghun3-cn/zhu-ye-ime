@@ -32,7 +32,11 @@ Status: implemented
      启动就反映"最近激活会话"的模式（多宿主并存时取最后一次写者）；
 - 托盘进程：白"中"（资源 101）/白"英"（资源 102）两枚内嵌图标
   （`winresource` `set_icon_with_id`，assets/tray-zh.ico 与 tray-en.ico，
-  橙底白字与 DLL 品牌同风格）；**普通隐藏顶层窗口**（无 WS_VISIBLE
+  橙底白字与 DLL 品牌同风格）。**T-123 更新**：图标由"白字透明底"改为
+  **品牌橙 #E5881E 直角方形底 + 白"中/英"粗体**（16/32/48 三帧 PNG ICO，
+  生成脚本 `scripts/make-tray-icons.ps1`，见
+  [托盘图标方形化笔记](../../implemented/feature/2026-10-08-tray-icon-square.zh.md)）；
+  **普通隐藏顶层窗口**（无 WS_VISIBLE
   不进任务栏）+ `WM_TIMER` 500ms 轮询状态文件（mtime 判变，原子写
   保证内容完整）——初版 message-only 窗口在 VM 验收中被否决：
   `Shell_NotifyIcon` `NIM_ADD` 成功但 Server 2019 通知区不渲染
