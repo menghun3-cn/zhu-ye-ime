@@ -358,9 +358,11 @@ impl CandidateWindowState {
         quit_on_destroy: bool,
     ) -> Self {
         let metrics = CandidateMetrics::new(initial_dpi.max(BASE_DPI));
-        let (font, font_is_stock) = create_font(metrics.font_height, FW_NORMAL.0 as i32);
+        // T-126：主文本 16px 加粗（视觉焦点），拼音行 Segoe UI 13px 常规。
+        let (font, font_is_stock) =
+            create_font(metrics.font_height, FW_SEMIBOLD.0 as i32, "SimSun");
         let (pin_font, pin_font_is_stock) =
-            create_font(metrics.pin_font_height, FW_SEMIBOLD.0 as i32);
+            create_font(metrics.pin_font_height, FW_NORMAL.0 as i32, "Segoe UI");
         Self {
             view,
             theme: resolve_with_custom(options.theme, options.custom_theme.as_ref()),
@@ -387,7 +389,8 @@ impl CandidateWindowState {
                 let _ = DeleteObject(old_font.into());
             }
         }
-        let (font, font_is_stock) = create_font(metrics.font_height, FW_NORMAL.0 as i32);
+        let (font, font_is_stock) =
+            create_font(metrics.font_height, FW_SEMIBOLD.0 as i32, "SimSun");
         self.font = font;
         self.font_is_stock = font_is_stock;
         let old_pin_font = mem::take(&mut self.pin_font);
@@ -397,7 +400,7 @@ impl CandidateWindowState {
             }
         }
         let (pin_font, pin_font_is_stock) =
-            create_font(metrics.pin_font_height, FW_SEMIBOLD.0 as i32);
+            create_font(metrics.pin_font_height, FW_NORMAL.0 as i32, "Segoe UI");
         self.pin_font = pin_font;
         self.pin_font_is_stock = pin_font_is_stock;
         self.metrics = metrics;
@@ -497,22 +500,14 @@ impl CandidateWindowState {
             let (main_rect, translation_rect) = if show_pin {
                 // 拼音行占行首上方区（小字体），主文本与译文下移至其下方，
                 // 两段互不重叠；无拼音行保持原样（整行垂直居中）。
-                let pin_band = metrics.pin_font_height.saturating_add(metrics.pin_line_gap);
-                let pin_bottom = row_ui
-                    .top
-                    .saturating_add(pin_band)
-                    .min(row_ui.bottom - metrics.font_height.min(row_ui.height()));
-                let pin_rect = UiRect {
-                    left: main_col.left,
-                    top: row_ui.top,
-                    // 拼音带不随主文本列宽截断：拼音（ASCII）比同宽汉字更宽，
-                    // 用整行宽度绘制（拼音带区域无译文，可延伸到行尾）。
-                    right: row_ui.right,
-                    bottom: pin_bottom,
-                };
+                // T-126：拼音矩形由 `pin_row_rect` 计算——左缘与汉字列严格
+                // 对齐、宽度容纳拼音内容（超出汉字宽时不截断）、底部 = 行顶
+                // + 拼音带（字高 + 8px 间距），主文本区随之整体下移。
+                let pin_rect = metrics.pin_row_rect(row_ui, main_col, &pin_text);
+                let pin_bottom = pin_rect.bottom;
                 let _ = unsafe { SelectObject(hdc, self.pin_font.into()) };
-                // T-122：拼音行颜色独立为 `theme.pin`（加深灰），不再用译文/序号
-                // 的 `secondary` 浅灰——小字在候选词上方仍保持清晰对比。
+                // T-122：拼音行颜色独立为 `theme.pin`；
+                // T-126：浅色主题下为辅助提示淡灰 #888888（Segoe UI 渲染声调）。
                 draw_text(hdc, &pin_text, pin_rect, self.theme.pin);
                 let _ = unsafe { SelectObject(hdc, self.font.into()) };
                 (
@@ -1076,24 +1071,28 @@ fn draw_text_right(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
     }
 }
 
-fn create_font(height: i32, weight: i32) -> (HFONT, bool) {
+fn create_font(height: i32, weight: i32, face: &str) -> (HFONT, bool) {
     unsafe {
-        let mut face = [0u16; 32];
-        // T-034：候选框字体为宋体（SimSun）。此前字体名虽设为雅黑却从未
+        let mut face_name = [0u16; 32];
+        // T-034：候选主文本字体为宋体（SimSun）。此前字体名虽设为雅黑却从未
         // SelectObject，实际渲染的一直是 DC 默认字体；paint() 已修复选择。
-        for (slot, unit) in face.iter_mut().zip("SimSun".encode_utf16().chain(Some(0))) {
+        // T-126：拼音行改用 Segoe UI——对 precomposed/组合声调字符（ǐ/ǎ 等）
+        // 提供平滑的组合字形，修掉宋体下声调符号偏移割裂的观感。
+        for (slot, unit) in face_name.iter_mut().zip(face.encode_utf16().chain(Some(0))) {
             *slot = unit;
         }
         let metrics = LOGFONTW {
             lfHeight: -height,
             // T-122：拼音行半粗（FW_SEMIBOLD）提升小字可读性；主文本保持常规。
+            // T-126：主文本常规→ FW_SEMIBOLD（汉字作为视觉焦点加粗）；拼音行
+            // 半粗→常规（辅助提示，配合浅灰 #888 与声调字体）。
             lfWeight: weight,
             lfCharSet: DEFAULT_CHARSET,
             lfOutPrecision: OUT_DEFAULT_PRECIS,
             lfClipPrecision: CLIP_DEFAULT_PRECIS,
             lfQuality: CLEARTYPE_QUALITY,
             lfPitchAndFamily: FF_DONTCARE.0 | DEFAULT_PITCH.0,
-            lfFaceName: face,
+            lfFaceName: face_name,
             ..Default::default()
         };
         let font = CreateFontIndirectW(&metrics);

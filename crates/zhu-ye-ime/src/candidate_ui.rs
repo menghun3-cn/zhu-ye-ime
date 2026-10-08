@@ -143,7 +143,10 @@ pub fn theme(kind: UiThemeKind) -> CandidateUiTheme {
             foreground: UiColor::rgb(0x1E, 0x88, 0xE5),
             secondary: UiColor::rgb(0x99, 0x99, 0x99),
             // T-122：拼音行深灰（对比度 ≈7:1，小字清晰；仍弱于主文本蓝色）。
-            pin: UiColor::rgb(0x55, 0x55, 0x55),
+            // T-126 用户指令：拼音作辅助提示，改为较淡灰 #888888
+            //（对比度 ≈3.4:1，弱于译文/序号 #999999，视觉层级：汉字 > 译文 >
+            // 序号 ≈ 拼音 > 背景；声调可读性由 Segoe UI 字体保障）。
+            pin: UiColor::rgb(0x88, 0x88, 0x88),
             border: UiColor::rgb(0x1E, 0x88, 0xE5),
             highlight_background: UiColor::rgb(0xE6, 0xF2, 0xFE),
             highlight_foreground: UiColor::rgb(0xD3, 0x2F, 0x2F),
@@ -263,10 +266,15 @@ impl CandidateMetrics {
             dpi,
             panel_width: dp(360.0),
             padding_x: dp(12.0),
-            padding_y: dp(10.0),
-            header_height: dp(38.0),
-            row_height: dp(36.0),
-            row_gap: dp(2.0),
+            // T-126：垂直内边距 10→12（面板上下留白更舒展）。
+            padding_y: dp(12.0),
+            // T-126：页眉 38→48（顶部输入缓冲区更舒展，输入串垂直居中留白
+            // 由 16px 字高 + 16px 上下空间组成）。
+            header_height: dp(48.0),
+            // T-126：候选行 36→48（拼音带 + 主文本 + 每侧 ≈4-5px 呼吸内边距）。
+            row_height: dp(48.0),
+            // T-126：行间距 2→4（候选行之间留白加大）。
+            row_gap: dp(4.0),
             // T-037：序号列收窄使候选词更贴近序号；译文紧随主文本间距减小。
             // T-122：列宽 26→22（词起点左移 4px）并让序号右对齐、词起点固定
             // 留 `marker_text_gap` 间距（4-8px 档），消除数字后多余留白。
@@ -280,8 +288,10 @@ impl CandidateMetrics {
             corner_radius: dp(8.0),
             font_height: dp(16.0),
             // T-122：拼音行字 11→13、与主文本间距 3→4（小尺寸下更清晰、留出呼吸感）。
+            // T-126：拼音-主文本间距 4→8（用户 margin-bottom 4-8px 档取上限，
+            // 拼音与汉字彻底拉开）；字号保持 13dp（用户 12/13px 档）。
             pin_font_height: dp(13.0),
-            pin_line_gap: dp(4.0),
+            pin_line_gap: dp(8.0),
         }
     }
 
@@ -482,6 +492,34 @@ impl CandidateMetrics {
             top: row.top,
             right: row.left + self.marker_width,
             bottom: row.bottom,
+        }
+    }
+
+    /// 行内拼音行矩形（T-126）。
+    ///
+    /// 左缘与主文本列严格对齐（序号、拼音、汉字同一左缘，上下对齐关系
+    /// 稳定）；宽度取「主文本列宽」与「拼音内容估算宽」的较大者（不超行
+    /// 右缘）——拼音比汉字窄时与汉字同宽，拼音比汉字宽时完整容纳不截断，
+    /// 拼音因此不会"乱跑"。顶边=行顶，底边=顶边+拼音带（字高+间距）。
+    #[must_use]
+    pub fn pin_row_rect(&self, row: UiRect, main_col: UiRect, pin: &str) -> UiRect {
+        let pin_width = estimate_text_width(pin, self.pin_font_height)
+            .ceil()
+            .max(1.0) as i32;
+        let right = main_col
+            .left
+            .saturating_add(pin_width)
+            .max(main_col.right)
+            .min(row.right)
+            .max(main_col.left + 1);
+        let band_bottom = row
+            .top
+            .saturating_add(self.pin_font_height + self.pin_line_gap);
+        UiRect {
+            left: main_col.left,
+            top: row.top,
+            right,
+            bottom: band_bottom.min(row.bottom).max(row.top + 1),
         }
     }
 
@@ -731,7 +769,9 @@ mod tests {
         let (_, one) = metrics.panel_size(1);
         assert_eq!(one - height, metrics.row_height + metrics.footer_height);
         // 与既有九行尺寸一致（回归保护）；T-040 起含页脚条。
-        assert_eq!(metrics.panel_size(9).1, 398 + metrics.footer_height);
+        // T-126：页眉 38→48、行高 36→48、行距 2→4、内边距 10→12
+        // → 九行面板 398 → 536（+138dp：输入缓冲区与候选行呼吸空间）。
+        assert_eq!(metrics.panel_size(9).1, 536 + metrics.footer_height);
         assert_eq!(metrics.panel_size(9).0, 360);
         // 零行面板不占页脚空间（T-031 页眉条行为保持）。
         assert_eq!(
@@ -966,6 +1006,8 @@ mod tests {
         assert_eq!(dark.highlight_foreground, UiColor::rgb(0xFF, 0x8A, 0x80));
         assert_eq!(dark.marker, dark.secondary);
         assert_ne!(dark.marker, dark.foreground);
+        // T-126：浅色主题拼音行 = 用户指定辅助提示淡灰 #888888。
+        assert_eq!(light.pin, UiColor::rgb(0x88, 0x88, 0x88));
     }
 
     #[test]
@@ -1002,9 +1044,67 @@ mod tests {
         // 拼音行字号提升且仍小于主文本（层级：主文本 > 拼音）。
         assert!(metrics.pin_font_height > 12, "拼音行应大于 12px");
         assert!(metrics.pin_font_height < metrics.font_height);
-        assert!(metrics.pin_line_gap >= 4, "拼音行与主文本间距应 ≥4px");
-        // 拼音带（字号+行距）不应挤占主文本区：行高 36 ≥ 拼音带 + 16px 主字。
+        // T-126：拼音与汉字的垂直间距取用户 4-8px 档上限 8px。
+        assert!(
+            (4..=8).contains(&metrics.pin_line_gap),
+            "拼音行与主文本间距应在 4-8px，实际 {}",
+            metrics.pin_line_gap
+        );
+        assert_eq!(metrics.pin_line_gap, 8, "取 4-8px 档上限拉开拼音与汉字");
+        // 拼音带（字号+行距）不应挤占主文本区：行高 48 ≥ 拼音带 + 16px 主字。
         let pin_band = metrics.pin_font_height + metrics.pin_line_gap;
         assert!(metrics.row_height - pin_band >= metrics.font_height);
+    }
+
+    #[test]
+    fn 拼音与主文本对齐且行内留呼吸空间() {
+        // T-126 ①④：拼音行整带（字高+间距）从行顶开始，主文本区在其后——
+        // 拼音与汉字垂直间距=pin_line_gap；行内剩余高度作为主文本上下内边距，
+        // 让候选项不拥挤。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        let row = metrics.row_rect(0);
+        let (main_col, _) = metrics.row_split(row, "你好", "");
+        let pin_rect = metrics.pin_row_rect(row, main_col, "nǐ hǎo");
+        // 拼音行与汉字列同左缘（上下严格对齐）。
+        assert_eq!(pin_rect.left, main_col.left);
+        // 拼音带底部 = 行顶 + 字高 + 间距。
+        assert_eq!(
+            pin_rect.bottom,
+            row.top + metrics.pin_font_height + metrics.pin_line_gap
+        );
+        // 拼音宽于汉字时右缘 = 内容估算宽（按内容放宽、不截断），
+        // 左缘保持与汉字列对齐（上下严格对齐关系）。
+        let est = estimate_text_width("nǐ hǎo", metrics.pin_font_height).ceil() as i32;
+        assert_eq!(pin_rect.right, main_col.left + est);
+        assert!(pin_rect.right >= main_col.right, "拼音更宽时完整容纳");
+        // 拼音窄于汉字时与汉字列同宽（宽度对齐，拼音不乱跑）。
+        let short = metrics.pin_row_rect(row, main_col, "ni");
+        assert_eq!(short.right, main_col.right);
+        // 主文本区与拼音带间距 = pin_line_gap。
+        let main_top = pin_rect.bottom;
+        assert!(main_top - row.top >= metrics.pin_font_height + 4);
+        // 行内呼吸：主文本区高度 ≥ 主字号 + 4px（上下各 ≥2px 内边距）。
+        let main_zone = row.bottom - main_top;
+        assert!(main_zone >= metrics.font_height + 4, "行内应留呼吸空间");
+        // 整个拼音带不越出行底。
+        assert!(pin_rect.bottom <= row.bottom);
+    }
+
+    #[test]
+    fn 长拼音超出汉字宽度时完整容纳不截断() {
+        // T-126 ④：拼音宽度取 max(汉字列宽, 拼音估算宽)——"zhang hao" 比
+        // 两个汉字宽时按拼音内容放宽（不截断），且不越过行右缘。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        let row = metrics.row_rect(0);
+        let (main_col, _) = metrics.row_split(row, "你好", "");
+        let pin_rect = metrics.pin_row_rect(row, main_col, "zhang hao");
+        assert_eq!(pin_rect.left, main_col.left);
+        assert!(pin_rect.right > main_col.right, "长拼音应按内容放宽");
+        assert!(pin_rect.right <= row.right, "拼音不得越出行右缘");
+        // 行右缘边界：超行宽时收缩到行右缘（不溢出窗口）。
+        let (wide_main, _) = metrics.row_split(row, "这是一个特别长的词条用于测试", "");
+        let edge = metrics.pin_row_rect(row, wide_main, "zhang hao shi yin");
+        assert!(edge.right <= row.right);
+        assert!(edge.right >= edge.left);
     }
 }
