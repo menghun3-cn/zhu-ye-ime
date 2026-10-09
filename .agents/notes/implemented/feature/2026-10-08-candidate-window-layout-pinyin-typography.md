@@ -31,6 +31,13 @@ column after **subtracting** `marker_text_gap` from its right edge. The gap is
 therefore constant for every index width ("1" through "18"), no longer drifting with
 digit count. Word start moves from x=38 to x=34 at 96dpi (padding 12 + 22).
 
+*(T-137 revised the column constants in place — marker column now starts flush at
+`marker_left` = 2dp instead of `padding_x`, `marker_width` 22→20dp,
+`marker_text_gap` 6→2dp; word start x=34 → 22. The right-alignment rationale
+itself stays valid. See the
+[typography-whitespace note](../../implemented/feature/2026-10-08-candidate-window-typography-whitespace.md)
+"Index column flush to the left edge (T-137)" section.)*
+
 ### Pinyin line typography and dedicated color
 
 `CandidateMetrics::pin_font_height` grows 11→13dp and `pin_line_gap` 3→4dp;
@@ -67,7 +74,9 @@ row_height`).
 ## Consequences
 
 - The gap between index and word is now visually stable at ~6px at 96dpi for every
-  page, matching the user's 4-8px request; word start moves 4px left.
+  page, matching the user's 4-8px request; word start moves 4px left. (T-137 later
+  tightened this: index column flush to x=2, gap 6→2dp at the user's "2px即可"
+  request, word start x=34 → 22 — same right-alignment, flush-left.)
 - Pinyin/tone text reads clearly at small size: deeper grey (or brighter grey on
   dark), 13px, semi-bold, with a 4px gap above the word. (T-126 later superseded
   these parameters: shipped pinyin line is now Segoe UI 13px `FW_NORMAL` #888888
@@ -77,7 +86,8 @@ row_height`).
   CJK 1.0→1.06em) so the estimated rects fit the synthetic bold ink — see the
   [typography-whitespace](../../implemented/feature/2026-10-08-candidate-window-typography-whitespace.md)
   note; its pool of decisions supersedes the ones listed here.) The dedicated
-  `pin` theme key, the index right-alignment, and word-start x=34 remain valid.
+  `pin` theme key and the index right-alignment remain valid; the index column
+  constants have since moved flush-left (word-start x=34 → 22, gap 2dp, T-137).
 - Theme authors may optionally add `"pin"` to the `candidate` section of a theme
   file; old files are unaffected (key missing → default).
 - `CandidateUiTheme` is now an 8-key structure; every construction site was updated

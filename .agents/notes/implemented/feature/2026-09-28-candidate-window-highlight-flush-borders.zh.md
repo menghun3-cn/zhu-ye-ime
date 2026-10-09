@@ -28,6 +28,10 @@ English | [中文](2026-09-28-candidate-window-highlight-flush-borders.zh.md) | 
   `row_rect` 布局（`padding_x` = 12dp 不变），序号因此相对高亮块左缘保有
   约 12dp 的内边距。
 
+*（T-137 修订序号位置：`CandidateMetrics::marker_left` = 2dp 使标记列贴到
+面板左缘——序号现在只比高亮块左缘靠右 1px（不再是约 12dp），按用户
+"序号离左边缘 2px即可"。选中块贴边决策本身不变。见 [排版与留白笔记](../../implemented/feature/2026-10-08-candidate-window-typography-whitespace.zh.md)「序号列贴左边缘 (T-137)」节。）*
+
 效果（96dpi 像素取证）：高亮块左/右缘距面板边框 12/13px → 1/2px（贴边）；
 序号字面距高亮块左缘 2px → 13px。192dpi 深色主题同验（1/2px），确认内缩
 量为物理像素而非 DPI 缩放值。
@@ -47,8 +51,8 @@ English | [中文](2026-09-28-candidate-window-highlight-flush-borders.zh.md) | 
 
 选中块现为贴面板左右边框的整行浅蓝块，序号不再贴其左缘；边框线完整保留。
 编号列宽、主文本/译文分栏（T-037）与页脚（T-040）均未受影响。单测锁定
-几何不变量（左右贴边、上下包住整行、序号列起点距高亮块左缘 ≥ 10px、
-`highlight_inset_x` 不随 DPI 缩放）。交叉参考：
+几何不变量（左右贴边、上下包住整行、序号列起点 = `marker_left`（2dp，
+T-137）——比高亮块左缘靠右 1px、`highlight_inset_x` 不随 DPI 缩放）。交叉参考：
 [2026-09-25-candidate-window-row-layout-dynamic.md](2026-09-25-candidate-window-row-layout-dynamic.md)
 （行布局指标）与
 [2026-09-25-candidate-window-page-footer-indicator.md](2026-09-25-candidate-window-page-footer-indicator.md)

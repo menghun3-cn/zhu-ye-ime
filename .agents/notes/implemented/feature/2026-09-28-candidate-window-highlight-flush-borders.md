@@ -32,6 +32,13 @@ unchanged:
   unchanged), so the index keeps roughly 12dp of inner padding from the
   pill's left edge.
 
+*(T-137 revised the index placement: `CandidateMetrics::marker_left` = 2dp
+moves the marker column flush to the panel's left edge — the index now sits
+just 1px right of the pill's left edge instead of ~12dp — per the user's
+"序号离左边缘 2px即可". The pill-flush decision itself is unchanged. See the
+[typography-whitespace note](../../implemented/feature/2026-10-08-candidate-window-typography-whitespace.md)
+"Index column flush (T-137)" section.)*
+
 Measured result (96dpi): the pill's outer edges move from 12/13px to 1/2px
 from the panel borders; the digit's distance from the pill's left edge grows
 from 2px to 13px. Re-verified at 192dpi in the dark theme (1/2px), confirming
@@ -60,8 +67,9 @@ The selection pill is now a whole-row block flush with the panel's left/right
 borders, the index no longer touches its left edge, and the border line stays
 intact. The index column width, primary/translation split (T-037) and footer
 (T-040) are unaffected. Unit tests lock the geometry invariants (flush
-left/right, row-height top/bottom, index-column start ≥ 10px from the pill's
-left edge, `highlight_inset_x` not DPI-scaled). Cross-references:
+left/right, row-height top/bottom, index-column start = `marker_left` (2dp,
+T-137) — 1px right of the pill's left edge, `highlight_inset_x` not
+DPI-scaled). Cross-references:
 [2026-09-25-candidate-window-row-layout-dynamic.md](2026-09-25-candidate-window-row-layout-dynamic.md)
 (row layout metrics) and
 [2026-09-25-candidate-window-page-footer-indicator.md](2026-09-25-candidate-window-page-footer-indicator.md)

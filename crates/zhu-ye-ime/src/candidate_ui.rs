@@ -231,9 +231,14 @@ pub struct CandidateMetrics {
     pub row_height: i32,
     /// 行间距。
     pub row_gap: i32,
-    /// 数字标记列宽（= 主文本左对齐起点偏移）。
+    /// 序号列左缘相对面板左缘的距离（T-137：用户要求"序号离左边缘 2px 即可"
+    /// ——列整体贴边，不再从 `padding_x` 缩进；高亮块内缩 1px + 边框 1px 后
+    /// 序号从 2px 处起）。
+    pub marker_left: i32,
+    /// 数字标记列宽（= 序号列起点到主文本左对齐起点的偏移）。
     pub marker_width: i32,
-    /// 数字与候选词的固定间距（T-122：序号右对齐到列右缘后与词的间距）。
+    /// 数字与候选词的固定间距（T-122：序号右对齐到列右缘后与词的间距；
+    /// T-137：用户"距离2px即可" → 6→2，序号与词贴紧）。
     pub marker_text_gap: i32,
     /// 主文本与译文分栏间距。
     pub translation_gap: i32,
@@ -281,8 +286,13 @@ impl CandidateMetrics {
             // T-037：序号列收窄使候选词更贴近序号；译文紧随主文本间距减小。
             // T-122：列宽 26→22（词起点左移 4px）并让序号右对齐、词起点固定
             // 留 `marker_text_gap` 间距（4-8px 档），消除数字后多余留白。
-            marker_width: dp(22.0),
-            marker_text_gap: dp(6.0),
+            // T-137：用户要求"序号离左边缘还是太远，缩小到 2px；序号容器能
+            // 容下 2 位数即可"——新增 `marker_left` 2（列贴面板左边，不再
+            // 从 padding_x 缩进）、列宽 22→20（恰好容双位数字 + 右对齐余量）、
+            // 间距 6→2（序号与候选词贴紧）。
+            marker_left: dp(2.0),
+            marker_width: dp(20.0),
+            marker_text_gap: dp(2.0),
             translation_gap: dp(8.0),
             // T-043：选中块贴面板左右边框（仅保留 1px 边框线内缩）。
             highlight_inset_x: 1,
@@ -488,13 +498,14 @@ impl CandidateMetrics {
         }
     }
 
-    /// 行内数字标记矩形。
+    /// 行内数字标记矩形（T-137：列起点 `marker_left` 贴面板左缘，不再随
+    /// `padding_x` 缩进）。
     #[must_use]
     pub fn marker_rect(&self, row: UiRect) -> UiRect {
         UiRect {
-            left: row.left,
+            left: self.marker_left,
             top: row.top,
-            right: row.left + self.marker_width,
+            right: (self.marker_left + self.marker_width).min(row.right),
             bottom: row.bottom,
         }
     }
@@ -550,8 +561,10 @@ impl CandidateMetrics {
     /// 可占满行。
     #[must_use]
     pub fn row_split(&self, row: UiRect, main: &str, translation: &str) -> (UiRect, UiRect) {
-        let marker_right = (row.left + self.marker_width).min(row.right);
-        let usable = (row.width() - self.marker_width).max(0);
+        // T-137：词起点 = 序号列右缘（`marker_left + marker_width`），与
+        // `marker_rect` 同源；序号列贴边后主文本也整体左移。
+        let marker_right = (self.marker_left + self.marker_width).min(row.right);
+        let usable = (row.right - marker_right).max(0);
         let min_translation = if translation.is_empty() {
             1
         } else {
@@ -810,14 +823,14 @@ mod tests {
             assert!(rect.height() == metrics.row_height);
             previous_bottom = rect.bottom;
             let (text, translation) = metrics.row_split(rect, "你好", "hello");
-            assert!(text.left == rect.left + metrics.marker_width);
+            assert!(text.left == metrics.marker_left + metrics.marker_width);
             assert!(text.right <= translation.left);
             assert!(translation.right == rect.right);
         }
     }
 
     #[test]
-    fn 选中块贴面板左右边框且序号留内边距() {
+    fn 选中块贴面板左右边框且序号列贴左边缘() {
         let metrics = CandidateMetrics::new(96);
         for index in 0..DEFAULT_PAGE_SIZE {
             let row = metrics.row_rect(index);
@@ -839,12 +852,15 @@ mod tests {
                 highlight.right > row.right,
                 "高亮块右缘应比内容行右缘更靠边框"
             );
-            // 序号列相对高亮块左缘保留足量内边距（不再贴高亮块边缘）。
+            // 序号列贴面板左缘（T-137：用户要求"序号离左边缘 2px"——列起点
+            // 仅比高亮块内缩（1px 边框线）多 1px）。
             let marker = metrics.marker_rect(row);
-            assert!(
-                marker.left - highlight.left >= 10,
-                "序号列起点相对高亮块左缘应至少留 10px"
+            assert_eq!(
+                marker.left - highlight.left,
+                metrics.marker_left - metrics.highlight_inset_x,
+                "序号列起点 = marker_left（贴边），仅比高亮块左缘多边框内缩"
             );
+            assert_eq!(metrics.marker_left, 2, "T-137 定稿：序号距左边缘 2px");
         }
     }
 
@@ -860,7 +876,7 @@ mod tests {
         let (main, translation) = metrics.row_split(row, "你好", "hello world");
         // 译文紧跟主文本（恰为间距，而非旧的固定 1/3 右列）。
         assert_eq!(translation.left - main.right, metrics.translation_gap);
-        assert!(main.left - row.left == metrics.marker_width);
+        assert!(main.left == metrics.marker_left + metrics.marker_width);
         // 序号列收窄于旧值（T-037 回归保护：候选词更贴近序号）。
         assert!(metrics.marker_width < 34);
     }
@@ -928,7 +944,8 @@ mod tests {
     fn 动态分栏译文紧跟主文本且保底宽度() {
         let metrics = CandidateMetrics::new(96);
         let row = metrics.row_rect(0);
-        let usable = row.width() - metrics.marker_width;
+        let marker_right = metrics.marker_left + metrics.marker_width;
+        let usable = row.right - marker_right;
         let min_translation = usable / 3;
         let max_main = usable - min_translation - metrics.translation_gap;
 
@@ -1048,18 +1065,21 @@ mod tests {
     }
 
     #[test]
-    fn 序号与候选词间距稳定在四到八像素() {
-        // T-122：数字右对齐于标记列右缘并让出 marker_text_gap，96dpi 下
-        // 单/双位数字与候选词间距都落在用户要求的 4-8px 档。
+    fn 序号与候选词间距稳定在二像素且序号列贴边() {
+        // T-122：数字右对齐于标记列右缘并让出 marker_text_gap（4-8px 档）；
+        // T-137：用户"序号离左边缘还是太远，希望缩小，距离2px即可；序号
+        // 容器能容下2位数的宽度即可" → 列起点 marker_left=2（贴边）、列宽
+        // 22→20（恰好双位数字 + 右对齐余量）、间距 6→2（序号与词贴紧）。
         let metrics = CandidateMetrics::new(BASE_DPI);
+        assert_eq!(metrics.marker_left, 2, "T-137 定稿：序号距左边缘 2px");
+        assert_eq!(metrics.marker_text_gap, 2, "T-137 定稿：序号-词间距 2px");
+        // 列宽须容双位数字（10-18）右对齐：数字全宽 ≤ 列宽 - 间距。
         assert!(
-            (4..=8).contains(&metrics.marker_text_gap),
-            "marker_text_gap 应在 4-8px，实际 {}",
-            metrics.marker_text_gap
+            metrics.marker_width - metrics.marker_text_gap >= 16,
+            "双位数字可容下"
         );
         // 词起点比旧值（26px）明显左移，且标记列仍留有双位数字空间。
         assert!(metrics.marker_width < 26, "词起点应比旧版更靠左");
-        assert!(metrics.marker_width - metrics.marker_text_gap >= 14);
         // 拼音行字号提升且仍小于主文本（层级：主文本 > 拼音）。
         assert!(metrics.pin_font_height > 12, "拼音行应大于 12px");
         assert!(metrics.pin_font_height < metrics.font_height);
