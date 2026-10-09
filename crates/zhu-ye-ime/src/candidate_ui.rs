@@ -9,6 +9,25 @@
 /// `fit_text` 无生产代码消费者（仅测试使用），由 `zhu_ye_ui` 直接承接，不复转发。
 pub use zhu_ye_ui::{estimate_text_width, SystemColors, UiColor, UiRect, UiThemeKind, BASE_DPI};
 
+/// 音节分隔符的**显示**字符（T-134）：英文弯撇 `'`（U+2019，RIGHT SINGLE
+/// QUOTATION MARK，英文排版正式撇号）。
+///
+/// 定义在此而非 `input`，是因为候选窗模块（`candidate_window`）会被
+/// `candidate-demo` 以 `#[path]` 独立编译（无 `crate::input`），依赖必须
+/// 落在 demo 同样 include 的 `candidate_ui`。
+///
+/// T-128 初版显示用键盘直撇 `'`（U+0027），但页眉主字体为宋体（SimSun）
+/// 粗体，其 U+0027 字形是"顶部带钩的竖线"——在粗体下观感像"上逗号"
+/// （用户 2026-10-09 反馈）。T-134 换 U+2019 后宋体下为标准 9 形弯撇，
+/// 但用户目视后仍反馈"音标还是看起来是上逗号"（T-139）——宋体/雅黑的
+/// 弯引区字形本质都是逗点形状。T-139 起**绘制层**把页眉组成串里的该字符
+/// 分离出来用西文 Segoe UI 的 U+0027 直撇单独渲染（candidate_window
+/// `draw_header_mixed`），页眉观感为清晰直撇号；本字符仅作数据标记，
+/// 不作为宋体字形直接绘制。仅影响 `composing_display` 输出（显示层）；
+/// 查询键 `composing` 不含分隔符（去噪），手动边界以 `manual_seps` 存
+/// 字符下标，与显示字符无关。
+pub const SYLLABLE_SEP_DISPLAY: char = '\u{2019}';
+
 use zhu_ye_core::candidate::CandidateSource;
 
 /// 单页默认候选项数，与 1-9 数字选择保持一致。

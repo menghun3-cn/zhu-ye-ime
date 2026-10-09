@@ -132,6 +132,31 @@ split a 3-byte U+2019 mid-character (potential panic); now `pop()`s by char.
 Tests assert `\u{2019}` escapes. Candidate-row pinyin (Segoe UI, dictionary
 data ASCII `'` for erhua `nǎ'er`) is untouched — its glyph reads fine.
 
+## Header separator drawn as a straight apostrophe (T-139, user: "looks like a comma on top" — round 2)
+
+T-134 switched the display glyph to U+2019, which under SimSun (the header font)
+still renders as a hefty "top comma" (round-bulb head + hook). Pixel evidence at
+96dpi: the SimSun U+2019 glyph is 4px wide × 5px tall with a round head
+(12 dark px); the Segoe UI U+0027 straight apostrophe is a 2px-wide slim
+vertical sliver (6 px). User requested a real "apostrophe" look.
+
+Fix (T-139): the header renderer now draws per-segment. `draw_header_mixed`
+splits the display string at `SYLLABLE_SEP_DISPLAY` (U+2019) and draws every
+segment with its own font on a shared baseline: main segments keep SimSun
+SEMIBOLD (`main_font`), and each separator segment is drawn as the ASCII
+straight apostrophe `'` (`SYLLABLE_SEP_APOSTROPHE: char = '\u{0027}'`) in a
+Segoe UI REGULAR font (`sep_font`, created at the header font size). Pure
+display layer — `composing` / `manual_seps` / key semantics unchanged.
+Helpers: `draw_seg` (SelectObject the segment font, then DrawTextW in a
+per-segment rect: top = baseline − that font's ascent, height = tmHeight) and
+`text_extent` (GetTextExtentPoint32W on the selected font for advance width).
+The separator rect gets an +8px right pad: `GetTextExtentPoint32W` returns the
+advance (which for `'` sits left of the ink), and a tight right edge clipped
+the glyph body to a 1–3 px fringe. Verified on the demo: `xi'an` renders
+`x`(SimSun) `'`(Segoe UI straight, sitting above x-height) `a n`(SimSun) with
+unchanged spacing; light/dark themes both clean. Not applied to candidate-row
+pinyin (`nǎ'er`) — that is already fine.
+
 ## Related
 
 - [full pinyin segmentation core (T-007)](../../implemented/feature/2026-09-19-full-pinyin-segmentation-core.md) — `segment_all` and the first-plan rule this design builds on.
