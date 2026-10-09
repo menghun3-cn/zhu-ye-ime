@@ -541,9 +541,16 @@ impl CandidateWindowState {
                 // 的 13px 字符高 < Segoe UI 13px 的 tmHeight≈16px，glyph
                 // 底部 descender 会被 `DrawTextW` 裁掉——这里把绘制矩形
                 // 与主文本顶边一起按 tmHeight 展开，拼音完整可见）。
-                let pin_over = self.pin_tm_height.saturating_sub(metrics.pin_font_height);
-                let pin_bottom = pin_rect.bottom.saturating_add(pin_over);
+                // T-131：内容带（拼音字形带 + pin_line_gap + 主文本带）在
+                // 行内**垂直居中**（`pin_band_top`）——此前贴行顶、底部悬空
+                // 约 12px（行高 48 减内容带 36），用户反馈"候选行内部的下
+                // 留白过多"；居中后上下留白各约 6px，行内紧凑均衡（panel
+                // 尺寸/分页不变）。
+                let pin_band = self.pin_tm_height.max(metrics.pin_font_height);
+                let band_top = metrics.pin_band_top(row_ui, self.pin_tm_height);
+                let pin_bottom = band_top.saturating_add(pin_band);
                 let pin_draw_rect = UiRect {
+                    top: band_top,
                     bottom: pin_bottom,
                     ..pin_rect
                 };
@@ -577,11 +584,13 @@ impl CandidateWindowState {
             // 有拼音行时序号随主文本带移动，与汉字同竖直中心；无拼音行
             // （译文模式）仍整行垂直居中。
             let mut marker_rect = metrics.marker_rect(row_ui);
-            if let Some(pin_rect) = pin_rect {
-                let pin_over = self.pin_tm_height.saturating_sub(metrics.pin_font_height);
-                let main_top = pin_rect
-                    .bottom
-                    .saturating_add(pin_over)
+            if pin_rect.is_some() {
+                // T-131：与主文本带同源的行内垂直居中（内容带下移后序号跟
+                // 随汉字带同步下移，序号/汉字依然严格同竖直中心）。
+                let pin_band = self.pin_tm_height.max(metrics.pin_font_height);
+                let band_top = metrics.pin_band_top(row_ui, self.pin_tm_height);
+                let main_top = band_top
+                    .saturating_add(pin_band)
                     .saturating_add(metrics.pin_line_gap);
                 marker_rect.top = main_top;
                 marker_rect.bottom = main_top.saturating_add(metrics.font_height);
