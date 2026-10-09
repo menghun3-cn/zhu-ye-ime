@@ -118,10 +118,6 @@ pub struct RunOptions {
     pub shot_manage: bool,
     /// 截图时进入「修复输入法」子视图（同上互斥规则）。
     pub shot_repair: bool,
-    /// 截图时进入「检查更新」子视图（同上互斥规则）。
-    pub shot_update: bool,
-    /// 截图时进入「版本与诊断信息」子视图（同上互斥规则）。
-    pub shot_diag: bool,
     /// 截图时进入「用户词表」子视图（T-088 取证，同上互斥规则）。
     pub shot_user_words: bool,
     /// 截图时进入「通讯录」子视图（T-088 取证，同上互斥规则）。
@@ -155,13 +151,13 @@ struct WindowState {
     repair_scan: Option<RepairScan>,
     /// 正在运行的后台更新器任务（None 表示空闲）；完成后回执到主线程再清空。
     update_busy: Option<UpdateKind>,
-    /// 最近一次后台任务的结果（含错误）；进入子视图或任务完成时更新。
+    /// 最近一次后台任务的结果（含错误）；任务完成时写入，关于页结果区展示。
     update_result: Option<(UpdateKind, Result<String, String>)>,
     /// 后台任务完成回执的接收端；spawn 新任务时重建。
     update_rx: Option<Receiver<UpdateOutcome>>,
     /// 已派发的任务序号；回执消息用它识别"当前任务"（旧任务迟到回执忽略）。
     update_seq: u32,
-    /// 「版本与诊断信息」子视图的逐行内容；进入时从本地收集（不联网）。
+    /// 「关于与更新」页诊断信息逐行内容；首次绘制该页时从本地懒收集（不联网）。
     diagnostics: Option<Vec<String>>,
     /// 自定义主题（`Custom(name)`）解析出的设置窗配色与覆盖键数；非自定义主题为
     /// `None`。文件缺失/解析失败回退系统深浅预设（T-088 / FR-048）。
@@ -229,14 +225,6 @@ impl WindowState {
             settings.page = Page::Common;
             settings.open_repair();
         }
-        if options.shot_update {
-            settings.page = Page::About;
-            settings.open_update();
-        }
-        if options.shot_diag {
-            settings.page = Page::About;
-            settings.open_diagnostics();
-        }
         if options.shot_user_words {
             settings.page = Page::Common;
             settings.open_user_words();
@@ -270,14 +258,6 @@ impl WindowState {
         } else {
             None
         };
-        // 取证模式直接进入诊断子视图时，首帧就需要真实信息。
-        let diagnostics = if settings.subview == Subview::Diagnostics {
-            Some(build_diagnostics(config_path.as_deref()))
-        } else {
-            None
-        };
-        let custom_theme =
-            resolve_custom_theme(shell::resolve_theme_kind(), &theme, config_path.as_deref());
         // 取证模式直接进入 T-088 三子视图时，首帧就需要真实数据。
         let user_words_message = None;
         let contacts = if settings.subview == Subview::Contacts {
@@ -290,6 +270,9 @@ impl WindowState {
         } else {
             Vec::new()
         };
+        // 关于页诊断信息懒收集：首次绘制 About 页时构建（见 draw_about）。
+        let custom_theme =
+            resolve_custom_theme(shell::resolve_theme_kind(), &theme, config_path.as_deref());
         Self {
             settings,
             theme_kind: shell::resolve_theme_kind(),
@@ -309,7 +292,7 @@ impl WindowState {
             update_result: None,
             update_rx: None,
             update_seq: 0,
-            diagnostics,
+            diagnostics: None,
             custom_theme,
             user_words_message,
             contacts,
@@ -601,14 +584,6 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
             on_repair_click(hwnd, state, &metrics, client, x, y);
             return;
         }
-        Subview::Update => {
-            on_update_click(hwnd, state, &metrics, client, x, y);
-            return;
-        }
-        Subview::Diagnostics => {
-            on_diagnostics_click(state, &metrics, client, x, y);
-            return;
-        }
         Subview::UserWords => {
             on_user_words_click(hwnd, state, &metrics, client, x, y);
             return;
@@ -662,15 +637,6 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
                     state.settings.open_repair();
                     invalidate(hwnd);
                 }
-                ItemControl::OpenUpdate => {
-                    state.settings.open_update();
-                    invalidate(hwnd);
-                }
-                ItemControl::OpenDiagnostics => {
-                    state.diagnostics = Some(build_diagnostics(state.config_path.as_deref()));
-                    state.settings.open_diagnostics();
-                    invalidate(hwnd);
-                }
                 ItemControl::OpenUserWords => {
                     state.settings.open_user_words();
                     state.hint = None;
@@ -698,6 +664,11 @@ unsafe fn on_click(hwnd: HWND, state: &mut WindowState, x: i32, y: i32) {
             }
             return;
         }
+    }
+
+    // 关于与更新页的扁平区块（T-143）：条目行循环未命中时，再命中检查/应用按钮。
+    if state.settings.page == Page::About {
+        on_about_sections_click(hwnd, state, &metrics, client, x, y);
     }
 }
 
@@ -808,11 +779,11 @@ fn on_repair_click(
     }
 }
 
-/// 「检查更新」子视图内的命中（T-077 / FR-044）：返回 / 检查更新 / 应用更新。
+/// 「关于与更新」页扁平区块内的命中（T-143）：检查更新 / 应用更新。
 ///
 /// 检查与应用按钮有共同的可点条件：在线更新已开启（P-03）、更新器存在、当前无任务在跑。
-/// 未开启或更新器缺失时按钮不可点，界面在说明区给出原因——保证"关闭时零出站连接"可测。
-fn on_update_click(
+/// 未开启或更新器缺失时按钮不可点，界面在状态/提示行给出原因——保证"关闭时零出站连接"可测。
+fn on_about_sections_click(
     hwnd: HWND,
     state: &mut WindowState,
     metrics: &SettingsMetrics,
@@ -820,11 +791,7 @@ fn on_update_click(
     x: i32,
     y: i32,
 ) {
-    let layout_rows = layout::update_layout(metrics, client);
-    if layout::contains(layout_rows.back, x, y) {
-        state.settings.close_subview();
-        return;
-    }
+    let layout_rows = layout::about_layout(metrics, client, 0);
     let can_run = can_run_updater(state);
     if layout::contains(layout_rows.check, x, y) {
         if can_run {
@@ -895,21 +862,6 @@ unsafe fn start_update_task(hwnd: HWND, state: &mut WindowState, kind: UpdateKin
         }
     });
     invalidate(hwnd);
-}
-
-/// 「版本与诊断信息」子视图内的命中：返回。
-fn on_diagnostics_click(
-    state: &mut WindowState,
-    metrics: &SettingsMetrics,
-    client: UiRect,
-    x: i32,
-    y: i32,
-) {
-    let row_count = state.diagnostics.as_ref().map_or(0, Vec::len);
-    let layout_rows = layout::diagnostics_layout(metrics, client, row_count);
-    if layout::contains(layout_rows.back, x, y) {
-        state.settings.close_subview();
-    }
 }
 
 /// 收集诊断信息（T-077 / FR-044）：版本、配置/数据/日志路径与已装包列表。
@@ -2209,12 +2161,16 @@ unsafe fn draw(hdc: HDC, state: &mut WindowState, client: UiRect) {
             Subview::Packs => draw_packs(hdc, state, theme, &metrics, client),
             Subview::Manage => draw_manage(hdc, state, theme, &metrics, client),
             Subview::Repair => draw_repair(hdc, state, theme, &metrics, client),
-            Subview::Update => draw_update(hdc, state, theme, &metrics, client),
-            Subview::Diagnostics => draw_diagnostics(hdc, state, theme, &metrics, client),
             Subview::UserWords => draw_user_words(hdc, state, theme, &metrics, client),
             Subview::Contacts => draw_contacts(hdc, state, theme, &metrics, client),
             Subview::Themes => draw_themes(hdc, state, theme, &metrics, client),
-            Subview::None => draw_items(hdc, state, theme, &metrics, client),
+            Subview::None => {
+                if state.settings.page == Page::About {
+                    draw_about(hdc, state, theme, &metrics, client);
+                } else {
+                    draw_items(hdc, state, theme, &metrics, client);
+                }
+            }
         }
 
         // 底部提示
@@ -2681,27 +2637,31 @@ unsafe fn draw_repair(
     );
 }
 
-/// 绘制「检查更新」子视图（T-077 / FR-044）。
+/// 绘制「关于与更新」页（T-143）：第一行为"启用在线更新"条目（含开/关 chips，
+/// 复用 `draw_items`），其下依次平铺更新状态/提示行、结果区、检查/应用按钮与
+/// 诊断信息小节——检查更新与版本与诊断信息不再进入子视图，也没有返回按钮。
 ///
-/// 说明区给出开关状态与不可点的原因；结果区逐行展示更新器输出；
-/// 底部「检查更新」为主按钮，未开启/更新器缺失时置灰且不响应。
-unsafe fn draw_update(
+/// 检查/应用按钮的可点条件：在线更新已开启（P-03）、更新器存在、无任务在跑；
+/// 未开启或更新器缺失时置灰且不响应——保证"关闭时零出站连接"可测。
+unsafe fn draw_about(
     hdc: HDC,
     state: &mut WindowState,
     theme: SettingsTheme,
     metrics: &SettingsMetrics,
     client: UiRect,
 ) {
-    let layout_rows = layout::update_layout(metrics, client);
+    // 第一行条目（启用在线更新，含开/关 chips）。
+    draw_items(hdc, state, theme, metrics, client);
+
+    // 诊断信息首次绘制本页时懒收集（纯本地读取，不联网；D-44）。
+    if state.diagnostics.is_none() {
+        state.diagnostics = Some(build_diagnostics(state.config_path.as_deref()));
+    }
+    let diag_count = state.diagnostics.as_ref().map_or(0, Vec::len);
+    let layout_rows = layout::about_layout(metrics, client, diag_count);
     let online = state.settings.online_update;
 
-    // 说明区第一行：在线更新开关状态（P-03 默认关）。
-    let status_rect = UiRect {
-        left: layout_rows.info.left,
-        top: layout_rows.info.top + metrics.gap,
-        right: layout_rows.info.right,
-        bottom: layout_rows.info.top + metrics.gap + state.fonts.body_height,
-    };
+    // 状态行：在线更新开关状态（P-03 默认关）。
     draw_text(
         hdc,
         if online {
@@ -2709,7 +2669,7 @@ unsafe fn draw_update(
         } else {
             "在线更新：已关闭"
         },
-        status_rect,
+        layout_rows.status,
         if online {
             theme.item_text
         } else {
@@ -2718,13 +2678,7 @@ unsafe fn draw_update(
         state.fonts.body,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
     );
-    // 说明区第二行：不可点的原因或更新器位置（D-44 边界说明）。
-    let hint_rect = UiRect {
-        left: layout_rows.info.left,
-        top: status_rect.bottom,
-        right: layout_rows.info.right,
-        bottom: layout_rows.info.bottom - metrics.gap / 2,
-    };
+    // 提示行：不可点的原因或更新器位置（D-44 边界说明）。
     let hint = if !online {
         "未开启时不发起任何网络请求（D-44）：请在「启用在线更新」中开启".to_owned()
     } else {
@@ -2736,20 +2690,10 @@ unsafe fn draw_update(
     draw_text(
         hdc,
         &hint,
-        hint_rect,
+        layout_rows.hint,
         theme.secondary_text,
         state.fonts.small,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
-    );
-    fill(
-        hdc,
-        UiRect {
-            left: layout_rows.info.left,
-            top: layout_rows.info.bottom - 1,
-            right: layout_rows.info.right,
-            bottom: layout_rows.info.bottom,
-        },
-        theme.border,
     );
 
     // 结果区：任务中显示进行中；否则显示最近一次结果（如实反映错误，D-44 无假共识）。
@@ -2777,7 +2721,7 @@ unsafe fn draw_update(
         );
     }
 
-    // 底部按钮：检查 / 应用 / 返回。
+    // 检查/应用按钮（T-143 起不再有"返回关于与更新"：左侧导航可随时切页离开）。
     let can_run = online && updater::updater_exe_path().is_some() && state.update_busy.is_none();
     let label = if state.update_busy.is_some() {
         "正在运行…"
@@ -2821,14 +2765,53 @@ unsafe fn draw_update(
         state.fonts.small,
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
     );
-    draw_button(
+
+    // 版本与诊断信息小节：标题 + 分隔线 + 逐行诊断（超出可用高度截断）。
+    draw_text(
         hdc,
-        state.fonts.small,
-        theme,
-        metrics,
-        layout_rows.back,
-        "← 返回关于与更新",
+        "版本与诊断信息",
+        layout_rows.diag_title,
+        theme.item_text,
+        state.fonts.body,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
     );
+    fill(
+        hdc,
+        UiRect {
+            left: layout_rows.diag_title.left,
+            top: layout_rows.diag_title.bottom - 1,
+            right: layout_rows.diag_title.right,
+            bottom: layout_rows.diag_title.bottom,
+        },
+        theme.border,
+    );
+    let diag_lines = state
+        .diagnostics
+        .as_ref()
+        .map_or_else(Vec::new, Clone::clone);
+    for (index, row_rect) in layout_rows.diag_rows.iter().enumerate() {
+        let Some(line) = diag_lines.get(index) else {
+            break;
+        };
+        let rect = UiRect {
+            left: row_rect.left + metrics.gap,
+            top: row_rect.top,
+            right: row_rect.right,
+            bottom: row_rect.bottom,
+        };
+        draw_text(
+            hdc,
+            line,
+            rect,
+            if index == 0 {
+                theme.item_text
+            } else {
+                theme.secondary_text
+            },
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
 }
 
 /// 结果区的逐行内容：任务进行中 / 最近一次手动检查结果 / 启动异步检查状态文件 /
@@ -2914,52 +2897,6 @@ unsafe fn draw_disabled_button(
         theme.placeholder_text,
         font,
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-    );
-}
-
-/// 绘制「版本与诊断信息」子视图（T-077 / FR-044）：逐行展示诊断内容。
-unsafe fn draw_diagnostics(
-    hdc: HDC,
-    state: &mut WindowState,
-    theme: SettingsTheme,
-    metrics: &SettingsMetrics,
-    client: UiRect,
-) {
-    let lines = state
-        .diagnostics
-        .as_ref()
-        .map_or_else(Vec::new, |lines| lines.clone());
-    let layout_rows = layout::diagnostics_layout(metrics, client, lines.len());
-    for (index, row_rect) in layout_rows.rows.iter().enumerate() {
-        let Some(line) = lines.get(index) else {
-            break;
-        };
-        let rect = UiRect {
-            left: row_rect.left + metrics.gap,
-            top: row_rect.top,
-            right: row_rect.right,
-            bottom: row_rect.bottom,
-        };
-        draw_text(
-            hdc,
-            line,
-            rect,
-            if index == 0 {
-                theme.item_text
-            } else {
-                theme.secondary_text
-            },
-            state.fonts.small,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
-        );
-    }
-    draw_button(
-        hdc,
-        state.fonts.small,
-        theme,
-        metrics,
-        layout_rows.back,
-        "← 返回关于与更新",
     );
 }
 
