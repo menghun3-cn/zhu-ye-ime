@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use crate::bigram::{BigramModel, EmptyBigramModel};
 use crate::dict::{Dictionary, DictionaryEntry};
-use crate::pinyin::{fuzzy_variants, initial_syllables, segment_all, SyllableTable};
+use crate::pinyin::{
+    fuzzy_variants, initial_syllables, segment_all, segment_constrained, SyllableTable,
+};
 use crate::user_dict::UserDictionary;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -234,29 +236,54 @@ pub fn generate_candidates(
             if segments.len() < 2 {
                 continue;
             }
-            let mut combined = String::new();
-            let mut combined_pinyin = String::new();
-            let mut total = 0i64;
-            let mut complete = true;
-            for syllable in &segments {
-                match dictionary.lookup(syllable).first() {
-                    Some(entry) => {
-                        combined.push_str(&entry.word);
-                        combined_pinyin.push_str(syllable);
-                        total += i64::try_from(entry.frequency).unwrap_or(i64::MAX);
-                    }
-                    None => {
-                        complete = false;
-                        break;
-                    }
-                }
-            }
-            if complete {
-                collected.push(Candidate::new(combined, total).with_pinyin(combined_pinyin));
+            if let Some(candidate) = combine_segments(dictionary, &segments) {
+                collected.push(candidate);
             }
         }
     }
     deduplicate_and_sort(collected)
+}
+
+/// 将切分方案按每音节词典首条拼成组合候选；任一音节无条目返回 `None`。
+fn combine_segments(dictionary: &dyn Dictionary, segments: &[String]) -> Option<Candidate> {
+    let mut combined = String::new();
+    let mut combined_pinyin = String::new();
+    let mut total = 0i64;
+    for syllable in segments {
+        let entry = dictionary.lookup(syllable).first().cloned()?;
+        combined.push_str(&entry.word);
+        combined_pinyin.push_str(syllable);
+        total += i64::try_from(entry.frequency).unwrap_or(i64::MAX);
+    }
+    Some(Candidate::new(combined, total).with_pinyin(combined_pinyin))
+}
+
+/// 显式音节边界下的组合候选（T-128，音节分隔符）：取满足 `hard` 硬边界的
+/// 第一种切分方案（与自动分隔使用的"首选切分"语义一致）按每音节词典首条
+/// 拼成**单一**组合候选返回。
+///
+/// 只取首方案避免多切分噪声（如 `nihao` 的 `[ni,ha,o]` 不产出）；有硬边界
+/// 但无任何方案可满足（歧义串被错误强制）时返回空。调用方（输入引擎）把
+/// 该候选组**前置**于常规候选，体现用户手动分隔的强意图。
+#[must_use]
+pub fn constrained_segment_candidates(
+    table: &SyllableTable,
+    dictionary: &dyn Dictionary,
+    pinyin: &str,
+    hard: &[usize],
+) -> Vec<Candidate> {
+    if pinyin.is_empty() || hard.is_empty() {
+        return Vec::new();
+    }
+    let Some(segments) = segment_constrained(table, pinyin, hard).into_iter().next() else {
+        return Vec::new();
+    };
+    if segments.len() < 2 {
+        return Vec::new();
+    }
+    combine_segments(dictionary, &segments)
+        .into_iter()
+        .collect()
 }
 
 fn candidate_from_entry(entry: &DictionaryEntry) -> Candidate {
@@ -910,11 +937,11 @@ mod tests {
 
     use crate::bigram::InMemoryBigramModel;
     use crate::candidate::{
-        abbreviation_candidates, append_abbreviation_group, corrected_candidates,
-        generate_candidates, generate_prefix_candidates, initial_candidates, is_abbreviation_input,
-        merge_candidate_groups, prefix_expand_candidates, sentence_candidates,
-        transposed_candidates, Candidate, CandidateSorter, CandidateSource, RankingConfig,
-        RankingContext, RankingModel, StaticRankingModel,
+        abbreviation_candidates, append_abbreviation_group, constrained_segment_candidates,
+        corrected_candidates, generate_candidates, generate_prefix_candidates, initial_candidates,
+        is_abbreviation_input, merge_candidate_groups, prefix_expand_candidates,
+        sentence_candidates, transposed_candidates, Candidate, CandidateSorter, CandidateSource,
+        RankingConfig, RankingContext, RankingModel, StaticRankingModel,
     };
     use crate::dict::{DictionaryEntry, InMemoryDictionary};
     use crate::pinyin::SyllableTable;
@@ -1192,6 +1219,48 @@ mod tests {
         let candidates = generate_candidates(&table, &dictionary, "nihao");
         let texts: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["你好"]);
+    }
+
+    #[test]
+    fn 硬边界约束只取首选切分的组合候选() {
+        use crate::dict::{DictionaryEntry, InMemoryDictionary};
+        use crate::pinyin::SyllableTable;
+
+        let table = SyllableTable::standard();
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("西", "xi", 100),
+            DictionaryEntry::new("安", "an", 90),
+            DictionaryEntry::new("先", "xian", 500),
+        ]);
+        // xi'an：硬边界 2 排除首选 [xian]，取 [xi,an] 组合「西安」。
+        let candidates = constrained_segment_candidates(&table, &dictionary, "xian", &[2]);
+        let texts: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["西安"]);
+        // 无硬边界不产出（约束路径仅在手动分隔时调用）。
+        assert!(constrained_segment_candidates(&table, &dictionary, "xian", &[]).is_empty());
+        // 硬边界无法被任何方案满足 → 空。
+        assert!(constrained_segment_candidates(&table, &dictionary, "xian", &[1]).is_empty());
+    }
+
+    #[test]
+    fn 硬边界组合仅取首方案且单音节不产出() {
+        use crate::dict::{DictionaryEntry, InMemoryDictionary};
+        use crate::pinyin::SyllableTable;
+
+        let table = SyllableTable::standard();
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你", "ni", 100),
+            DictionaryEntry::new("好", "hao", 90),
+            DictionaryEntry::new("哈", "ha", 50),
+            DictionaryEntry::new("哦", "o", 40),
+        ]);
+        // ni'hao：首选 [ni,hao] 满足硬边界 2 → 只产「你好」，不产 [ni,ha,o] 噪声。
+        let candidates = constrained_segment_candidates(&table, &dictionary, "nihao", &[2]);
+        let texts: Vec<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["你好"]);
+        // 单音节强制（' 只作用于一个音节）→ 组合不产出。
+        assert!(constrained_segment_candidates(&table, &dictionary, "ni", &[2]).is_empty());
+        assert!(constrained_segment_candidates(&table, &dictionary, "ni", &[0]).is_empty());
     }
 
     #[test]

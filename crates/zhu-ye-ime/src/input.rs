@@ -69,6 +69,9 @@ pub struct InputEngine {
     table: SyllableTable,
     dictionary: Arc<dyn Dictionary>,
     composing: String,
+    /// 手动音节分隔符位置（T-128）：`composing`（纯拼音查询键）字符边界下标
+    /// 升序列表；显示层据此插入 `'` 并约束候选切分，查询键始终是去噪纯拼音。
+    manual_seps: Vec<usize>,
     candidates: Vec<Candidate>,
     mode: InputMode,
     previous_word: Option<String>,
@@ -174,6 +177,7 @@ impl InputEngine {
             table: SyllableTable::standard(),
             dictionary,
             composing: String::new(),
+            manual_seps: Vec::new(),
             candidates: Vec::new(),
             mode: InputMode::Chinese,
             previous_word: None,
@@ -850,8 +854,48 @@ impl InputEngine {
             .any(|entry| entry.pinyin.chars().any(|c| c.is_ascii_digit()))
     }
 
+    /// 手动插入音节分隔符 `'`（T-128，VK_OEM_7 组合态键路）：在输入串**当前末尾**
+    /// 标记音节边界（引擎无光标模型，手动分隔恒追加到串尾并保留），随后按新的
+    /// 边界约束刷新候选。同位置已有手动分隔符（连续按两次）返回 `false`。
+    pub fn insert_separator(&mut self) -> bool {
+        if self.composing.is_empty() || self.manual_seps.contains(&self.composing.len()) {
+            return false;
+        }
+        self.manual_seps.push(self.composing.len());
+        self.refresh_candidates();
+        true
+    }
+
+    /// 页眉显示串（T-128）：在 `composing` 中按「手动分隔符 ∪ 自动首选切分边界」
+    /// 插入半角 `'`。自动边界取首选切分（`segment_all` 首方案）的全部音节边界
+    /// （用户决策：全部音节边界都显示，如 `nihao` → `ni'hao`），仅中文模式参与；
+    /// 无法切分时仅显示手动分隔符（含串尾 `'`）。查询键 `composing` 本身不含
+    /// `'`（去噪）。
+    #[must_use]
+    pub fn composing_display(&self) -> String {
+        let mut boundaries: std::collections::BTreeSet<usize> =
+            self.manual_seps.iter().copied().collect();
+        if self.mode == InputMode::Chinese {
+            boundaries.extend(preferred_segment_boundaries(&self.table, &self.composing));
+        }
+        let length = self.composing.len();
+        let mut display = String::with_capacity(self.composing.len());
+        for (index, c) in self.composing.char_indices() {
+            if index > 0 && boundaries.contains(&index) {
+                display.push('\'');
+            }
+            display.push(c);
+        }
+        // 串尾手动分隔符（如刚按过 `'` 尚未继续输入）：循环无法覆盖，单独补上。
+        if boundaries.contains(&length) {
+            display.push('\'');
+        }
+        display
+    }
+
     /// Backspace 删除最后一个拼音字母；无组合时返回 `false`。
     /// 数字模式退格删除 buffer 尾部位（FR-027）；v 模式退格回退类型码（FR-028）。
+    /// T-128：串尾是手动分隔符时**优先删除分隔符**（退格先删 `'`，再删字母）。
     pub fn handle_backspace(&mut self) -> bool {
         if self.digit_active() {
             return self.digit_backspace();
@@ -862,7 +906,16 @@ impl InputEngine {
         if !self.is_active() {
             return false;
         }
+        if self.manual_seps.last() == Some(&self.composing.len()) {
+            self.manual_seps.pop();
+            self.refresh_candidates();
+            return true;
+        }
         self.composing.pop();
+        // 悬尾分隔符（位置 == 新长度）保留：显示 xi'，等待退格先删它或继续输入；
+        // 越界值（旧串尾且 len 已变）防御性清理。
+        self.manual_seps
+            .retain(|&position| position <= self.composing.len());
         self.refresh_candidates();
         true
     }
@@ -1052,8 +1105,15 @@ impl InputEngine {
     /// 为 TSF 层提供组合串预览：删除末尾字母后的内容。
     #[must_use]
     pub fn preview_after_backspace(&self) -> Option<String> {
-        self.is_composing()
-            .then(|| self.composing[..self.composing.len() - 1].to_owned())
+        self.is_composing().then(|| {
+            if self.manual_seps.last() == Some(&self.composing.len()) {
+                // T-128：退格将删除串尾手动分隔符（退格先删 `'`）：显示串去掉尾 `'`。
+                let display = self.composing_display();
+                display[..display.len() - 1].to_owned()
+            } else {
+                self.composing[..self.composing.len() - 1].to_owned()
+            }
+        })
     }
 
     /// 为 TSF 层提供提交预览：回车应上屏的拼音原文。
@@ -1148,7 +1208,8 @@ impl InputEngine {
         }
         if self.mode != InputMode::Chinese {
             return CandidateUiView {
-                composition: self.composing.clone(),
+                // T-128：页眉组合串含拼音分隔符（英文串无法切分 → 显示原串）。
+                composition: self.composing_display(),
                 pinyin_hint: pinyin_hints(&self.composing),
                 page: self.page.min(self.page_count().saturating_sub(1)),
                 page_size,
@@ -1162,7 +1223,8 @@ impl InputEngine {
         // 会再按 `page` 切片一次；若这里只放当前页，翻页后切片越界变空，
         // 页面上将看不到余下候选（VM 验收翻页时复现）。选中行取引擎页内序号。
         CandidateUiView {
-            composition: self.composing.clone(),
+            // T-128：页眉组合串显示自动/手动分隔符（如 ni'hao、xi'an）。
+            composition: self.composing_display(),
             pinyin_hint: pinyin_hints(&self.composing),
             page: self.page.min(self.page_count().saturating_sub(1)),
             page_size,
@@ -1586,6 +1648,22 @@ impl InputEngine {
             let main = std::mem::take(&mut self.candidates);
             self.candidates = zhu_ye_core::append_abbreviation_group(main, abbreviation);
         }
+        // T-128：手动音节分隔符的约束组**前置**（强意图最高优先级，置于全部追加组
+        // 之后执行所以排在 main 最前）：`xi'an` 按硬边界 [xi|an] 拼出「西安」顶到
+        // 候选首位，常规候选随之顺延；无手动分隔符时不介入（基线零漂移）。
+        if !self.manual_seps.is_empty() {
+            let constrained = zhu_ye_core::constrained_segment_candidates(
+                &self.table,
+                self.dictionary.as_ref(),
+                &self.composing,
+                &self.manual_seps,
+            );
+            if !constrained.is_empty() {
+                let constrained = self.ranking.rank(constrained, &context);
+                let main = std::mem::take(&mut self.candidates);
+                self.candidates = prepend_group(constrained, main);
+            }
+        }
         // FR-029（场景7）：整串拼音等于别名时把 emoji 追加到候选**尾部**；
         // 只占队尾、不参与排序（score 取 i64::MIN），保证 T-057 命中率不回退。
         if let Some(emoji) = zhu_ye_core::emoji_for(&self.composing) {
@@ -1645,6 +1723,25 @@ fn candidate_ui_item_tone(candidate: &Candidate, tone_spaced: &str) -> Candidate
         pinyin_tone: tone_spaced.to_owned(),
         source: candidate.source.clone(),
     }
+}
+
+/// 首选切分的全部音节边界（T-128）：取 `segment_all` 首方案（最长匹配优先），
+/// 返回方案内除串首/串尾外的所有切分点（如 `nihao` → `[2]`，`xian` → `[]`）；
+/// 无法切分时返回空。用于自动分隔符显示（全部音节边界都显式标 `'`）。
+fn preferred_segment_boundaries(table: &SyllableTable, input: &str) -> Vec<usize> {
+    let Some(segments) = segment_all(table, input).into_iter().next() else {
+        return Vec::new();
+    };
+    if segments.len() < 2 {
+        return Vec::new();
+    }
+    let mut boundaries = Vec::with_capacity(segments.len() - 1);
+    let mut position = 0usize;
+    for syllable in &segments[..segments.len() - 1] {
+        position = position.saturating_add(syllable.len());
+        boundaries.push(position);
+    }
+    boundaries
 }
 
 /// 拼音分词提示；使用标准音节表生成空格分隔的拼音，无法切分时保持原串。
@@ -1726,6 +1823,122 @@ mod tests {
             .collect();
         assert!(texts.contains(&"先"));
         assert!(texts.contains(&"西安"));
+    }
+
+    // ---- T-128 音节分隔符 ----
+
+    #[test]
+    fn 自动分隔符按首选切分显示() {
+        let mut typing = engine();
+        // nihao 首选 [ni,hao]：全部音节边界显式插 `'`。
+        type_text(&mut typing, "nihao");
+        assert_eq!(typing.composing_display(), "ni'hao");
+        assert_eq!(typing.composing(), "nihao", "查询键保持纯拼音（去噪）");
+        // xian 首选 [xian]（无内部边界）：不自动插 `'`。
+        let mut other = engine();
+        type_text(&mut other, "xian");
+        assert_eq!(other.composing_display(), "xian");
+        // xihuan 首选 [xi,huan]。
+        let mut third = engine();
+        type_text(&mut third, "xihuan");
+        assert_eq!(third.composing_display(), "xi'huan");
+        // 不可切分串（缩写/残缺）不插自动分隔。
+        let mut fourth = engine();
+        type_text(&mut fourth, "zzzz");
+        assert_eq!(fourth.composing_display(), "zzzz");
+        // 空串。
+        let empty = engine();
+        assert_eq!(empty.composing_display(), "");
+    }
+
+    #[test]
+    fn 手动分隔符插入与显示() {
+        let mut typing = engine();
+        type_text(&mut typing, "xi");
+        assert!(typing.insert_separator());
+        assert_eq!(typing.composing_display(), "xi'");
+        // 同位置重复插入被拒绝。
+        assert!(!typing.insert_separator());
+        type_text(&mut typing, "an");
+        assert_eq!(typing.composing_display(), "xi'an");
+        assert_eq!(typing.composing(), "xian", "查询键不受分隔符影响");
+        // 空串无法插入分隔符。
+        let mut empty = engine();
+        assert!(!empty.insert_separator());
+    }
+
+    #[test]
+    fn 退格优先删除串尾手动分隔符() {
+        let mut engine = engine();
+        type_text(&mut engine, "xi");
+        engine.insert_separator();
+        assert_eq!(engine.composing_display(), "xi'");
+        // 退格先删 `'`，字母保留。
+        assert!(engine.handle_backspace());
+        assert_eq!(engine.composing_display(), "xi");
+        assert_eq!(engine.composing(), "xi");
+        // 再退格删字母。
+        assert!(engine.handle_backspace());
+        assert_eq!(engine.composing_display(), "x");
+        // 连续退格直到组合停用。
+        assert!(engine.handle_backspace());
+        assert!(!engine.handle_backspace());
+    }
+
+    #[test]
+    fn 退格后自动分隔实时重算() {
+        let mut typing = engine();
+        type_text(&mut typing, "nihao");
+        assert_eq!(typing.composing_display(), "ni'hao");
+        // 删 o：niha 首选 [ni,ha]，边界 2 仍在。
+        assert!(typing.handle_backspace());
+        assert_eq!(typing.composing_display(), "ni'ha");
+        // 删 a：nih 为残缺前缀，无完整切分 → 自动分隔消失。
+        assert!(typing.handle_backspace());
+        assert_eq!(typing.composing_display(), "nih");
+        // 中途手动分隔符保留在有效位置。
+        let mut manual = engine();
+        type_text(&mut manual, "xi");
+        manual.insert_separator();
+        type_text(&mut manual, "an");
+        assert_eq!(manual.composing_display(), "xi'an");
+        manual.handle_backspace();
+        assert_eq!(manual.composing_display(), "xi'a");
+        manual.handle_backspace();
+        // plain=xi、手动分隔悬在串尾：退格先删 `'`。
+        assert_eq!(manual.composing_display(), "xi'");
+        manual.handle_backspace();
+        assert_eq!(manual.composing_display(), "xi");
+    }
+
+    #[test]
+    fn 手动分隔约束候选置首() {
+        let mut plain = engine();
+        type_text(&mut plain, "xian");
+        // 无分隔：主候选首位是高频整词「先」。
+        assert_eq!(plain.candidates()[0].text, "先");
+        // xi' + an：硬边界 [xi|an] 组合「西安」前置。
+        let mut separated = engine();
+        type_text(&mut separated, "xi");
+        separated.insert_separator();
+        type_text(&mut separated, "an");
+        assert_eq!(separated.composing_display(), "xi'an");
+        assert_eq!(separated.candidates()[0].text, "西安");
+        // 页眉组合串同步带分隔符。
+        assert_eq!(separated.candidate_ui_view().composition, "xi'an");
+    }
+
+    #[test]
+    fn 无手动分隔时约束组不介入() {
+        let mut typing = engine();
+        type_text(&mut typing, "nihao");
+        // 仅自动分隔：候选首位不变（基线行为）。
+        assert_eq!(typing.candidates()[0].text, "你好");
+        assert_eq!(typing.composing_display(), "ni'hao");
+        // 不可切分串保持原样显示。
+        let mut other = engine();
+        type_text(&mut other, "zzzz");
+        assert_eq!(other.composing_display(), "zzzz");
     }
 
     #[test]

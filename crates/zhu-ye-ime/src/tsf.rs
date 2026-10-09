@@ -36,8 +36,8 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VIRTUAL_KEY, VK_0, VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN,
-    VK_ESCAPE, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD,
-    VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
+    VK_ESCAPE, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS,
+    VK_OEM_PERIOD, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfEditSession,
@@ -156,6 +156,10 @@ enum KeyAction {
     VConsume(char),
     /// v 模式退格（有类型码时回退，只有 `v` 时退出）。
     VBackspace,
+    /// 音节分隔符 `'`（T-128，VK_OEM_7 无 Shift）：拼音组合态手动插入音节边界
+    /// （`xi'an`→[xi,an]）并约束候选切分；只作显示与切分约束，不进查询键（去噪）。
+    /// 空闲态/英文态由 `plan_action` 放行宿主直出半角 `'`。
+    Separator,
 }
 
 impl KeyAction {
@@ -184,6 +188,7 @@ impl KeyAction {
                 | KeyAction::VCode(_)
                 | KeyAction::VConsume(_)
                 | KeyAction::VBackspace
+                | KeyAction::Separator
         )
     }
 }
@@ -717,6 +722,9 @@ fn classify_key(wparam: WPARAM, lparam: LPARAM, shift: bool) -> Option<KeyAction
         // T-115 后续：英文布局反斜杠键（无 Shift）归为 PunctDun，中文模式上屏
         // "、"；Shift+`\` 的 `|` 放行宿主。英文模式由 plan_action 放行英文 `\`。
         code if code == VK_OEM_5.0 && !shift => Some(KeyAction::PunctDun),
+        // T-128：英文布局撇号键（VK_OEM_7，无 Shift）归为 Separator 音节分隔符；
+        // Shift+`'` 的 `"` 放行宿主（中文引号由宿主/符号模式产出）。
+        code if code == VK_OEM_7.0 && !shift => Some(KeyAction::Separator),
         // T-115 后续：英文布局逗号键（无 Shift）归为 PunctComma，中文模式上屏
         // "，"；Shift+`,` 的 `<` 放行宿主。英文模式由 plan_action 放行英文逗号。
         code if code == VK_OEM_COMMA.0 && !shift => Some(KeyAction::PunctComma),
@@ -831,6 +839,12 @@ fn plan_action(
             Some(action)
         }
         KeyAction::PunctComma | KeyAction::PunctPeriod | KeyAction::PunctDun => None,
+        // T-128：`'` 分隔符仅中文模式**组合态**进入（手动音节边界 `xi'an`）；
+        // 空闲态/联想态/数字/v 模式（组合串为空）一律放行宿主直出半角 `'`。
+        KeyAction::Separator if engine.mode() == InputMode::Chinese && engine.is_active() => {
+            Some(action)
+        }
+        KeyAction::Separator => None,
         // T-066：`@`/`:`/`/` 是否进组合串由引擎判定（组合态邮箱/网址上下文为真，
         // 空闲态/普通拼音/英文模式为假并放行宿主）。
         KeyAction::FormatChar(c)
@@ -980,7 +994,9 @@ fn apply_action(
         | KeyAction::FormatChar(_)
         | KeyAction::Backspace
         // FR-028：`vi` 等回退拼音同样只进候选窗。
-        | KeyAction::VConsume(_) => {
+        | KeyAction::VConsume(_)
+        // T-128：`'` 分隔符只改引擎状态与候选窗，不进文档。
+        | KeyAction::Separator => {
             sync_engine(state, action);
             refresh_candidate_window(state, Some((context, ec)));
             return Ok(());
@@ -1175,6 +1191,10 @@ fn sync_engine(state: &Arc<SharedEngine>, action: KeyAction) {
         }
         KeyAction::Backspace => {
             let _ = engine.handle_backspace();
+        }
+        // T-128：`'` 手动音节分隔符（组合态才可能到达本分支）。
+        KeyAction::Separator => {
+            let _ = engine.insert_separator();
         }
         KeyAction::Space => {
             let _ = engine.handle_space();
@@ -2064,7 +2084,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        VK_0, VK_1, VK_2, VK_5, VK_I, VK_OEM_COMMA, VK_OEM_PERIOD, VK_V, VK_X,
+        VK_0, VK_1, VK_2, VK_5, VK_I, VK_OEM_7, VK_OEM_COMMA, VK_OEM_PERIOD, VK_V, VK_X,
     };
     use windows::Win32::UI::TextServices::{ITfTextInputProcessor, ITfThreadMgr};
 
@@ -2179,7 +2199,47 @@ mod tests {
             classify_key(WPARAM(VK_0.0 as usize), LPARAM(0), false),
             Some(KeyAction::Digit('0'))
         );
+        // T-128：撇号键无 Shift 归为 Separator；Shift+`'`（`"`）放行宿主。
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_7.0 as usize), LPARAM(0), false),
+            Some(KeyAction::Separator)
+        );
+        assert_eq!(
+            classify_key(WPARAM(VK_OEM_7.0 as usize), LPARAM(0), true),
+            None
+        );
         assert_eq!(classify_key(WPARAM(0x00A0), LPARAM(0), false), None);
+    }
+
+    /// T-128：`'` 分隔符在中文组合态进入（手动音节边界），空闲态/英文态放行宿主。
+    #[test]
+    fn 分隔符仅中文组合态进入() {
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
+        // 空闲态：放行宿主直出半角 `'`。
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_7.0 as usize), LPARAM(0), false, false, &state),
+            None
+        );
+        // 组合态：进入作为音节分隔符。
+        state.lock().unwrap().engine.handle_letter('x');
+        state.lock().unwrap().engine.handle_letter('i');
+        assert_eq!(
+            plan_action(WPARAM(VK_OEM_7.0 as usize), LPARAM(0), false, false, &state),
+            Some(KeyAction::Separator)
+        );
+        // 英文模式：放行宿主。
+        let english = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
+        english.lock().unwrap().engine.toggle_mode();
+        assert_eq!(
+            plan_action(
+                WPARAM(VK_OEM_7.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &english
+            ),
+            None
+        );
     }
 
     #[test]

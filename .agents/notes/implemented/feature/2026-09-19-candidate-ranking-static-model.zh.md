@@ -38,4 +38,4 @@ Status: implemented
 
 CLI 新增 `rank <词典文件> <拼音> [前词]`，用同一生成与排序路径直接验证真实 v2 词典。`data/artifacts/real.zyct` 验证结果：`rank de` 的仍以 3,957,141 居首；`rank de 我们` 的以 3,979,557 居首、得提升至 158,049；相同命令两次运行输出一致。T-008 验收完成。
 
-多音节噪声治理已落地（T-021）：整词拼音存在直接词典条目时，`generate_candidates` 不再追加音节切分组合，`jiao` 不再产出 `给哦`、`xian` 不再产出 `洗按`、`fazhan` 不再产出 `发站`；无直接条目时仍保留回退组合，如 `geio` → `给哦`。真实词典复验：`rank jiao` 的 `叫` 92,723 居首，`rank xian` 无 `洗按`，`rank fazhan` 的 `发展` 3,680 居首，`rank geio` 保留 `给哦`。后续可考虑用 `xi an` 分隔符显式表达多音节词边界，当前不阻塞 M2。AI 排序结果以后可以新增 `RankingModel` 实现承载，而不是给 `Candidate` 增加字段。
+多音节噪声治理已落地（T-021）：整词拼音存在直接词典条目时，`generate_candidates` 不再追加音节切分组合，`jiao` 不再产出 `给哦`、`xian` 不再产出 `洗按`、`fazhan` 不再产出 `发站`；无直接条目时仍保留回退组合，如 `geio` → `给哦`。真实词典复验：`rank jiao` 的 `叫` 92,723 居首，`rank xian` 无 `洗按`，`rank fazhan` 的 `发展` 3,680 居首，`rank geio` 保留 `给哦`。此处的「`xi an` 分隔符」设想已由音节分隔符落地（T-128）：[2026-10-09-syllable-separator-apostrophe](../feature/2026-10-09-syllable-separator-apostrophe.zh.md)；上述整词优先行为保持不变。AI 排序结果以后可以新增 `RankingModel` 实现承载，而不是给 `Candidate` 增加字段。
