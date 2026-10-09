@@ -1138,7 +1138,8 @@ fn draw_text_top(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
 ///
 /// 基线统一：两种字体的 `tmHeight`/`tmAscent` 不同（Segoe UI 16px 的
 /// tmHeight≈19 高于宋体 16px 的 ≈16），不能直接各自 `DT_VCENTER`；以主字体
-/// ascent 把字形带**顶对齐到 `rect.top`**（T-140：页眉贴顶 1px，不再垂直
+/// ascent 把字形带**顶对齐到 `rect.top`**（T-140：页眉贴顶；T-144：顶距
+/// 2dp，不再垂直
 /// 居中），再按各自 ascent 回推段顶。取不到字体度量时回退整串
 /// `draw_text_top`。
 fn draw_header_mixed(

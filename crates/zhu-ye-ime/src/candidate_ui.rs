@@ -245,7 +245,8 @@ pub struct CandidateMetrics {
     /// 面板垂直内边距。
     pub padding_y: i32,
     /// 页眉区顶边相对窗口顶部的距离（T-140：用户"候选框输入的最上边留白
-    /// 改为距离最上面 1px"——页眉贴顶 1dp，不再从 `padding_y` 缩进）。
+    /// 改为距离最上面 1px"——页眉贴顶 1dp，不再从 `padding_y` 缩进；
+    /// T-144：用户"候选框最上面的拼音距离上面从1px改为2px" → 1dp→2dp）。
     pub header_top: i32,
     /// 页眉高度。
     pub header_height: i32,
@@ -298,7 +299,9 @@ impl CandidateMetrics {
             padding_y: dp(12.0),
             // T-140：页眉贴顶 1dp（用户"候选框输入的最上边留白还是太多，
             // 改为距离最上面 1px"），顶部不再受 `padding_y` 影响。
-            header_top: dp(1.0),
+            // T-144：1dp→2dp（用户"候选框最上面的拼音距离上面从1px改为2px"）
+            // ——页眉及整条候选内容带整体下移 1dp，字形带顶距窗口顶 2dp。
+            header_top: dp(2.0),
             // T-126：页眉 38→48（顶部输入缓冲区更舒展）；T-136：48→34
             // （用户反馈候选框顶部留白过多、重心偏下——页眉压缩 30%，
             // 拼音区收窄，首行候选随之上移紧贴，垂直"呼吸感"收紧）。
@@ -376,7 +379,7 @@ impl CandidateMetrics {
         }
     }
 
-    /// 页眉矩形（T-140：顶边 = `header_top` 贴窗口顶 1dp）。
+    /// 页眉矩形（T-140 起：顶边 = `header_top` 贴窗口顶；T-144：2dp）。
     #[must_use]
     pub fn header_rect(&self) -> UiRect {
         UiRect {
@@ -844,7 +847,8 @@ mod tests {
         // → 九行面板 398 → 536（+138dp：输入缓冲区与候选行呼吸空间）。
         // T-136：页眉 48→34（顶部压缩 30%）→ 九行面板 536 → 522（-14dp）。
         // T-140：页眉 34→25 + 行距 4→0 + 顶距 12→1 → 九行面板 522 → 490（-32dp）。
-        assert_eq!(metrics.panel_size(9).1, 490);
+        // T-144：顶距 1→2（页眉贴顶 2px）→ 九行面板 490 → 491（+1dp）。
+        assert_eq!(metrics.panel_size(9).1, 491);
         assert_eq!(metrics.panel_size(9).0, 360);
         // 零行面板不占页脚空间（T-031 页眉条行为保持）。
         assert_eq!(
@@ -1218,5 +1222,25 @@ mod tests {
             bottom: 60,
         };
         assert_eq!(metrics.pin_band_top(tiny, tm), tiny.top);
+    }
+
+    #[test]
+    fn 页眉贴顶距离为2px且整条候选带随之下移() {
+        // T-144：用户"候选框最上面的拼音距离上面从1px改为2px"——页眉矩形
+        // 顶边 = 2dp；首候选行、面板高度等全部从 `header_top` 派生，整体 +1。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        assert_eq!(metrics.header_top, 2);
+        assert_eq!(metrics.header_rect().top, 2);
+        assert_eq!(metrics.header_rect().bottom, 2 + metrics.header_height);
+        assert_eq!(
+            metrics.row_rect(0).top,
+            metrics.header_top + metrics.header_height
+        );
+        // 零行（仅页眉条）与九行面板同步 +1（T-140 基准 490 → 491）。
+        assert_eq!(
+            metrics.panel_size(0).1,
+            metrics.header_top + metrics.header_height + metrics.padding_y
+        );
+        assert_eq!(metrics.panel_size(9).1, 491);
     }
 }
