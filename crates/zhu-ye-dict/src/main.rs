@@ -73,6 +73,7 @@ fn run() -> Result<(), String> {
         Some("en-inspect") => en_inspect_command(&required_path(&args, 2)?),
         Some("mixed-bench") => mixed_bench_command(args.get(2).map(String::as_str)),
         Some("social-clean") => social_clean_command(),
+        Some("freq") => freq_command(&args),
         _ => {
             print_usage();
             Ok(())
@@ -130,6 +131,7 @@ fn print_usage() {
     println!(
         "  social-clean        网络语扩充清洗：social 高频子集 1 万 → data/slang/social-words.tsv（T-087）"
     );
+    println!("  freq <词...>        打印 wordfreq 词频（zipf×1000，T-145 短语扩充源数据调试）");
 }
 
 /// 英文词表默认产物路径（T-085）。
@@ -471,6 +473,27 @@ fn build_base_command(args: &[String]) -> Result<(), String> {
         index += 1;
     }
     build_base(Path::new("."), min_score).map(|_| ())
+}
+
+/// `freq <词...>`：读取 wordfreq 语料（T-145 短语扩充的数据源）打印指定词
+/// 的 zipf×1000 词频，未命中时明确列出。
+fn freq_command(args: &[String]) -> Result<(), String> {
+    let words = &args[2..];
+    if words.is_empty() {
+        return Err("freq 缺少查询词（用法: freq <词...>）".to_owned());
+    }
+    let wheel = std::fs::read(
+        Path::new(zhu_ye_dict::m6::CACHE_DIR).join("wordfreq-3.1.1-py3-none-any.whl"),
+    )
+    .map_err(|error| format!("读取 wordfreq wheel 失败: {error}"))?;
+    let map = zhu_ye_dict::m6::load_wordfreq_wheel_zh(&wheel)?;
+    for word in words {
+        match map.get(word) {
+            Some(frequency) => println!("{word}\t{frequency}"),
+            None => println!("{word}\t(不在 wordfreq 语料中)"),
+        }
+    }
+    Ok(())
 }
 
 /// `audit-coverage [--sample N] [--base 文件]`：常用词覆盖与首候选抽检（S-1）。
