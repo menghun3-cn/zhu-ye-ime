@@ -1,6 +1,39 @@
-# 多音缺读补丁表（T-056）：为"规范读音有、CC-CEDICT 词库缺"的汉字补充日常读音。
+# 多音缺读补丁表（T-056/T-129）：为"规范读音有、词库缺"的汉字补充日常读音。
 # 每行：汉字<TAB>补充读音（无调全拼）<TAB>备注；# 开头为注释。
 # 依据：《通用规范汉字表》读音对照（data/cache/kTGHZ2013.txt，8105 字）审计出的
-# 高频日常读音缺口；补丁在构建期应用（import --polyphone），并复经标准音节校验。
-谁	shui	shuí 口语音（用户主诉：输入 shui 候选无「谁」；CC-CEDICT 仅标 shei）
-熟	shou	shóu 口语音（输入 shou 候选无「熟」；CC-CEDICT 仅标 shu）
+# 高频日常读音缺口；补丁在构建期应用（import --polyphone 与 build-base 共用
+# polyphone::apply_patch_entries，T-129 起产品链 base 包生效），并复经标准音节校验。
+# T-129 扩充依据：`zhu-ye-dict audit-polyphone --base base.zyct` 差集（460 条）中
+# 人工甄选**口语/日常单字可打**的读音，排除姓氏、文言、地名、争议音（防止候选污染；
+# 未入选示例：区 ou、万 mo、大 dai(大夫)、说 shui(争议)、会 kuai——组合词整词已可命中）。
+谁	shui	shuí 口语音（用户主诉：输入 shui 候选无「谁」；CEDICT 仅标 shei）
+熟	shou	shóu 口语音（输入 shou 候选无「熟」；CEDICT 仅标 shu）
+的	di	dí（的确/目的/有的放矢）口语字音，单字 di 查询高频
+了	liao	liǎo（了解/了结/不得了）常用动词义
+都	du	dū（首都/都市/成都）名词语音
+还	huan	huán（归还/还手）动词义
+着	zhao	zháo（着急/着火/凉着）口语音
+着	zhuo	zhuó（着手/着想/着陆）书面常用
+地	di	dì（土地/大地/地方）名词语音
+得	dei	děi（我得走了/非得）口语助动词
+长	zhang	zhǎng（长大/校长/生长）动词义
+觉	jiao	jiào（睡觉/午觉）口语音
+绿	lu	lǜ 的常见别名输入（v/lu 混打）
+行	hang	háng（银行/行业/排行）名词语音
+血	xie	xiě（流血/血淋淋）口语 xiě，书面 xuè 已有
+调	diao	diào（音调/调查/调动）动词/名词义
+藏	zang	zàng（西藏/宝藏/藏族）名词语音
+乐	yue	yuè（音乐/快乐）常用义
+吓	xia	xià（吓人/吓一跳）口语常用
+朝	zhao	zhāo（朝阳/朝霞/今朝）字音
+角	jue	jué（角色/角度/角落）常用义
+系	ji	jì（系鞋带/系扣子）口语常用
+塞	se	sè（堵塞/塞责）书面常用
+便	pian	pián（便宜）常用词字音
+佛	fu	fú（仿佛）常用词字音
+似	shi	shì（似的）口语常用
+俩	liang	liǎng（伎俩）书面常用
+色	shai	shǎi（色子/掉色）口语
+露	lou	lòu（露馅/露脸/露马脚）口语常用
+重	chong	chóng（重复/重新/重叠）常用义
+陆	lu	lù（陆地/陆家嘴/陆姓）常用义

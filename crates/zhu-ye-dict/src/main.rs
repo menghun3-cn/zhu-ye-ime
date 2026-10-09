@@ -49,6 +49,12 @@ fn run() -> Result<(), String> {
         Some("audit-polyphone") => audit_polyphone_command(&args),
         Some("eval-set") => eval_set_command(&args),
         Some("inspect") => inspect_command(required_path(&args, 2)?),
+        Some("lookup") => lookup_command(
+            required_path(&args, 2)?,
+            args.get(3)
+                .cloned()
+                .ok_or_else(|| "lookup 缺少拼音参数".to_owned())?,
+        ),
         Some("verify") => verify_command(required_path(&args, 2)?),
         Some("source-check") => source_check_command(),
         Some("build-pack") => build_pack_command(args.get(2).map(String::as_str)),
@@ -81,6 +87,7 @@ fn print_usage() {
         "  import <CC-CEDICT> <词频> [输出路径] [上限] [--bigram 语料] [--polyphone 补丁表]  导入真实数据构建词典（默认 {DEFAULT_REAL_OUTPUT}）"
     );
     println!("  inspect <文件>        打印词典头部元数据与内容哈希");
+    println!("  lookup <文件> <拼音>  按完整拼音查询并列出词条（词频降序；T-129 验收用）");
     println!("  verify <文件>         完整加载校验并核对种子词条/bigram/翻译");
     println!("  source-check          核对 data/pins 全部源的缓存哈希（M6）");
     println!(
@@ -905,16 +912,20 @@ fn eval_set_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `audit-polyphone <CC-CEDICT> <kTGHZ2013> [--freq 文件] [--min-freq N]`：
+/// `audit-polyphone <CC-CEDICT> <kTGHZ2013> [--freq 文件] [--min-freq N] [--base 文件]`：
 /// 规范读音 vs 词库读音的多音缺读审计（T-056）。
 ///
 /// 输出「规范读音存在而词库缺失」的（字, 读音）清单，附该字词频与已有读音；
-/// 供人工甄选后写入 `data/patches/polyphone.tsv`（构建期 `import --polyphone` 应用）。
+/// 供人工甄选后写入 `data/patches/polyphone.tsv`（构建期 `--polyphone` 应用）。
+/// `--base <zyct>`（T-129）：读数集来自 base 包（枚举全部标准音节逐个 lookup 收集
+/// 单字读音），词频取词条该字最高值；用于审计产品链 base 的缺读（CEDICT 侧审计
+/// 反映的是 import 管线，base 曾漏接补丁导致 `谁` 无 shui）。
 fn audit_polyphone_command(args: &[String]) -> Result<(), String> {
     let cedict_path = required_path(args, 2)?;
     let letters_path = required_path(args, 3)?;
     let mut freq_path: Option<PathBuf> = None;
     let mut min_freq: Option<u64> = None;
+    let mut base_path: Option<PathBuf> = None;
     let mut index = 4;
     while index < args.len() {
         match args[index].as_str() {
@@ -937,6 +948,15 @@ fn audit_polyphone_command(args: &[String]) -> Result<(), String> {
                 );
                 index += 1;
             }
+            "--base" => {
+                index += 1;
+                base_path = Some(
+                    args.get(index)
+                        .map(PathBuf::from)
+                        .ok_or_else(|| "--base 缺少 zyct 路径".to_owned())?,
+                );
+                index += 1;
+            }
             flag if flag.starts_with("--") => {
                 return Err(format!("未知选项：{flag}"));
             }
@@ -944,40 +964,67 @@ fn audit_polyphone_command(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let cedict_text = read_text_file(&cedict_path, "CC-CEDICT")?;
-    let letters_text = read_text_file(&letters_path, "kTGHZ2013 读音表")?;
-
-    // 与构建同口径：单字词条 -> 读音集合（split_pinyin_syllables 拒绝非法拼音）。
+    // 读数集：--base 走 base 包（T-129），否则走 CC-CEDICT 文本（T-056 原路径）。
     let mut entry_readings: HashMap<String, HashSet<String>> = HashMap::new();
-    for line in cedict_text.lines() {
-        let Some((simplified, marked, _)) = parse_cedict_line(line) else {
-            continue;
-        };
-        if simplified.chars().count() != 1 {
-            continue;
+    // --base 模式的该字最高词频（来自词条频率，与补丁继承口径一致）。
+    let mut base_frequencies: HashMap<String, u64> = HashMap::new();
+    if let Some(path) = &base_path {
+        let file = DictionaryFile::open(path).map_err(|error| error.to_string())?;
+        let table = zhu_ye_core::pinyin::SyllableTable::standard();
+        for syllable in table.complete_syllables_with_prefix("") {
+            for entry in file.lookup(syllable) {
+                if entry.word.chars().count() != 1 {
+                    continue;
+                }
+                entry_readings
+                    .entry(entry.word.clone())
+                    .or_default()
+                    .insert(entry.pinyin.clone());
+                let slot = base_frequencies.entry(entry.word.clone()).or_insert(0);
+                *slot = (*slot).max(entry.frequency);
+            }
         }
-        let Some(syllables) = split_pinyin_syllables(&marked) else {
-            continue;
-        };
-        if syllables.len() != 1 {
-            continue;
+    } else {
+        let cedict_text = read_text_file(&cedict_path, "CC-CEDICT")?;
+        // 与构建同口径：单字词条 -> 读音集合（split_pinyin_syllables 拒绝非法拼音）。
+        for line in cedict_text.lines() {
+            let Some((simplified, marked, _)) = parse_cedict_line(line) else {
+                continue;
+            };
+            if simplified.chars().count() != 1 {
+                continue;
+            }
+            let Some(syllables) = split_pinyin_syllables(&marked) else {
+                continue;
+            };
+            if syllables.len() != 1 {
+                continue;
+            }
+            entry_readings
+                .entry(simplified)
+                .or_default()
+                .insert(syllables[0].clone());
         }
-        entry_readings
-            .entry(simplified)
-            .or_default()
-            .insert(syllables[0].clone());
     }
 
+    let letters_text = read_text_file(&letters_path, "kTGHZ2013 读音表")?;
     let standard = load_standard_readings(&letters_text);
     let mut gaps = polyphone_gaps(&entry_readings, &standard);
 
     // 词频过滤仅为人工排序参考，不参与读音判定。
+    // --base 模式默认用 base 包内该字最高词频（与 import 侧词频文件互斥）。
     let frequencies = match freq_path {
         Some(path) => {
             let freq_text = read_text_file(&path, "词频文件")?;
             Some(load_frequency_map(&freq_text))
         }
-        None => None,
+        None => {
+            if base_path.is_some() {
+                Some(base_frequencies)
+            } else {
+                None
+            }
+        }
     };
     if let Some(frequencies) = &frequencies {
         gaps.retain(|gap| {
@@ -1012,6 +1059,23 @@ fn audit_polyphone_command(args: &[String]) -> Result<(), String> {
 fn inspect_command(path: PathBuf) -> Result<(), String> {
     let file = DictionaryFile::open(&path).map_err(|error| error.to_string())?;
     print_header(&path, &file);
+    Ok(())
+}
+
+/// `lookup <文件> <拼音>`：按完整拼音查询词条（词频降序），供构建/部署验收
+/// 与多音补丁核对（T-129：验证 `shui` 等下能命中补录读音）。
+fn lookup_command(path: PathBuf, pinyin: String) -> Result<(), String> {
+    let file = DictionaryFile::open(&path).map_err(|error| error.to_string())?;
+    let found = file.lookup(&pinyin);
+    println!("lookup {pinyin}: {} 条", found.len());
+    for entry in &found {
+        let translation = entry
+            .translation
+            .as_deref()
+            .map(|t| format!(" /{t}/"))
+            .unwrap_or_default();
+        println!("  {}\t{}\t{}", entry.word, entry.frequency, translation);
+    }
     Ok(())
 }
 

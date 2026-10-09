@@ -102,3 +102,7 @@ The reverse-lookup fix is a one-line boundary check (return `None` when
   to dodge the dictionary mmap lock): shui candidate window contains 谁 and
   digit 2 commits it; shei still shows 谁; shou shows 熟. Evidence in
   `target/t056-accept-deploy` (not committed).
+
+- **T-129 extension (2026-10-08)**: the same patch table now also applies to the
+  shipped base chain (build_base) via the shared \pply_patch_entries\ codepath, and the
+  table grew to 31 readings. See [polyphone-patch-into-base-pack](2026-10-08-polyphone-patch-into-base-pack.md).

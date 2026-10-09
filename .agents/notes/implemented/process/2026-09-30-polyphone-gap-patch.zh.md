@@ -71,3 +71,5 @@ Status: implemented
 - 验收 VM（真实 TSF 栈，全新 `tsf-m8` 目录规避词典 mmap 锁）验证：shui 候选窗含"谁"
   且数字键 2 上屏；shei 仍出"谁"；shou 出"熟"。证据留档 `target/t056-accept-deploy`
   （不入库）。
+
+- **T-129 扩展（2026-10-08）**：同一补丁表现在经共享 \pply_patch_entries\ 一并应用到产品链 base（build_base），表已扩至 31 条。见 [多音补丁接入产品链 base](2026-10-08-polyphone-patch-into-base-pack.zh.md)。
