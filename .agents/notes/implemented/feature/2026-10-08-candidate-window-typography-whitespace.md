@@ -194,6 +194,24 @@ y=121..153 (top pad ≈9px — pin glyph top inset — bottom ≈6px), i.e. the 
 moved down ~5px and the row now balances. Non-pinyin rows (translation mode,
 pin toggle off) are untouched (16px/16px, already centred).
 
+## Header band compressed 30% (T-136, user report "候选框顶部留白过多，视觉重心偏下")
+
+User (2026-10-09): the candidate window's top area has too much whitespace
+and the visual center of gravity sits low; compress the top pinyin band by
+30% and tuck the first candidate row right under it (less vertical margin).
+
+Fix (T-136): `CandidateMetrics::new` `header_height` 48 → **34** dp
+(48 × 0.7 = 33.6 → 34; a 16px header glyph with ≈9px space above and
+below). `row_rect` was already `top = padding_y + header_height` — the
+header bottom and first-row top share one edge with no explicit margin —
+so shrinking the header moves the whole candidate stack up: first row top
+60 → 46, nine-row panel 536 → 522 (−14 dp). Row height and the row-inner
+centred content band (T-132) and `padding_y` are untouched (not called out
+by the user). Verified: candidate_ui tests green with the panel-size
+assertion adjusted 536 → 522, workspace all-green; 96dpi demo pixel probe —
+header glyph y29..34 (vertically centred in the 34 band), first-row ink
+top 72 → 58 (up 14 px), panel height 542 (522 + 20 footer).
+
 ## Show-pin toggle (T-127)
 
 User request: "设置里面可以设置候选框是否显示拼音及声调" — a settings toggle
