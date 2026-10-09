@@ -311,6 +311,15 @@ y=2 + glyph top bearing ≈3px), i.e. the pinyin composition line now sits
 locks `header_top == 2`, `header_rect().top == 2`, row-0 top = 27 and
 panel heights 39 (0 rows) / 491 (9 rows).
 
+*T-146 revision (2026-10-09, user "候选框用户输入拼音距离顶部边缘改为3px"):*
+`header_top` 2 → 3dp, superseding the T-144 value. Every rect derived from it
+shifts down by exactly 1dp: 96dpi panel 491 → 492 tall, and the pinyin
+composition line now sits 3px from the top of the window. The T-144 lib test
+was renamed and updated in place: 「页眉贴顶距离为3px且整条候选带随之下移」
+now locks `header_top == 3`, `header_rect().top == 3` and panel height 492
+(9 rows).
+
+
 ## Show-pin toggle (T-127)
 
 User request: "设置里面可以设置候选框是否显示拼音及声调" — a settings toggle
