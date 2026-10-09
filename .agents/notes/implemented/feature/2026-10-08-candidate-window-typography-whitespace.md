@@ -212,6 +212,30 @@ assertion adjusted 536 → 522, workspace all-green; 96dpi demo pixel probe —
 header glyph y29..34 (vertically centred in the 34 band), first-row ink
 top 72 → 58 (up 14 px), panel height 542 (522 + 20 footer).
 
+## Index column flush to the left edge, gap tightened to 2px (T-137, user "序号离左边缘还是太远")
+
+User (2026-10-09, right after T-136): the index number still sits too far
+from the left edge — shrink it until ~2px, and the index column only needs
+to fit two-digit numbers. This overrides T-122's 4-8px index-to-word band.
+
+Fix (T-137): `CandidateMetrics` gains `marker_left` = 2 dp — the marker
+column now starts flush at x=2 (highlight inset 1px + 1px border line)
+instead of at `padding_x` (12). `marker_width` 22 → **20** dp (two digits
+≈18px right-aligned + margin, per "container only needs two digits"),
+`marker_text_gap` 6 → **2** dp ("distance 2px"). `marker_rect` and
+`row_split` both derive the word start from `marker_left + marker_width`,
+so word start moves 34 → 22 and every row's number stays right-aligned
+(unit digits aligned) with a constant 2px gap to the word — the same
+right-align rationale as T-122, just flush-left. Geometry at 96dpi: two-
+digit index ink starts at x≈3 (flush), single-digit "1" at x≈13 (right-
+alignment cost; a left-aligned index would misalign unit digits or blow up
+the gap), index-to-word ink gap ≈3-4px, first word ink starts x≈23.
+Verified: candidate_ui 25/25 (flush/2px/two-digit-capacity assertions),
+workspace all-green; 96dpi pixel probe on the demo (word ink 34 → 23).
+
+T-122's right-aligned index rationale stays active; its column constants
+are updated in place (word start x=34 → 22, gap 6 → 2dp).
+
 ## Show-pin toggle (T-127)
 
 User request: "设置里面可以设置候选框是否显示拼音及声调" — a settings toggle

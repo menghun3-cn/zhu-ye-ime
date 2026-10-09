@@ -17,6 +17,8 @@ Status: implemented
 
 `CandidateMetrics` 保留 `marker_width` 作为词左偏移，但由 26dp 收窄到 22dp，新增 `marker_text_gap`（6dp，落在用户 4-8px 档内）；绘制循环改用 `draw_text_right` 把序号右对齐进标记列，且其右缘先让出 `marker_text_gap`。因此间距对任何位数（"1" 到 "18"）恒定，不再随数字宽度漂移。96dpi 下词起点由 x=38 左移到 x=34（12 内边距 + 22）。
 
+*（T-137 原位修订列参数——标记列起点改为贴左缘 `marker_left`=2dp（不再从 `padding_x` 缩进）、`marker_width` 22→20dp、`marker_text_gap` 6→2dp，词起点 x=34→22；右对齐理由本身保持有效。见 [排版与留白笔记](../../implemented/feature/2026-10-08-candidate-window-typography-whitespace.zh.md)「序号列贴左边缘、间距收紧到 2px (T-137)」节。）*
+
 ### 拼音行排版与专属颜色
 
 `CandidateMetrics::pin_font_height` 由 11dp 增至 13dp、`pin_line_gap` 由 3dp 增至 4dp；`create_font` 增加 `weight` 参数，拼音字体以 `FW_SEMIBOLD`（600）创建，主文本保持 `FW_NORMAL`。拼音行不再复用译文/序号的 `secondary` 色：`CandidateUiTheme` 新增第 8 键 `pin`——浅色 #555555（深灰，白底对比度 ≈7:1，仍弱于蓝色主文本）、深色 #C9C9C9（更亮灰）、高对比度沿用系统 `gray_text`。主题文件配色节（`CandidatePalette`/`parse_candidate`）新增可选第 8 键 `pin`；缺键经既有 `theme_with_candidate` 叠加回退默认，已有主题文件完全不受影响。
@@ -32,8 +34,8 @@ Status: implemented
 
 ## Consequences
 
-- 序号与词的间距在所有页码下稳定在 ~6px（96dpi），满足用户 4-8px 要求；词起点左移 4px。
-- 拼音/声调小字清晰可辨：更深灰（深色下更亮灰）、13px、半粗、词上方留 4px 行距。（T-126 已覆盖这些参数：现行拼音行为 Segoe UI 13px `FW_NORMAL`、浅色 #888888（用户要浅色辅助提示而非高对比细节）、间距 4dp（视觉墨迹 ≈6px），主文本改 16px `FW_SEMIBOLD` 且宽度估算系数加宽（ASCII 0.55→0.58em、CJK 1.0→1.06em）以容纳假粗墨迹 —— 见 [排版与留白美化](../../implemented/feature/2026-10-08-candidate-window-typography-whitespace.zh.md)（T-126）笔记，其决策池覆盖此处所列；独立 `pin` 主题键、序号右对齐、词起点 x=34 仍有效。）
+- 序号与词的间距在所有页码下稳定在 ~6px（96dpi），满足用户 4-8px 要求；词起点左移 4px。（T-137 后续收紧：序号列贴左缘 x=2、间距 6→2dp（用户"2px即可"）、词起点 x=34→22——同一右对齐、整体贴左。）
+- 拼音/声调小字清晰可辨：更深灰（深色下更亮灰）、13px、半粗、词上方留 4px 行距。（T-126 已覆盖这些参数：现行拼音行为 Segoe UI 13px `FW_NORMAL`、浅色 #888888（用户要浅色辅助提示而非高对比细节）、间距 4dp（视觉墨迹 ≈6px），主文本改 16px `FW_SEMIBOLD` 且宽度估算系数加宽（ASCII 0.55→0.58em、CJK 1.0→1.06em）以容纳假粗墨迹 —— 见 [排版与留白美化](../../implemented/feature/2026-10-08-candidate-window-typography-whitespace.zh.md)（T-126）笔记，其决策池覆盖此处所列；独立 `pin` 主题键与序号右对齐仍有效；序号列参数此后整体贴左（词起点 x=34→22、间距 2dp，T-137）。）
 - 主题作者可在主题文件 `candidate` 节可选添加 `"pin"`；旧文件不受影响（缺键 → 默认）。
 - `CandidateUiTheme` 变为 8 键结构，所有构造点已同步（`theme()` ×3、`theme_from_system_colors`、`theme_with_candidate`）；candidate-demo 演示项携带带调拼音（你好 → nǐ hǎo），截图可覆盖拼音行。
 

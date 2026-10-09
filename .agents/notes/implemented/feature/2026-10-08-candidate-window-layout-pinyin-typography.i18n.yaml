@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object README.md
 #   git hash-object README.zh.md
-2026-10-08-candidate-window-layout-pinyin-typography.md: ea208415d74247411b5f87af1edec870671d9164
-2026-10-08-candidate-window-layout-pinyin-typography.zh.md: 1243bc431605b43acb89dbfbe70704c1f13ab811
+2026-10-08-candidate-window-layout-pinyin-typography.md: f480c690c7c2bd058c83e3a2ab78f41723616c78
+2026-10-08-candidate-window-layout-pinyin-typography.zh.md: a9fab9a17ca3c9db24b9d3b40e07d6a264048b71
