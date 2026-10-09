@@ -48,12 +48,17 @@ install the full package"). That gate sits **before** any spawn, so
 `config::save_online_update` (re-read before write, S-8), like theme/mode.
 Selecting the row itself does nothing.
 
-### Check-update subview
+### Check-update and diagnostics are flat sections, not subviews (T-143)
 
-Layout: info pane (switch state + disable reason / updater path), result pane
-(updater output, line by line, **errors shown truthfully** — e.g. the
-"no built-in public key" failure or a 404 from the manifest URL — never a
-fake "no updates"), bottom buttons [检查更新][应用更新][返回].
+Since T-143 the About & Updates page is a single flat layout — there are no
+subviews and no "返回关于与更新" button: the first row is the online-update
+switch item (reusing `item_rows`), below it the update section (status line
+"在线更新：已开启/已关闭" with disable reason / updater path, result pane with
+updater output shown truthfully, then the [检查更新][应用更新] buttons), and
+below that a "版本与诊断信息" section header with the diagnostic lines. The
+left nav switches pages; diagnostics are lazily collected the first time the
+page is drawn. `about_layout` in `layout.rs` cuts diagnostic rows at the
+content bottom (fixed result area of ~3 rows).
 
 ### Background task thread + message-loop handoff
 
@@ -71,17 +76,17 @@ message arrives. `WM_UPDATER_DONE` carries the task sequence number in
 The apply button opens a `MessageBox` (YESNO, D-44) before spawning
 `zhu-ye-updater apply`.
 
-### Diagnostics subview is local-only
+### Diagnostics section is local-only
 
 `build_diagnostics` reads `zhu_ye_core::core_version()`, `config.json` path,
 data directory, acceptance log directory, and the installed-pack list via the
 existing local inventory scan (`list_packs_now`) — no spawn, no network.
-Format lines are drawn like the manage/repair subviews.
+Format lines are drawn like the manage/repair subviews (first line stronger).
 
 ### Forensics hooks
 
-`--shot --update` / `--shot --diag` enter the two subviews for BMP capture
-(alongside `--packs/--manage/--repair`).
+`--shot --page about` captures the flat About page (T-143; the former
+`--update` / `--diag` subview entries were removed with the subviews).
 
 ## Alternatives considered
 
@@ -109,11 +114,18 @@ Format lines are drawn like the manage/repair subviews.
 - Settings lib tests 95→97 (model: About items ready + switch default off +
   subview transitions; layout: update/diagnostics geometry; updater bridge:
   line filtering, exit-code and spawn-failure paths run against `cmd.exe`).
+- T-143: `Subview::Update/Diagnostics` and `ItemControl::OpenUpdate/
+  OpenDiagnostics` deleted; `ABOUT_ITEMS` keeps only the switch item; the two
+  former subview layouts were replaced by `about_layout` (106 lib tests).
 - Host forensics (2026-10-02): three BMPs (diagnostics page, update-off,
   update-on) — the off/on pair differs at 3650 sampled pixels; real updater
   behavior confirmed: `online_update=false` ⇒ `check` exits immediately with
   no network ("未发起任何网络请求"), `true` ⇒ the updater process performs the
   connection and its manifest-404 failure is what the window shows.
+- Host forensics (2026-10-09, T-143): flat About page BMP at 96 DPI — switch
+  row, update section, diagnostics section all within one page, no back
+  button; the "zero outbound connections when disabled" guarantee is unchanged
+  (`can_run_updater` still gates before any spawn).
 - Pending: the interactive VM items (explicit enable, check click, second
   confirmation, packet capture) remain open under acceptance 13.5.
 

@@ -544,101 +544,93 @@ pub fn repair_layout(metrics: &SettingsMetrics, client: UiRect, row_count: usize
     RepairLayout { rows, l1, l2, back }
 }
 
-/// 「检查更新」子视图整体布局（T-077 / FR-044）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UpdateLayout {
-    /// 顶部说明区（当前开关状态 + 禁用原因/更新器路径，最多两行）。
-    pub info: UiRect,
-    /// 中部结果区（更新器输出逐行展示，超出截断）。
+/// 「检查更新」与「版本与诊断信息」平铺在「关于与更新」页上的整体布局
+/// （T-143：取消两级子视图，开关行之下依次是指标说明、按钮与结果区、诊断信息小节）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AboutLayout {
+    /// 在线更新状态行（"在线更新：已开启/已关闭"）。
+    pub status: UiRect,
+    /// 状态行下方的提示行（未开启原因或更新器路径）。
+    pub hint: UiRect,
+    /// 检查更新结果区（逐行展示更新器输出，超出截断）。
     pub result: UiRect,
     /// "检查更新"按钮（强调色）。
     pub check: UiRect,
     /// "应用更新"按钮（普通色）。
     pub apply: UiRect,
-    /// "返回关于与更新"按钮。
-    pub back: UiRect,
+    /// "版本与诊断信息"小节标题行。
+    pub diag_title: UiRect,
+    /// 诊断信息行；行数由诊断内容决定，超出可用高度截断。
+    pub diag_rows: Vec<UiRect>,
 }
 
-/// 计算「检查更新」子视图布局：说明在上、结果居中、三个按钮在底部。
+/// 关于页扁平区块的行高常量（96 DPI 逻辑值；诊断行按 small 字体高度加呼吸留白）。
+const LOGICAL_SECTION_ROW: i32 = 26;
+const LOGICAL_HINT_ROW: i32 = 20;
+const LOGICAL_DIAG_ROW: i32 = 21;
+/// 结果区固定显示行数（更新器输出超出部分截断）。
+const LOGICAL_RESULT_ROWS: i32 = 3;
+
+/// 计算「关于与更新」页扁平布局：开关条目行（调用方用 `item_rows` 绘制）之下，
+/// 依次是更新状态/提示、结果区、检查/应用按钮、诊断信息小节。
 #[must_use]
-pub fn update_layout(metrics: &SettingsMetrics, client: UiRect) -> UpdateLayout {
+pub fn about_layout(metrics: &SettingsMetrics, client: UiRect, diag_count: usize) -> AboutLayout {
     let content = content_rect(metrics, client);
-    let row_height = metrics.pack_row_height.saturating_sub(metrics.gap);
-    let info = UiRect {
-        left: content.left,
-        top: content.top,
-        right: content.right,
-        bottom: content.top + row_height * 2,
-    };
-    let button_top = content.bottom - metrics.pack_button_height;
     let gap = metrics.gap;
-    let width = (content.width() - gap * 2) / 3;
+    let section = |top: i32, height: i32| UiRect {
+        left: content.left,
+        top,
+        right: content.right,
+        bottom: top + height,
+    };
+    let status_h = scale(metrics.dpi, LOGICAL_SECTION_ROW);
+    let hint_h = scale(metrics.dpi, LOGICAL_HINT_ROW);
+    let diag_row_h = scale(metrics.dpi, LOGICAL_DIAG_ROW);
+    let result_h = scale(metrics.dpi, LOGICAL_RESULT_ROWS) * diag_row_h;
+
+    // 第一行条目（"启用在线更新"）由 `item_rows` 绘制；区块从它下方开始。
+    let mut top = content.top + metrics.item_height + gap;
+    let status = section(top, status_h);
+    top = status.bottom;
+    let hint = section(top, hint_h);
+    top = hint.bottom + gap;
+    let result = section(top, result_h);
+    top = result.bottom + gap;
+
+    let button_h = metrics.pack_button_height;
+    let width = (content.width() - gap) / 2;
     let check = UiRect {
         left: content.left,
-        top: button_top,
+        top,
         right: content.left + width,
-        bottom: button_top + metrics.pack_button_height,
+        bottom: top + button_h,
     };
     let apply = UiRect {
         left: check.right + gap,
-        top: button_top,
-        right: check.right + gap + width,
-        bottom: button_top + metrics.pack_button_height,
-    };
-    let back = UiRect {
-        left: apply.right + gap,
-        top: button_top,
+        top,
         right: content.right,
-        bottom: button_top + metrics.pack_button_height,
+        bottom: top + button_h,
     };
-    let result = UiRect {
-        left: content.left,
-        top: info.bottom + gap,
-        right: content.right,
-        bottom: button_top - gap,
-    };
-    UpdateLayout {
-        info,
+    top = apply.bottom + gap;
+    let diag_title = section(top, status_h);
+    top = diag_title.bottom + gap;
+    // 诊断行只生成到内容区底边内；超出部分由绘制端按行数截断（诊断内容至多十余行）。
+    let diag_rows: Vec<UiRect> = (0..diag_count)
+        .map(|index| {
+            let row_top = top + index as i32 * diag_row_h;
+            section(row_top, diag_row_h)
+        })
+        .take_while(|row| row.bottom <= content.bottom)
+        .collect();
+    AboutLayout {
+        status,
+        hint,
         result,
         check,
         apply,
-        back,
+        diag_title,
+        diag_rows,
     }
-}
-
-/// 「版本与诊断信息」子视图整体布局（T-077 / FR-044）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiagnosticsLayout {
-    /// 信息逐行区；行数由诊断内容决定，超出可用高度截断。
-    pub rows: Vec<UiRect>,
-    /// "返回关于与更新"按钮。
-    pub back: UiRect,
-}
-
-/// 计算「版本与诊断信息」子视图布局：信息行在上、返回按钮在底部。
-#[must_use]
-pub fn diagnostics_layout(
-    metrics: &SettingsMetrics,
-    client: UiRect,
-    row_count: usize,
-) -> DiagnosticsLayout {
-    let content = content_rect(metrics, client);
-    let row_height = metrics.pack_row_height.saturating_sub(metrics.gap);
-    let rows: Vec<UiRect> = (0..row_count)
-        .map(|index| UiRect {
-            left: content.left,
-            top: content.top + index as i32 * row_height,
-            right: content.right,
-            bottom: content.top + (index as i32 + 1) * row_height,
-        })
-        .collect();
-    let back = UiRect {
-        left: content.left,
-        top: content.bottom - metrics.pack_button_height,
-        right: content.left + metrics.pack_button_width,
-        bottom: content.bottom,
-    };
-    DiagnosticsLayout { rows, back }
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,44 +1239,74 @@ mod tests {
     }
 
     #[test]
-    fn 检查更新子视图说明结果按钮依次排列() {
+    fn 关于页扁平布局各区块依次排列且不重叠() {
         let metrics = SettingsMetrics::new(96);
-        let layout = super::update_layout(&metrics, CLIENT);
         let content = content_rect(&metrics, CLIENT);
-        // 三列按钮依次相接（隔一个 gap）、不重叠，覆盖整个内容区宽度。
-        assert_eq!(layout.check.right + metrics.gap, layout.apply.left);
-        assert_eq!(layout.apply.right + metrics.gap, layout.back.left);
-        assert_eq!(layout.back.right, content.right);
-        assert_eq!(layout.check.bottom, content.bottom);
-        // 说明区在顶部，结果区在说明区与按钮之间，互不重叠。
-        assert_eq!(layout.info.top, content.top);
-        assert!(layout.info.bottom <= content.bottom);
-        assert_eq!(layout.result.top, layout.info.bottom + metrics.gap);
+        let layout = super::about_layout(&metrics, CLIENT, 5);
+        // 状态行紧接开关条目行（条目行由 item_rows 绘制，高为 item_height）。
+        assert_eq!(
+            layout.status.top,
+            content.top + metrics.item_height + metrics.gap
+        );
+        assert_eq!(layout.status.left, content.left);
+        assert_eq!(layout.status.right, content.right);
+        // 提示行紧随状态行，结果区在提示行与按钮之间，互不重叠。
+        assert_eq!(layout.hint.top, layout.status.bottom);
+        assert!(layout.result.top >= layout.hint.bottom + metrics.gap);
+        assert!(layout.result.height() >= 2 * super::scale(96, super::LOGICAL_DIAG_ROW));
         assert!(layout.result.bottom <= layout.check.top);
+        // 两按钮等宽相接（隔一个 gap）且左右覆盖整个内容区宽度。
+        assert_eq!(layout.check.height(), metrics.pack_button_height);
+        assert_eq!(layout.check.width(), layout.apply.width());
+        assert_eq!(layout.check.right + metrics.gap, layout.apply.left);
+        assert_eq!(layout.apply.right, content.right);
+        assert_eq!(layout.check.bottom, layout.apply.bottom);
+        // 诊断小节标题在按钮之下，诊断行首尾相接且按诊断数生成。
+        assert_eq!(layout.diag_title.top, layout.apply.bottom + metrics.gap);
+        assert_eq!(layout.diag_rows.len(), 5);
+        assert_eq!(
+            layout.diag_rows[0].top,
+            layout.diag_title.bottom + metrics.gap
+        );
+        for pair in layout.diag_rows.windows(2) {
+            assert_eq!(pair[1].top, pair[0].bottom);
+        }
+        // 5 行诊断全部落在内容区内。
         assert!(
-            layout.result.height() >= metrics.pack_row_height,
-            "结果区至少一行高"
+            layout
+                .diag_rows
+                .last()
+                .is_none_or(|row| row.bottom <= content.bottom),
+            "常规诊断行不得越出内容区底部"
         );
     }
 
     #[test]
-    fn 诊断子视图信息行在上返回按钮在底部() {
+    fn 关于页诊断行超出内容区时截断不越界() {
         let metrics = SettingsMetrics::new(96);
         let content = content_rect(&metrics, CLIENT);
-        let layout = super::diagnostics_layout(&metrics, CLIENT, 5);
-        assert_eq!(layout.rows.len(), 5);
-        assert_eq!(layout.rows[0].top, content.top);
-        for pair in layout.rows.windows(2) {
-            assert!(pair[0].bottom <= pair[1].top);
-        }
-        assert_eq!(layout.back.bottom, content.bottom);
-        assert_eq!(layout.back.top, content.bottom - metrics.pack_button_height);
+        // 9 行（接近真实诊断最大量）在 620 高的矮窗口里放不下时被截断：
+        // 生成的行数全部落在内容区内、首尾相接，且不 panic。
+        let crowded = super::about_layout(&metrics, CLIENT, 9);
         assert!(
-            layout
-                .rows
+            crowded
+                .diag_rows
                 .last()
-                .is_none_or(|row| row.bottom <= layout.back.top),
-            "信息行不得压住返回按钮"
+                .is_none_or(|row| row.bottom <= content.bottom),
+            "最后一行不得越出内容区底部"
+        );
+        for pair in crowded.diag_rows.windows(2) {
+            assert_eq!(pair[1].top, pair[0].bottom, "行必须首尾相接");
+        }
+        // 极端数量同样截断在内容区内。
+        let extreme = super::about_layout(&metrics, CLIENT, 200);
+        assert!(!extreme.diag_rows.is_empty(), "常规量下至少一行诊断");
+        assert!(
+            extreme
+                .diag_rows
+                .last()
+                .is_none_or(|row| row.bottom <= content.bottom),
+            "极端数量下诊断行也必须在内容区内截断"
         );
     }
 
