@@ -83,6 +83,8 @@ longer emits `洗按`, and `fazhan` no longer emits `发站`; fallback
 combinations remain when there are no direct entries, such as `geio` →
 `给哦`. Real-dictionary validation: `rank jiao` puts `叫` first with 92,723,
 `rank xian` has no `洗按`, `rank fazhan` puts `发展` first with 3,680, and
-`rank geio` keeps `给哦`. An explicit `xi an` separator remains a possible
-future enhancement and does not block M2. AI-ranked output can later be a
+`rank geio` keeps `给哦`. The explicit `xi an` separator idea noted here is
+now implemented as the syllable separator (T-128):
+[2026-10-09-syllable-separator-apostrophe](../feature/2026-10-09-syllable-separator-apostrophe.md);
+whole-word-first behavior above stays intact. AI-ranked output can later be a
 new `RankingModel` implementation instead of extra fields on `Candidate`.
