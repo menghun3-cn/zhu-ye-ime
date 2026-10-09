@@ -538,18 +538,24 @@ impl CandidateMetrics {
         }
     }
 
-    /// 拼音行内容带在行内的垂直起点（T-131 行内垂直居中）。
+    /// 拼音行内容带在行内的垂直起点（T-131 行内垂直居中 / T-138 改为上对齐）。
     ///
     /// 内容带 = 拼音字形带（真实行高 `pin_tm_height`，T-130）+
-    /// `pin_line_gap` + 主文本带（`font_height`）。此前内容带贴行顶、
+    /// `pin_line_gap` + 主文本带（`font_height`）。T-132 前内容带贴行顶、
     /// 底部悬空约 12px（行高 48 减内容带 36），用户反馈"候选行内部下留白
-    /// 过多"；本函数返回使内容带整条在 `row` 内垂直居中的顶边（上下留白
-    /// 均衡，panel 尺寸/分页不变）。内容带高于行高时返回行顶。
+    /// 过多"→ 本函数改为整带垂直居中（上/下各 6px）；T-138 用户再反馈
+    /// "音标上方的内边距再减少到只剩下1px" → 顶边距固定 1dp（上 1/下 11，
+    /// 内容重心上移，与 T-136 顶部紧凑同一审美；下留白随之增大，若用户
+    /// 目视不适可再调行高/间距）。内容带高于行高时贴行顶。
     #[must_use]
     pub fn pin_band_top(&self, row: UiRect, pin_tm_height: i32) -> i32 {
         let pin_band = pin_tm_height.max(self.pin_font_height);
         let content = pin_band + self.pin_line_gap + self.font_height;
-        row.top.saturating_add((row.height() - content).max(0) / 2)
+        if row.height() > content {
+            row.top.saturating_add(1)
+        } else {
+            row.top
+        }
     }
 
     /// 行内按内容动态划分主文本与译文矩形（T-037）。
@@ -1151,23 +1157,25 @@ mod tests {
     }
 
     #[test]
-    fn 拼音行内容带行内垂直居中() {
-        // T-131：内容带（拼音字形带 + pin_line_gap + 主文本带）在行内居中，
-        // 消除此前"贴行顶、底部悬空约 12px"的下留白；panel 尺寸/分页不变。
+    fn 拼音行内容带顶边距行顶1px() {
+        // T-131：内容带（拼音字形带 + pin_line_gap + 主文本带）此前在行内
+        // 居中（上/下各 6px）；T-138 用户"音标上方的内边距再减少到只剩下
+        // 1px" → 顶边固定 = 行顶 + 1（上 1/下 11，重心上移）。
         let metrics = CandidateMetrics::new(BASE_DPI);
         let row = metrics.row_rect(0);
         let tm = metrics.pin_font_height + 3; // T-130 真实行高（Segoe UI 13px）
         let top = metrics.pin_band_top(row, tm);
-        // 常规行：内容带 16+4+16=36 < 行高 48 → 顶边 = 行顶 + (48-36)/2 = +6。
-        assert_eq!(top, row.top + 6);
-        // 拼音字形带底 = 内容带顶 + 拼音带；主文本顶 = 字形带底 + pin_line_gap：
-        // 上下留白均衡（各 6px），视觉间距仍精确等于 pin_line_gap。
+        // 常规行：顶边 = 行顶 + 1dp。
+        assert_eq!(top, row.top + 1);
+        // 拼音字形带底 = 内容带顶 + 拼音带；主文本顶 = 字形带底 + pin_line_gap；
+        // 主文本带底距行底 = 行高 - (1 + 内容带 36) = 48 - 37 = 11（T-138：
+        // 留白由上 6/下 6 变为上 1/下 11）。
         let pin_band = tm.max(metrics.pin_font_height);
         assert_eq!(
             top + pin_band + metrics.pin_line_gap + metrics.font_height,
-            row.bottom - 6
+            row.bottom - 11
         );
-        // 内容带高于行高时贴行顶（负偏移截为 0，不越出行）。
+        // 内容带高于行高时贴行顶（不越出行）。
         let tiny = UiRect {
             top: 40,
             left: 0,

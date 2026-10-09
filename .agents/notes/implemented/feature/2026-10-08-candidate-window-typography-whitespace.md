@@ -194,6 +194,9 @@ y=121..153 (top pad ≈9px — pin glyph top inset — bottom ≈6px), i.e. the 
 moved down ~5px and the row now balances. Non-pinyin rows (translation mode,
 pin toggle off) are untouched (16px/16px, already centred).
 
+*(T-138 later replaced this centring for pinned rows with top alignment at 1px —
+see "Pin band top-aligned to 1px (T-138)" below.)*
+
 ## Header band compressed 30% (T-136, user report "候选框顶部留白过多，视觉重心偏下")
 
 User (2026-10-09): the candidate window's top area has too much whitespace
@@ -235,6 +238,28 @@ workspace all-green; 96dpi pixel probe on the demo (word ink 34 → 23).
 
 T-122's right-aligned index rationale stays active; its column constants
 are updated in place (word start x=34 → 22, gap 6 → 2dp).
+
+## Pin band top-aligned to 1px (T-138, user "音标上方的内边距再减少到只剩下1px")
+
+User (2026-10-09, right after T-137): the breathing room **above the tone
+pinyin line** should shrink to just 1px. Replaces T-132's whole-band
+vertical centring for pinned rows.
+
+Fix (T-138): `CandidateMetrics::pin_band_top` returns `row.top + 1`
+instead of the centred `row.top + (row.height - content)/2` (+6 at 96dpi);
+content taller than the row still clamps to the row top. Paint derives the
+main-text/translation/marker rects from `band_top` (same source as T-132),
+so the whole band follows automatically. Geometry at 96dpi: pin ink moves
+58 → 52 (up 6px), whitespace goes from 6/6 to **1 above / 11 below**
+(band = 16 pin + 4 gap + 16 main = 36 inside the 48px row). Rows without a
+pin line (translation mode, pin toggle off) still centre via `DT_VCENTER`.
+The 11px below-main whitespace is the acknowledged trade-off of top
+alignment — if the user finds it loose, the next lever is a smaller
+`row_height` or a re-centring within an upper band.
+Verified: candidate_ui 25/25 (test reworded to the +1/top-11 assertions
+plus the tiny-row clamp), workspace all-green; 96dpi demo probe — row 0
+(top 46): pin ink y52..60 (band top 47; ≈5-6px ink gap above includes the
+Segoe UI 13px glyph top bearing), main ink y68..83 (11px below).
 
 ## Show-pin toggle (T-127)
 
