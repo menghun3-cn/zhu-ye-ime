@@ -261,56 +261,11 @@ pub fn build_real_dictionary(
         entries.truncate(max);
     }
     // T-056 多音缺读补丁：补丁只增不改，词频继承该字现有最高值。
-    let mut char_max_frequency: HashMap<String, u64> = HashMap::new();
-    for entry in &entries {
-        if entry.word.chars().count() == 1 {
-            let slot = char_max_frequency.entry(entry.word.clone()).or_insert(0);
-            *slot = (*slot).max(entry.frequency);
-        }
-    }
-    // 第一遍：只读校验，收集待应用补丁（避免借用冲突）。
-    let mut to_apply: Vec<&PatchEntry> = Vec::new();
-    let mut collected: HashSet<(String, String)> = HashSet::new();
-    for patch in polyphone_patches {
-        let character = patch.character.as_str();
-        if !char_max_frequency.contains_key(character) {
-            // 字不在词表：拒绝引入规范表外的生僻字形
-            stats.polyphone_skipped += 1;
-            continue;
-        }
-        let pinyin = patch.pinyin.as_str();
-        if !table.is_complete_syllable(pinyin) {
-            stats.polyphone_skipped += 1;
-            continue;
-        }
-        if entries
-            .iter()
-            .any(|entry| entry.word == patch.character && entry.pinyin == patch.pinyin)
-        {
-            // 组合已存在（可能是数据源自带该读音）
-            stats.polyphone_skipped += 1;
-            continue;
-        }
-        if !collected.insert((patch.character.clone(), patch.pinyin.clone())) {
-            // 补丁表内重复
-            stats.polyphone_skipped += 1;
-            continue;
-        }
-        to_apply.push(patch);
-    }
-    // 第二遍：写入词表，词频继承该字现有最高值。
-    for patch in &to_apply {
-        let frequency = char_max_frequency
-            .get(patch.character.as_str())
-            .copied()
-            .unwrap_or(1);
-        entries.push(DictionaryEntry::new(
-            patch.character.clone(),
-            patch.pinyin.clone(),
-            frequency,
-        ));
-        stats.polyphone_applied += 1;
-    }
+    // 逻辑与 build_base（T-129）共用 polyphone::apply_patch_entries，口径一致。
+    let (applied, skipped) =
+        crate::polyphone::apply_patch_entries(&mut entries, polyphone_patches, &table);
+    stats.polyphone_applied = applied;
+    stats.polyphone_skipped = skipped;
     stats.entry_count = entries.len();
     stats.unknown_syllables.sort();
     stats.unknown_syllables.dedup();

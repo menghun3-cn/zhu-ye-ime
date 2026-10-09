@@ -1031,6 +1031,10 @@ pub struct BaseStats {
     pub patched_translations: usize,
     /// 译文加词性前缀的词条数（T-115 后续：jieba 词性列 → 传统缩写拼入译文）。
     pub pos_labeled: usize,
+    /// 多音缺读补丁应用条数（T-129：base 产品链接入 T-056 补丁表）。
+    pub polyphone_applied: usize,
+    /// 多音缺读补丁跳过条数（字不在表/读音非法/组合已存在/表内重复）。
+    pub polyphone_skipped: usize,
     /// 规范字集（kTGHZ 8,102 字，约等于通用规范汉字表 8,105）中出现在 base 的字占比。
     pub char_set_coverage_pct: f64,
     /// 最终词条总数。
@@ -1306,6 +1310,17 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         }
         entries.push(entry);
     }
+    // f) 多音缺读补丁（T-056 补丁表，T-129 起产品链 base 生效）：
+    //    此前补丁只在 import 管线（real.zyct），base 包「谁」仅 shei、「熟」仅 shu，
+    //    用户主诉输入 shui 候选无「谁」。与 import 共用 apply_patch_entries，
+    //    口径一致：只增不改、词频继承该字现有最高、不引规范表外字形。
+    let patch_table = crate::polyphone::load_patch_table(&root.join("data/patches/polyphone.tsv"))
+        .map_err(|error| error.to_string())?;
+    let (polyphone_applied, polyphone_skipped) = crate::polyphone::apply_patch_entries(
+        &mut entries,
+        &patch_table,
+        &zhu_ye_core::pinyin::SyllableTable::standard(),
+    );
     let bytes = crate::build_v2(&entries, &[]).map_err(|error| error.to_string())?;
 
     let output = root.join(ARTIFACTS_DIR).join("base.zyct");
@@ -1337,6 +1352,8 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         cedict_words,
         patched_translations,
         pos_labeled,
+        polyphone_applied,
+        polyphone_skipped,
         char_set_coverage_pct,
         entry_count: entries.len(),
         file_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
@@ -1348,7 +1365,7 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         stats.file_size as f64 / 1_048_576.0
     );
     println!(
-        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，译文补齐 {}，词性标注 {}（T-115 后续），规范字集覆盖 {:.1}%",
+        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，译文补齐 {}，词性标注 {}（T-115 后续），多音补丁 {}/跳过 {}（T-129），规范字集覆盖 {:.1}%",
         stats.skeleton_words,
         stats.wordfreq_hits,
         stats.wordfreq_hit_pct,
@@ -1356,6 +1373,8 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         stats.cedict_words,
         stats.patched_translations,
         stats.pos_labeled,
+        stats.polyphone_applied,
+        stats.polyphone_skipped,
         stats.char_set_coverage_pct
     );
     println!("内容 SHA-256: {}", stats.sha256);

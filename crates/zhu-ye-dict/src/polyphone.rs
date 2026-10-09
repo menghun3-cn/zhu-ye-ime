@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use zhu_ye_core::dict::DictionaryEntry;
 use zhu_ye_core::pinyin::SyllableTable;
 
 /// 预组声调字符 -> 基础字母（kTGHZ2013 字母调符；ü 按输入法惯例写作 v）。
@@ -195,6 +196,72 @@ pub fn parse_patch_table(text: &str) -> Result<Vec<PatchEntry>, String> {
     Ok(entries)
 }
 
+/// 应用多音缺读补丁（T-056）：只增不改，词频继承该字现有最高值。
+///
+/// 返回 `(应用数, 跳过数)`。跳过情形：字不在词表（不引入规范表外生僻字形）、
+/// 读音不在标准全拼表、同（字,读音）组合已存在、补丁表内重复。
+/// `import::build_real_dictionary` 与 `m6::build_base`（T-129 产品链接入）共用，
+/// 保证两条构建管线补丁口径一致。
+pub fn apply_patch_entries(
+    entries: &mut Vec<DictionaryEntry>,
+    patches: &[PatchEntry],
+    table: &SyllableTable,
+) -> (usize, usize) {
+    let mut char_max_frequency: HashMap<String, u64> = HashMap::new();
+    for entry in entries.iter() {
+        if entry.word.chars().count() == 1 {
+            let slot = char_max_frequency.entry(entry.word.clone()).or_insert(0);
+            *slot = (*slot).max(entry.frequency);
+        }
+    }
+    // 第一遍：只读校验，收集待应用补丁（避免借用冲突）。
+    let mut to_apply: Vec<&PatchEntry> = Vec::new();
+    let mut collected: HashSet<(String, String)> = HashSet::new();
+    let mut skipped = 0usize;
+    for patch in patches {
+        let character = patch.character.as_str();
+        if !char_max_frequency.contains_key(character) {
+            // 字不在词表：拒绝引入规范表外的生僻字形
+            skipped += 1;
+            continue;
+        }
+        let pinyin = patch.pinyin.as_str();
+        if !table.is_complete_syllable(pinyin) {
+            skipped += 1;
+            continue;
+        }
+        if entries
+            .iter()
+            .any(|entry| entry.word == patch.character && entry.pinyin == patch.pinyin)
+        {
+            // 组合已存在（可能是数据源自带该读音）
+            skipped += 1;
+            continue;
+        }
+        if !collected.insert((patch.character.clone(), patch.pinyin.clone())) {
+            // 补丁表内重复
+            skipped += 1;
+            continue;
+        }
+        to_apply.push(patch);
+    }
+    // 第二遍：写入词表，词频继承该字现有最高值。
+    let mut applied = 0usize;
+    for patch in &to_apply {
+        let frequency = char_max_frequency
+            .get(patch.character.as_str())
+            .copied()
+            .unwrap_or(1);
+        entries.push(DictionaryEntry::new(
+            patch.character.clone(),
+            patch.pinyin.clone(),
+            frequency,
+        ));
+        applied += 1;
+    }
+    (applied, skipped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +348,65 @@ mod tests {
     fn 补丁表拒绝非标准音节() {
         let text = "嗯\tng\t鼻音不在标准表\n谁\tshui\tok\n";
         assert!(parse_patch_table(text).is_err());
+    }
+
+    #[test]
+    fn 共享应用函数复制读音且词频继承该字最高() {
+        let table = SyllableTable::standard();
+        let mut entries = vec![
+            DictionaryEntry::new("谁", "shei".to_owned(), 42),
+            DictionaryEntry::new("谁", "shui".to_owned(), 2), // 已有组合应跳过
+            DictionaryEntry::new("水", "shui".to_owned(), 7),
+            DictionaryEntry::new("熟", "shu".to_owned(), 3),
+        ];
+        let patches = [
+            PatchEntry {
+                character: "谁".to_owned(),
+                pinyin: "shui".to_owned(),
+            },
+            PatchEntry {
+                character: "熟".to_owned(),
+                pinyin: "shou".to_owned(),
+            },
+            PatchEntry {
+                character: "字外".to_owned(), // 词表外字不加（规范表外的生僻字形）
+                pinyin: "zi".to_owned(),
+            },
+            PatchEntry {
+                character: "谁".to_owned(),
+                pinyin: "shui".to_owned(),
+            }, // 表内重复
+        ];
+        let (applied, skipped) = apply_patch_entries(&mut entries, &patches, &table);
+        assert_eq!(applied, 1);
+        assert_eq!(skipped, 3);
+        let shou = entries
+            .iter()
+            .find(|e| e.word == "熟" && e.pinyin == "shou")
+            .expect("熟 shou 应被补入");
+        assert_eq!(shou.frequency, 3);
+        // 谁 shui 已存在：不重复补，原条目不动
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.word == "谁" && e.pinyin == "shui")
+                .count(),
+            1
+        );
+        assert_eq!(entries.len(), 5); // 水/谁(shei)/谁(shui)/熟(shu)/熟(shou)
+    }
+
+    #[test]
+    fn 共享应用函数拒绝非标准音节补丁() {
+        let table = SyllableTable::standard();
+        let mut entries = vec![DictionaryEntry::new("谁", "shei".to_owned(), 42)];
+        let patches = [PatchEntry {
+            character: "谁".to_owned(),
+            pinyin: "ng".to_owned(), // 鼻音不在标准全拼表
+        }];
+        let (applied, skipped) = apply_patch_entries(&mut entries, &patches, &table);
+        assert_eq!(applied, 0);
+        assert_eq!(skipped, 1);
+        assert_eq!(entries.len(), 1);
     }
 }
