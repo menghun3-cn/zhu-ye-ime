@@ -95,3 +95,33 @@ update_status 6、time 5、symbols 预算——settings 101、ime 170（含
 [通讯录场景九（FR-036 数据层；界面化导入落在配置登记上）](../../implemented/feature/2026-10-02-contacts-scenario9.zh.md)、
 [格式/符号/emoji 候选（FR-028 v 模式未触动）](../../implemented/feature/2026-09-30-format-symbol-emoji-candidates.zh.md)、
 [词典更新信任链（check-once 只报告过期包；信任链本体未变）](../../implemented/process/2026-09-29-dictionary-update-trust-chain.zh.md)。
+
+## 窗口标题"竹叶输入法" + 竹 LOGO（T-142）
+
+原窗口标题为"竹叶输入法 设置"；窗口类无图标（`WNDCLASSW.hIcon` 默认空），
+标题栏与任务栏不带 LOGO。另有潜伏问题：`wnd_proc` 处理 `WM_NCCREATE` 时只
+存状态指针并返回 `LRESULT(1)`，**不转发 `DefWindowProcW`**（自绘样板），
+窗口内部标题缓冲区从未从创建参数初始化——`GetWindowTextW` 实测恒空
+（跨进程读取确认），即改动前标题栏实际是**空白无标题**。
+
+决策（T-142，用户"设置GUI的标题改为竹叶输入法，并且加上LOGO"）：
+- `WINDOW_TITLE` → "竹叶输入法"；`CreateWindowExW` 之后立即
+  `SetWindowTextW(hwnd, WINDOW_TITLE)`——显式写入绕开 `WM_NCCREATE`
+  短路，对其语义零改动（最小 diff；不因未知风险去改转发样板）。
+- LOGO：新增 `crates/zhu-ye-settings/build.rs`，用 `winresource` 0.1
+  （build-dependencies，机制与 TSF DLL 的 T-112b 完全一致）嵌入
+  `zhu-ye-ime/assets/zhu.ico`（跨 crate 相对路径引用，资产单一不漂移）。
+  `winresource::set_icon` 生成 `1 ICON …`，窗口类注册时
+  `LoadIconW(hInstance, MAKEINTRESOURCEW(1))` 赋 `WNDCLASSW.hIcon`。
+  MAKEINTRESOURCE 伪指针带 `#[allow(clippy::manual_dangling_ptr)]` 是刻意的：
+  clippy 建议的 `ptr::dangling` 值为 2，会去找 icon id 2 而非 1。加载失败
+  回退空图标、不阻断启动（与改动前一致）。
+- 验收通道：`--shot` 模式进程内自报窗口标题与类图标
+  （`GetWindowTextW` + `GetClassLongPtrW(GCLP_HICON)`，与截图路径一并打印）——
+  跨进程 `GetWindowText`/`ExtractAssociatedIcon` 受桌面/会话隔离不可靠。
+  自证通过：标题 `[竹叶输入法]`、类图标 `0x…` 非 0；EXE 资源提取得
+  32×32 竹图标。
+
+相关记录（部分重叠保留活跃并交叉链接）：[任务栏竹图标经 TSF DLL 资源注入
+（T-112b——同一 winresource 机制、同一份 zhu.ico 资产）](../../implemented/feature/2026-10-06-taskbar-icon-zhu.zh.md)、
+[设置窗关于/更新页（T-142 不新增页内容）](../../implemented/feature/2026-10-02-settings-about-and-update-page.zh.md)。

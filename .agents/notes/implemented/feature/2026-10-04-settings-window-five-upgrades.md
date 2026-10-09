@@ -122,3 +122,41 @@ registration)](../../implemented/feature/2026-10-02-contacts-scenario9.md),
 [format/symbol/emoji candidates (FR-028 v-mode untouched)](../../implemented/feature/2026-09-30-format-symbol-emoji-candidates.md),
 [dictionary update trust chain (check-once only reports outdated packs; the
 chain itself is unchanged)](../../implemented/process/2026-09-29-dictionary-update-trust-chain.md).
+
+## Window title "竹叶输入法" and bamboo LOGO icon (T-142)
+
+The window title was `竹叶输入法 设置`; the window class had no icon
+(`WNDCLASSW.hIcon` defaulted), so the title bar and taskbar showed no logo.
+Also latent: `wnd_proc` handles `WM_NCCREATE` by stashing the state pointer and
+returns `LRESULT(1)` **without forwarding to `DefWindowProcW`** (a
+custom-draw staple), which means the window's internal title buffer was never
+initialized from the create parameters — `GetWindowTextW` returned empty for
+the settings window (cross-process reads confirmed empty; the title bar was in
+fact blank before this change).
+
+Decision (T-142, user: "设置GUI的标题改为竹叶输入法，并且加上LOGO"):
+- `WINDOW_TITLE` → `竹叶输入法`; right after `CreateWindowExW` the window
+  calls `SetWindowTextW(hwnd, WINDOW_TITLE)` — the explicit write works
+  regardless of the `WM_NCCREATE` short-circuit, with zero change to its
+  semantics (smallest diff; we deliberately do not start forwarding
+  `WM_NCCREATE` to `DefWindowProc` for an unknown-risk habit change).
+- Logo: new `crates/zhu-ye-settings/build.rs` embeds
+  `zhu-ye-ime/assets/zhu.ico` via `winresource` 0.1 (build-dependencies,
+  matching the TSF DLL mechanism from T-112b; cross-crate relative path so the
+  one asset never drifts). `winresource::set_icon` writes `1 ICON …`, so the
+  window class loads it with `LoadIconW(hInstance, MAKEINTRESOURCEW(1))` and
+  assigns `WNDCLASSW.hIcon`. Make-int-resource takes `#[allow(clippy::manual_dangling_ptr)]`
+  deliberately: clippy's suggested `ptr::dangling` yields value 2, which would
+  look up icon id 2 instead of 1. Load failure falls back to a null icon and
+  does not block startup (same as before).
+- Verification channel: `--shot` mode now self-reports the window title and
+  class icon (`GetWindowTextW` + `GetClassLongPtrW(GCLP_HICON)` in-process,
+  printed with the screenshot path) — cross-process `GetWindowText`/
+  `ExtractAssociatedIcon` are unreliable under desktop/session isolation.
+  Self-proof passes: title `[竹叶输入法]`, class icon `0x…` non-zero; EXE
+  resource extraction yields the 32×32 竹 icon.
+
+Related notes (partial overlaps kept active and cross-linked):
+[taskbar 竹 icon via TSF DLL resource injection (T-112b — same winresource
+mechanism and the same zhu.ico asset)](../../implemented/feature/2026-10-06-taskbar-icon-zhu.md),
+[settings about and update page (T-142 adds no new page content)](../../implemented/feature/2026-10-02-settings-about-and-update-page.md).
