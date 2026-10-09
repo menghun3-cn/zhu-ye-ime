@@ -175,3 +175,5 @@ jieba 语料频次对生僻词膨胀（垸 jieba 5690 vs wordfreq 2450，会盖�
 - M7 纠错/候选排序（错序容错补充而非取代）：[2026-09-19-candidate-ranking-static-model.md](../../implemented/feature/2026-09-19-candidate-ranking-static-model.md)
 - 批四（拼音带声调化与矩形横截断修复、双语言档案图标）：
   [2026-10-07-acceptance-fix-batch-4.md](2026-10-07-acceptance-fix-batch-4.md)
+- T-131 起词性标注按义应用、译文层按义拆行、上屏剥词性、Ctrl+数字直上屏：
+  [2026-10-09-multi-sense-translations-ctrl-commit.md](2026-10-09-multi-sense-translations-ctrl-commit.md)

@@ -119,6 +119,9 @@ enum KeyAction {
     Escape,
     /// 数字选择候选，index 从 0 开始。
     Select(usize),
+    /// Ctrl+数字直上屏译文（T-131）：中文层取候选译文首义、译文层取拆分行
+    /// 单义，剥词性前缀后上屏；候选无对应译文时由 `plan_action` 放行宿主。
+    CommitTranslation(usize),
     /// Shift 单击切换中英模式。
     ToggleMode,
     /// Tab 在中文候选层与译文层之间切换。
@@ -178,6 +181,7 @@ impl KeyAction {
                 | KeyAction::Enter
                 | KeyAction::Escape
                 | KeyAction::Select(_)
+                | KeyAction::CommitTranslation(_)
                 | KeyAction::BufferDigit(_)
                 | KeyAction::DigitBackspace
                 | KeyAction::SelectAndReplace(_)
@@ -751,6 +755,42 @@ fn key_modifiers_down() -> bool {
     unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 || GetKeyState(i32::from(VK_MENU.0)) < 0 }
 }
 
+/// Ctrl 单独按下（Alt 未按下）；用于 Ctrl+数字直上屏译文键路（T-131）。
+fn key_ctrl_only_down() -> bool {
+    unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 && GetKeyState(i32::from(VK_MENU.0)) >= 0 }
+}
+
+/// 修饰键（Ctrl/Alt 按住）下的键路（T-131）：仅当 **Ctrl 单独按下**（由调用方
+/// 传入 `ctrl_held`，测试可注入）、当前组合态且第 `index` 候选可上屏译文时
+/// 产出 `CommitTranslation`；其余情况一律返回 `None` 放行宿主（Alt 组合、
+/// Ctrl+字母、空闲态、数字越界/无译文）。
+fn plan_modifier_key(
+    wparam: WPARAM,
+    lparam: LPARAM,
+    shift_held: bool,
+    ctrl_held: bool,
+    engine: &mut InputEngine,
+) -> Option<KeyAction> {
+    let KeyAction::Digit(digit) = classify_key(wparam, lparam, shift_held)? else {
+        return None;
+    };
+    if !ctrl_held || !engine.is_active() {
+        return None;
+    }
+    let index = digit_index(digit);
+    engine
+        .can_translate_by_index(index)
+        .then_some(KeyAction::CommitTranslation(index))
+}
+
+/// 数字键 → 候选序号（T-131）：`1-9` 对应 0-8，`0` 对应 9（与选词一致）。
+fn digit_index(digit: char) -> usize {
+    match digit {
+        '0' => 9,
+        d => d as usize - '1' as usize,
+    }
+}
+
 /// 判断 Shift 修饰键是否按下（英文布局上档字符判定，T-066）。
 fn shift_key_down() -> bool {
     unsafe { GetKeyState(i32::from(VK_SHIFT.0)) < 0 }
@@ -783,7 +823,10 @@ fn plan_action(
     state: &Arc<SharedEngine>,
 ) -> Option<KeyAction> {
     if modifier_held {
-        return None;
+        // T-131：Ctrl+数字（组合态且候选可译）→ 直上屏译文；其余修饰组合
+        // （含所有 Alt 组合、Ctrl+字母等）一律放行宿主。
+        let engine = &mut state.lock().unwrap().engine;
+        return plan_modifier_key(wparam, lparam, shift_held, key_ctrl_only_down(), engine);
     }
     let action = classify_key(wparam, lparam, shift_held)?;
     let engine = &mut state.lock().unwrap().engine;
@@ -1001,7 +1044,13 @@ fn apply_action(
             refresh_candidate_window(state, Some((context, ec)));
             return Ok(());
         }
-        KeyAction::Space | KeyAction::Enter | KeyAction::Escape | KeyAction::Select(_) => {
+        KeyAction::Space
+        | KeyAction::Enter
+        | KeyAction::Escape
+        | KeyAction::Select(_)
+        // T-131：Ctrl+数字直上屏译文——与选词同路（commit_text 取译文 →
+        // finish_composition 上屏 → sync 清组合）。
+        | KeyAction::CommitTranslation(_) => {
             let text = commit_text(state, action);
             finish_composition(state, context, ec, &text)?;
         }
@@ -1144,6 +1193,9 @@ fn commit_text(state: &Arc<SharedEngine>, action: KeyAction) -> String {
             KeyAction::Enter => engine.preview_enter().unwrap_or_default(),
             KeyAction::Escape => String::new(),
             KeyAction::Select(index) => engine.preview_selection(index).unwrap_or_default(),
+            KeyAction::CommitTranslation(index) => engine
+                .preview_translation_by_index(index)
+                .unwrap_or_default(),
             _ => String::new(),
         }
     };
@@ -1207,6 +1259,11 @@ fn sync_engine(state: &Arc<SharedEngine>, action: KeyAction) {
         }
         KeyAction::Select(index) => {
             let _ = engine.select_index(index);
+        }
+        // T-131：Ctrl+数字直上屏译文（commit_text 已先取文本，这里推进状态：
+        // 清组合、记前词、刷联想）。
+        KeyAction::CommitTranslation(index) => {
+            let _ = engine.commit_translation_by_index(index);
         }
         KeyAction::ToggleMode => {
             // 已在上方专门分支处理，这里不可达。
@@ -3138,5 +3195,85 @@ mod tests {
             ),
             Some(KeyAction::FormatChar('.'))
         );
+    }
+
+    // ---- T-131 Ctrl+数字直上屏译文 ----
+
+    /// 组合态 nihao → 返回填充好候选的引擎。
+    fn typing_nihao() -> InputEngine {
+        let mut engine = create_engine(None);
+        for c in "nihao".chars() {
+            engine.handle_letter(c);
+        }
+        engine
+    }
+
+    #[test]
+    fn ctrl加数字组合态产出直上屏译文() {
+        let mut engine = typing_nihao();
+        assert_eq!(
+            plan_modifier_key(WPARAM(VK_1.0 as usize), LPARAM(0), false, true, &mut engine),
+            Some(KeyAction::CommitTranslation(0)),
+            "Ctrl+1 应直上屏首个候选译文"
+        );
+        assert_eq!(
+            plan_modifier_key(WPARAM(VK_2.0 as usize), LPARAM(0), false, true, &mut engine),
+            None,
+            "第二位候选无译文时放行宿主"
+        );
+        assert_eq!(
+            plan_modifier_key(WPARAM(VK_0.0 as usize), LPARAM(0), false, true, &mut engine),
+            None,
+            "第 10 位越界时放行宿主"
+        );
+    }
+
+    #[test]
+    fn 空闲态或非数字或非ctrl的修饰键放行宿主() {
+        // 空闲态（无组合）：Ctrl+数字放行宿主。
+        let mut idle = create_engine(None);
+        assert_eq!(
+            plan_modifier_key(WPARAM(VK_1.0 as usize), LPARAM(0), false, true, &mut idle),
+            None,
+            "空闲态 Ctrl+数字放行宿主"
+        );
+        // 组合态：Ctrl+字母放行宿主。
+        let mut typing = typing_nihao();
+        assert_eq!(
+            plan_modifier_key(WPARAM(VK_A.0 as usize), LPARAM(0), false, true, &mut typing),
+            None,
+            "Ctrl+字母放行宿主"
+        );
+        // 组合态：Alt 单按（Ctrl 未按下）数字放行宿主。
+        assert_eq!(
+            plan_modifier_key(
+                WPARAM(VK_1.0 as usize),
+                LPARAM(0),
+                false,
+                false,
+                &mut typing
+            ),
+            None,
+            "Alt+数字放行宿主"
+        );
+    }
+
+    #[test]
+    fn ctrl加数字直上屏译文走完整提交链路() {
+        let state = Arc::new(SharedEngine(Mutex::new(EngineState::new())));
+        for c in "nihao".chars() {
+            state.lock().unwrap().engine.handle_letter(c);
+        }
+        assert!(state.lock().unwrap().engine.is_active());
+        // commit_text：取译文文本（种子词典 nihao → hello，无词性前缀）。
+        assert_eq!(
+            commit_text(&state, KeyAction::CommitTranslation(0)),
+            "hello"
+        );
+        // sync_engine：推进状态——清组合、记前词、刷联想。
+        sync_engine(&state, KeyAction::CommitTranslation(0));
+        let engine = &state.lock().unwrap().engine;
+        assert!(!engine.is_active(), "直上屏后组合结束");
+        assert_eq!(engine.previous_word(), Some("hello"));
     }
 }
