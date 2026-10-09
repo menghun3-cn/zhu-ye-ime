@@ -91,6 +91,22 @@ T-021 有意对整词命中的键不做多音节组合候选，并把"显式 `xi
 - TSF：`classify_key`（`VK_OEM_7` → Separator、Shift → None）与
   `plan_action`（组合态进入、空闲/英文态放行）。
 
+## 分隔符显示字形修订（T-134，用户反馈"分隔符看起来是个逗号在上面"）
+
+用户 2026-10-09 反馈：显示器上的分隔符"看起来像字顶的逗号"，应当像搜狗
+那样"只是个撇号"——即**英文风格撇号**。根因：T-128 显示用键盘直撇
+U+0027，而页眉组合串由**宋体（SimSun）粗体**渲染
+（candidate_window `create_font(…, "SimSun")`，FW_SEMIBOLD）；宋体 U+0027
+字形是"顶部带钩的竖线"，粗体下读作漂浮的逗号。搜狗/微软拼音用英文弯撇。
+
+修复（T-134）：input.rs 新增 `pub const SYLLABLE_SEP_DISPLAY: char = '\u{2019}'`
+（U+2019 RIGHT SINGLE QUOTATION MARK，英文排版正式撇号）；`composing_display`
+两处插入改用它。纯显示层——查询键 `composing` 依旧无分隔符、`manual_seps`
+依旧存字符下标、键语义不变。附带修复：`preview_after_backspace` 原来按字节
+切片 `[..len-1]` 去掉尾分隔符，遇 3 字节 U+2019 会切出半个字符（潜在
+panic），改为按字符 `pop()`。测试断言全部用 `\u{2019}` 转义。候选行拼音
+（Segoe UI 渲染、词典数据为儿化 ASCII `'`，如 `nǎ'er`）不动——其字形观感正常。
+
 ## Related
 
 - [全拼切分核心（T-007）](../../implemented/feature/2026-09-19-full-pinyin-segmentation-core.zh.md) —— 本设计依赖的 `segment_all` 与首方案规则。
