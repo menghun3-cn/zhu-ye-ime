@@ -24,6 +24,17 @@ pub const CANDIDATE_PAGE_SIZE: usize = 9;
 /// 前缀候选（T-029）补全组最多进入排序的条数；防止短前缀命中过多词条。
 const PREFIX_COMPLETION_CAP: usize = 32;
 
+/// 音节分隔符的**显示**字符（T-134）：英文弯撇 `'`（U+2019，RIGHT SINGLE
+/// QUOTATION MARK，英文排版正式撇号）。
+///
+/// T-128 初版显示用键盘直撇 `'`（U+0027），但页眉主字体为宋体（SimSun）
+/// 粗体，其 U+0027 字形是"顶部带钩的竖线"——在粗体下观感像"上逗号"
+/// （用户 2026-10-09 反馈）。换 U+2019 后宋体/雅黑均为标准 9 形弯撇，
+/// 与搜狗拼音隔音符观感一致。仅影响 `composing_display` 输出（显示层）；
+/// 查询键 `composing` 不含分隔符（去噪），手动边界以 `manual_seps` 存
+/// 字符下标，与显示字符无关。
+pub const SYLLABLE_SEP_DISPLAY: char = '\u{2019}';
+
 /// 缩写前缀补全（M6-R）最多追加的条数。
 const ABBREVIATION_COMPLETION_CAP: usize = 32;
 
@@ -890,10 +901,10 @@ impl InputEngine {
     }
 
     /// 页眉显示串（T-128）：在 `composing` 中按「手动分隔符 ∪ 自动首选切分边界」
-    /// 插入半角 `'`。自动边界取首选切分（`segment_all` 首方案）的全部音节边界
-    /// （用户决策：全部音节边界都显示，如 `nihao` → `ni'hao`），仅中文模式参与；
-    /// 无法切分时仅显示手动分隔符（含串尾 `'`）。查询键 `composing` 本身不含
-    /// `'`（去噪）。
+    /// 插入显示用分隔符 `'`（U+2019，T-134）。自动边界取首选切分
+    /// （`segment_all` 首方案）的全部音节边界（用户决策：全部音节边界都
+    /// 显示，如 `nihao` → `ni'hao`），仅中文模式参与；无法切分时仅显示
+    /// 手动分隔符（含串尾 `'`）。查询键 `composing` 本身不含分隔符（去噪）。
     #[must_use]
     pub fn composing_display(&self) -> String {
         let mut boundaries: std::collections::BTreeSet<usize> =
@@ -905,13 +916,13 @@ impl InputEngine {
         let mut display = String::with_capacity(self.composing.len());
         for (index, c) in self.composing.char_indices() {
             if index > 0 && boundaries.contains(&index) {
-                display.push('\'');
+                display.push(SYLLABLE_SEP_DISPLAY);
             }
             display.push(c);
         }
         // 串尾手动分隔符（如刚按过 `'` 尚未继续输入）：循环无法覆盖，单独补上。
         if boundaries.contains(&length) {
-            display.push('\'');
+            display.push(SYLLABLE_SEP_DISPLAY);
         }
         display
     }
@@ -1202,8 +1213,10 @@ impl InputEngine {
         self.is_composing().then(|| {
             if self.manual_seps.last() == Some(&self.composing.len()) {
                 // T-128：退格将删除串尾手动分隔符（退格先删 `'`）：显示串去掉尾 `'`。
-                let display = self.composing_display();
-                display[..display.len() - 1].to_owned()
+                // T-134：分隔符为 U+2019（3 字节 UTF-8），按字符 pop 而非按字节切片。
+                let mut display = self.composing_display();
+                display.pop();
+                display
             } else {
                 self.composing[..self.composing.len() - 1].to_owned()
             }
@@ -1967,7 +1980,7 @@ mod tests {
         let mut typing = engine();
         // nihao 首选 [ni,hao]：全部音节边界显式插 `'`。
         type_text(&mut typing, "nihao");
-        assert_eq!(typing.composing_display(), "ni'hao");
+        assert_eq!(typing.composing_display(), "ni\u{2019}hao");
         assert_eq!(typing.composing(), "nihao", "查询键保持纯拼音（去噪）");
         // xian 首选 [xian]（无内部边界）：不自动插 `'`。
         let mut other = engine();
@@ -1976,7 +1989,7 @@ mod tests {
         // xihuan 首选 [xi,huan]。
         let mut third = engine();
         type_text(&mut third, "xihuan");
-        assert_eq!(third.composing_display(), "xi'huan");
+        assert_eq!(third.composing_display(), "xi\u{2019}huan");
         // 不可切分串（缩写/残缺）不插自动分隔。
         let mut fourth = engine();
         type_text(&mut fourth, "zzzz");
@@ -1991,11 +2004,11 @@ mod tests {
         let mut typing = engine();
         type_text(&mut typing, "xi");
         assert!(typing.insert_separator());
-        assert_eq!(typing.composing_display(), "xi'");
+        assert_eq!(typing.composing_display(), "xi\u{2019}");
         // 同位置重复插入被拒绝。
         assert!(!typing.insert_separator());
         type_text(&mut typing, "an");
-        assert_eq!(typing.composing_display(), "xi'an");
+        assert_eq!(typing.composing_display(), "xi\u{2019}an");
         assert_eq!(typing.composing(), "xian", "查询键不受分隔符影响");
         // 空串无法插入分隔符。
         let mut empty = engine();
@@ -2007,7 +2020,7 @@ mod tests {
         let mut engine = engine();
         type_text(&mut engine, "xi");
         engine.insert_separator();
-        assert_eq!(engine.composing_display(), "xi'");
+        assert_eq!(engine.composing_display(), "xi\u{2019}");
         // 退格先删 `'`，字母保留。
         assert!(engine.handle_backspace());
         assert_eq!(engine.composing_display(), "xi");
@@ -2024,10 +2037,10 @@ mod tests {
     fn 退格后自动分隔实时重算() {
         let mut typing = engine();
         type_text(&mut typing, "nihao");
-        assert_eq!(typing.composing_display(), "ni'hao");
+        assert_eq!(typing.composing_display(), "ni\u{2019}hao");
         // 删 o：niha 首选 [ni,ha]，边界 2 仍在。
         assert!(typing.handle_backspace());
-        assert_eq!(typing.composing_display(), "ni'ha");
+        assert_eq!(typing.composing_display(), "ni\u{2019}ha");
         // 删 a：nih 为残缺前缀，无完整切分 → 自动分隔消失。
         assert!(typing.handle_backspace());
         assert_eq!(typing.composing_display(), "nih");
@@ -2036,12 +2049,12 @@ mod tests {
         type_text(&mut manual, "xi");
         manual.insert_separator();
         type_text(&mut manual, "an");
-        assert_eq!(manual.composing_display(), "xi'an");
+        assert_eq!(manual.composing_display(), "xi\u{2019}an");
         manual.handle_backspace();
-        assert_eq!(manual.composing_display(), "xi'a");
+        assert_eq!(manual.composing_display(), "xi\u{2019}a");
         manual.handle_backspace();
         // plain=xi、手动分隔悬在串尾：退格先删 `'`。
-        assert_eq!(manual.composing_display(), "xi'");
+        assert_eq!(manual.composing_display(), "xi\u{2019}");
         manual.handle_backspace();
         assert_eq!(manual.composing_display(), "xi");
     }
@@ -2057,10 +2070,10 @@ mod tests {
         type_text(&mut separated, "xi");
         separated.insert_separator();
         type_text(&mut separated, "an");
-        assert_eq!(separated.composing_display(), "xi'an");
+        assert_eq!(separated.composing_display(), "xi\u{2019}an");
         assert_eq!(separated.candidates()[0].text, "西安");
         // 页眉组合串同步带分隔符。
-        assert_eq!(separated.candidate_ui_view().composition, "xi'an");
+        assert_eq!(separated.candidate_ui_view().composition, "xi\u{2019}an");
     }
 
     #[test]
@@ -2069,7 +2082,7 @@ mod tests {
         type_text(&mut typing, "nihao");
         // 仅自动分隔：候选首位不变（基线行为）。
         assert_eq!(typing.candidates()[0].text, "你好");
-        assert_eq!(typing.composing_display(), "ni'hao");
+        assert_eq!(typing.composing_display(), "ni\u{2019}hao");
         // 不可切分串保持原样显示。
         let mut other = engine();
         type_text(&mut other, "zzzz");

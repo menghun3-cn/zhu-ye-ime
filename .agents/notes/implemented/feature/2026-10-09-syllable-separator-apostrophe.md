@@ -111,6 +111,27 @@ User decisions (2026-10-09, four clarifying questions):
 - TSF: `classify_key` (`VK_OEM_7` → Separator, Shift → None) and `plan_action`
   (composing enters, idle/English releases).
 
+## Display glyph revision (T-134, user report "分隔符看起来是个逗号在上面")
+
+User (2026-10-09): the on-screen separator "looks like a comma at the top
+of the line" — it should read as a plain apostrophe like Sogou's, i.e. the
+**English-style** apostrophe. Root cause: T-128 displayed the keyboard
+straight apostrophe U+0027, but the header composing string is rendered in
+**SimSun bold** (candidate_window `create_font(…, "SimSun")`, FW_SEMIBOLD);
+SimSun's U+0027 glyph is a hook-topped vertical line, which reads as a
+floating comma at bold weights. Sogou/Microsoft Pinyin use an English curly
+apostrophe.
+
+Fix (T-134): new `pub const SYLLABLE_SEP_DISPLAY: char = '\u{2019}'` in
+`input.rs` (RIGHT SINGLE QUOTATION MARK, the typographically correct English
+apostrophe); `composing_display` pushes it on both paths. Display-only — the
+query key `composing` stays separator-free, `manual_seps` stay character
+indices, key semantics unchanged. Bonus fix: `preview_after_backspace`
+removed the trailing separator by byte slicing `[..len-1]`, which would have
+split a 3-byte U+2019 mid-character (potential panic); now `pop()`s by char.
+Tests assert `\u{2019}` escapes. Candidate-row pinyin (Segoe UI, dictionary
+data ASCII `'` for erhua `nǎ'er`) is untouched — its glyph reads fine.
+
 ## Related
 
 - [full pinyin segmentation core (T-007)](../../implemented/feature/2026-09-19-full-pinyin-segmentation-core.md) — `segment_all` and the first-plan rule this design builds on.
