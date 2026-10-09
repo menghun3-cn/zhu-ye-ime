@@ -647,6 +647,7 @@ impl CandidateWindowState {
         // T-139：分隔符（U+2019）在宋体下观感仍是"上逗号"，页眉组合串改为
         // 分段绘制——分隔符段用 Segoe UI 直撇渲染（`draw_header_mixed`），
         // 其余（字母/中文）仍用宋体主字体；含分隔符才走混合路径。
+        // T-140：页眉贴顶——两条路径都顶对齐（`draw_text_top`）。
         if header_text.contains(SYLLABLE_SEP_DISPLAY) {
             draw_header_mixed(
                 hdc,
@@ -657,7 +658,7 @@ impl CandidateWindowState {
                 self.sep_font,
             );
         } else {
-            draw_text(
+            draw_text_top(
                 hdc,
                 header_text,
                 metrics.header_text_rect_with(hint_alloc),
@@ -665,7 +666,7 @@ impl CandidateWindowState {
             );
         }
         if !self.view.pinyin_hint.is_empty() && self.view.pinyin_hint != header_text {
-            draw_text(
+            draw_text_top(
                 hdc,
                 &self.view.pinyin_hint,
                 metrics.header_hint_rect_with(hint_alloc),
@@ -1090,14 +1091,56 @@ fn draw_text(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
 /// `SYLLABLE_SEP_DISPLAY`（U+2019），仅绘制层替换为直撇。
 const SYLLABLE_SEP_APOSTROPHE: char = '\u{0027}';
 
+/// 顶对齐文本绘制（T-140）：字形带顶 = `rect.top`（基线 = rect.top +
+/// 当前字体 tmAscent），供页眉贴顶使用——与 `draw_text` 的区别仅在于
+/// GDI 侧的垂直起点（无 `DT_VCENTER` 即 `DT_TOP`）。emoji 彩色路径与
+/// `draw_text` 相同。
+fn draw_text_top(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
+    if text.is_empty() || rect.width() <= 0 || rect.height() <= 0 {
+        return;
+    }
+    if crate::color_text::contains_color_glyph(text) {
+        let font_size = current_font_size(hdc);
+        if let Some(bmp) = crate::color_text::render_color_text(
+            text,
+            rect.width(),
+            rect.height(),
+            font_size,
+            color,
+        ) {
+            alpha_blend_bitmap(hdc, &to_win_rect(rect), &bmp);
+            return;
+        }
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = to_win_rect(rect);
+    unsafe {
+        let mut tm = TEXTMETRICW::default();
+        if GetTextMetricsW(hdc, &mut tm).as_bool() {
+            // 绘制矩形收窄为当前字体的字形带（含 descent），避免把整行高
+            // 一并交给 `DrawTextW` 产生位置歧义；顶边保持 `rect.top`。
+            rect.bottom = rect.top.saturating_add(tm.tmHeight).min(rect.bottom);
+        }
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(color.to_colorref()));
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut rect,
+            DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
+}
+
 /// 页眉组合串分段绘制（T-139）：音节分隔符 U+2019 在宋体下仍是"上逗号"
 /// 观感（用户两轮反馈），改用西文 Segoe UI **直撇**（U+0027）单独绘制；
 /// 其余字母/中文段仍用宋体主字体，段间按实测宽度推进、共享同一基线。
 ///
 /// 基线统一：两种字体的 `tmHeight`/`tmAscent` 不同（Segoe UI 16px 的
 /// tmHeight≈19 高于宋体 16px 的 ≈16），不能直接各自 `DT_VCENTER`；以主字体
-/// 在 `rect` 内垂直居中推算公共基线，再按各自 ascent 回推段顶。取不到字体
-/// 度量时回退整串 `draw_text`。
+/// ascent 把字形带**顶对齐到 `rect.top`**（T-140：页眉贴顶 1px，不再垂直
+/// 居中），再按各自 ascent 回推段顶。取不到字体度量时回退整串
+/// `draw_text_top`。
 fn draw_header_mixed(
     hdc: HDC,
     text: &str,
@@ -1114,7 +1157,7 @@ fn draw_header_mixed(
         let mut main_tm = TEXTMETRICW::default();
         if !GetTextMetricsW(hdc, &mut main_tm).as_bool() {
             SelectObject(hdc, old);
-            draw_text(hdc, text, rect, color);
+            draw_text_top(hdc, text, rect, color);
             return;
         }
         let _ = SelectObject(hdc, sep_font.into());
@@ -1124,10 +1167,11 @@ fn draw_header_mixed(
             draw_text(hdc, text, rect, color);
             return;
         }
-        // 主字体在 rect 内垂直居中时的基线；分隔段/主段都对准它。
+        // 主字体字形带顶对齐 `rect.top`（T-140 贴顶）的基线；分隔段/主段
+        // 都对准它（各段顶 = 基线 − 各自字体 ascent）。
         let (m_h, m_a) = (main_tm.tmHeight, main_tm.tmAscent);
         let (s_h, s_a) = (sep_tm.tmHeight, sep_tm.tmAscent);
-        let baseline = rect.top + rect.height() / 2 + (m_a - m_h / 2);
+        let baseline = rect.top + m_a;
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF(color.to_colorref()));
         let mut x = rect.left;
