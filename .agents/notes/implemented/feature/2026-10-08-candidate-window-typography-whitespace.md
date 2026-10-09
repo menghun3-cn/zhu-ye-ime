@@ -149,6 +149,26 @@ Related: [candidate-window horizontal layout and pinyin typography](../../implem
 face, main text bold, row height) in place; the index right-alignment and dedicated
 `pin` theme key decisions are unchanged.
 
+## Pinyin glyph band uses real tmHeight (T-130, user report "拼音下方被截断")
+
+User report (2026-10-09): pinyin under some words was cut off at the bottom.
+Root cause: `pin_row_rect` sizes the pin band at `pin_font_height` (13px), but
+that is the **character height** (`lfHeight = -13`); Segoe UI 13px has a true
+`tmHeight` ≈ 16px. `DrawTextW` clips at the rect, so the descender (~3px) of
+letters like `g`/`j`/`p`/`q`/`y` was shaved off while the delimited row is
+still positioned from the 13px band.
+
+Fix (kept inside `candidate_window.rs`, layout constants unchanged): after
+creating the pin font, `query_font_tm_height` reads `GetTextMetricsW`"s
+`tmHeight` via a scratch compatible DC and the window state stores
+`pin_tm_height`. In `paint`, the pin **draw rect** and the derived main-text /
+marker tops all extend by `pin_tm_height - pin_font_height`, so the glyph band
+is the real tmHeight and the visual ink gap stays `pin_line_gap` (4px).
+
+Pixel proof (@96dpi light, `gāo fēng` demo row): before the fix the pin ink ran
+y=234..248 (clipped flat at the 13px line); after the fix it runs y=237..252
+(the `g` descender is intact) with the same 4px gap to the main text below.
+
 ## Show-pin toggle (T-127)
 
 User request: "设置里面可以设置候选框是否显示拼音及声调" — a settings toggle

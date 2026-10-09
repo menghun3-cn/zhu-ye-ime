@@ -15,14 +15,14 @@ use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
     CreateFontIndirectW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
     FillRect, GetCurrentObject, GetDC, GetDIBits, GetMonitorInfoW, GetObjectW, GetStockObject,
-    GetSysColor, InvalidateRect, MonitorFromWindow, ReleaseDC, RoundRect, SelectObject, SetBkMode,
-    SetTextColor, UpdateWindow, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_GRAYTEXT,
-    COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET,
-    DEFAULT_GUI_FONT, DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
-    DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC, HFONT, HGDIOBJ,
-    LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, OBJ_FONT, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
+    GetSysColor, GetTextMetricsW, InvalidateRect, MonitorFromWindow, ReleaseDC, RoundRect,
+    SelectObject, SetBkMode, SetTextColor, UpdateWindow, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE,
+    COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+    DEFAULT_CHARSET, DEFAULT_GUI_FONT, DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX,
+    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC, HFONT,
+    HGDIOBJ, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, OBJ_FONT, OUT_DEFAULT_PRECIS,
+    PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -361,6 +361,10 @@ struct CandidateWindowState {
     /// 拼音行小号字体（T-115 后续：候选词上方拼音小字）。
     pin_font: HFONT,
     pin_font_is_stock: bool,
+    /// 拼音字体真实行高 tmHeight（T-129B：`lfHeight` 负值=字符高 13px，而
+    /// Segoe UI 13px 的 tmHeight≈16px——拼音 rect 若按 13px 绘制，glyph 底部
+    /// descender 会被 `DrawTextW` 裁掉；字形带按真实 tmHeight 铺高后拼音完整）。
+    pin_tm_height: i32,
     theme_pref: ThemePreference,
     forced_dpi: Option<u32>,
     quit_on_destroy: bool,
@@ -386,6 +390,7 @@ impl CandidateWindowState {
             create_font(metrics.font_height, FW_SEMIBOLD.0 as i32, "SimSun");
         let (pin_font, pin_font_is_stock) =
             create_font(metrics.pin_font_height, FW_NORMAL.0 as i32, "Segoe UI");
+        let pin_tm_height = query_font_tm_height(pin_font);
         Self {
             view,
             theme: resolve_with_custom(options.theme, options.custom_theme.as_ref()),
@@ -394,6 +399,7 @@ impl CandidateWindowState {
             font_is_stock,
             pin_font,
             pin_font_is_stock,
+            pin_tm_height,
             theme_pref: options.theme,
             forced_dpi: options.dpi,
             quit_on_destroy,
@@ -427,6 +433,7 @@ impl CandidateWindowState {
             create_font(metrics.pin_font_height, FW_NORMAL.0 as i32, "Segoe UI");
         self.pin_font = pin_font;
         self.pin_font_is_stock = pin_font_is_stock;
+        self.pin_tm_height = query_font_tm_height(pin_font);
         self.metrics = metrics;
     }
 
@@ -530,13 +537,22 @@ impl CandidateWindowState {
                 // 同带垂直居中）。无拼音行保持原样（整行垂直居中）。
                 // T-126：拼音矩形由 `pin_row_rect` 计算——左缘与汉字列严格
                 // 对齐、宽度容纳拼音内容（超出汉字宽时不截断）。
-                let pin_bottom = pin_rect.bottom;
+                // T-129B：拼音字形带高度 = 真实 tmHeight（`pin_row_rect`
+                // 的 13px 字符高 < Segoe UI 13px 的 tmHeight≈16px，glyph
+                // 底部 descender 会被 `DrawTextW` 裁掉——这里把绘制矩形
+                // 与主文本顶边一起按 tmHeight 展开，拼音完整可见）。
+                let pin_over = self.pin_tm_height.saturating_sub(metrics.pin_font_height);
+                let pin_bottom = pin_rect.bottom.saturating_add(pin_over);
+                let pin_draw_rect = UiRect {
+                    bottom: pin_bottom,
+                    ..pin_rect
+                };
                 let main_top = pin_bottom.saturating_add(metrics.pin_line_gap);
                 let main_bottom = main_top.saturating_add(metrics.font_height);
                 let _ = unsafe { SelectObject(hdc, self.pin_font.into()) };
                 // T-122：拼音行颜色独立为 `theme.pin`；
                 // T-126：浅色主题下为辅助提示淡灰 #888888（Segoe UI 渲染声调）。
-                draw_text(hdc, &pin_text, pin_rect, self.theme.pin);
+                draw_text(hdc, &pin_text, pin_draw_rect, self.theme.pin);
                 let _ = unsafe { SelectObject(hdc, self.font.into()) };
                 (
                     UiRect {
@@ -562,7 +578,11 @@ impl CandidateWindowState {
             // （译文模式）仍整行垂直居中。
             let mut marker_rect = metrics.marker_rect(row_ui);
             if let Some(pin_rect) = pin_rect {
-                let main_top = pin_rect.bottom.saturating_add(metrics.pin_line_gap);
+                let pin_over = self.pin_tm_height.saturating_sub(metrics.pin_font_height);
+                let main_top = pin_rect
+                    .bottom
+                    .saturating_add(pin_over)
+                    .saturating_add(metrics.pin_line_gap);
                 marker_rect.top = main_top;
                 marker_rect.bottom = main_top.saturating_add(metrics.font_height);
             }
@@ -1112,6 +1132,28 @@ fn draw_text_right(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
     }
 }
 
+/// 查字体的真实行高 tmHeight（T-129B）：`lfHeight` 负值只是字符高（em），
+/// 多数西文字体 ascent+descent 更大（Segoe UI 13px ≈ 16px）；拼音字形带按
+/// tmHeight 铺高避免 descender 被 `DrawTextW` 裁剪。取不到时回退字符高。
+fn query_font_tm_height(font: HFONT) -> i32 {
+    unsafe {
+        let hdc = CreateCompatibleDC(None);
+        if hdc.is_invalid() {
+            return 0;
+        }
+        let old = SelectObject(hdc, font.into());
+        let mut tm = TEXTMETRICW::default();
+        let ok = GetTextMetricsW(hdc, &mut tm);
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteDC(hdc);
+        if ok.as_bool() {
+            tm.tmHeight
+        } else {
+            0
+        }
+    }
+}
+
 fn create_font(height: i32, weight: i32, face: &str) -> (HFONT, bool) {
     unsafe {
         let mut face_name = [0u16; 32];
@@ -1344,9 +1386,10 @@ fn system_colors() -> SystemColors {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bmp, resolve_theme, resolve_with_custom, spell_pinyin, system_high_contrast_on,
-        to_utf16_null, CandidateWindow, ThemePreference,
+        build_bmp, create_font, query_font_tm_height, resolve_theme, resolve_with_custom,
+        spell_pinyin, system_high_contrast_on, to_utf16_null, CandidateWindow, ThemePreference,
     };
+    use windows::Win32::Graphics::Gdi::FW_NORMAL;
 
     #[test]
     fn 拼音拼注逐字插音节() {
@@ -1380,6 +1423,18 @@ mod tests {
         assert_eq!(
             CandidateWindow::with_theme(ThemePreference::Dark).theme_preference(),
             ThemePreference::Dark
+        );
+    }
+
+    /// T-129B：拼音字体真实行高 tmHeight 必须大于"字符高"（`lfHeight` 负值），
+    /// 否则拼音 rect 按字符高绘制时 glyph 底部 descender 会被 `DrawTextW` 裁掉。
+    #[test]
+    fn 拼音字体真实行高超字符高() {
+        let (font, _) = create_font(13, FW_NORMAL.0 as i32, "Segoe UI");
+        let tm = query_font_tm_height(font);
+        assert!(
+            tm > 13,
+            "Segoe UI 13px 的 tmHeight 应大于字符高 13（实际 {tm}）"
         );
     }
 
