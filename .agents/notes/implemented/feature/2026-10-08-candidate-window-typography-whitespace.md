@@ -301,6 +301,16 @@ unchanged.
 Followed up in the same PR as the T-139 horizon; user eyeball pending on
 the real machine.
 
+*T-144 revision (2026-10-09, user "候选框最上面的拼音距离上面从1px改为2px"):*
+`header_top` 1 → 2dp. The header region (and every rect derived from it —
+row 0 top, `panel_size`) shifts down by exactly 1dp: 96dpi panel 490 → 491
+tall. Pixel probe (t144-candidate.bmp, same `--sep` input): header glyph
+ink y4..14 → **y5..15** (overall +1; border line still at y=0, band top
+y=2 + glyph top bearing ≈3px), i.e. the pinyin composition line now sits
+2px from the top of the window. New lib test「页眉贴顶距离为2px且整条候选带随之下移」
+locks `header_top == 2`, `header_rect().top == 2`, row-0 top = 27 and
+panel heights 39 (0 rows) / 491 (9 rows).
+
 ## Show-pin toggle (T-127)
 
 User request: "设置里面可以设置候选框是否显示拼音及声调" — a settings toggle
