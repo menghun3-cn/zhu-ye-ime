@@ -1,5 +1,10 @@
 #![cfg(windows)]
+#![windows_subsystem = "windows"]
 //! 竹叶输入法系统托盘（T-112 后续批六）。
+//!
+//! 进程子系统：`windows_subsystem = "windows"`（T-133）——托盘按 GUI
+//! subsystem 链接，登录自启/手动运行时**不分配控制台**；此前缺省 console
+//! subsystem，每次启动都闪现一个 cmd 命令行窗口。
 //!
 //! 输入法本体是 TSF DLL、被各宿主进程加载，无法自持托盘图标（批四已论证
 //! `Shell_NotifyIcon` 无常驻进程不可行）。本程序是**常驻的独立进程**

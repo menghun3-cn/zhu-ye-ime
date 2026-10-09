@@ -2,6 +2,11 @@
 //!
 //! 单实例：第二次唤起只激活已有窗口后退出（两次写 `config.json` 会互相覆盖）。
 //! `--shot` / `--shot-panel` 供验收取证：画出真实首帧后写出 BMP 并退出。
+//!
+//! 进程子系统：设置窗口是常驻 GUI，`windows_subsystem = "windows"` 保证
+//! 唤起/提权时不分配控制台（否则每次双击都会闪现 cmd 窗口，T-133）。
+
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 use std::process::ExitCode;

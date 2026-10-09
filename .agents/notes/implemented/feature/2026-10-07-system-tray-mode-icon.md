@@ -130,6 +130,23 @@ VM 整体 UI 验收 v4 共 57 项指标全绿——托盘单实例/三态图标�
 候选电池、Shift 双翻转 + 英文态直通上屏、设置入口窗口、
 T-091 哨兵日志（shift-up ToggleMode ×2 + Activate 行）实测。
 
+## GUI-subsystem for resident window exes (T-133, user report "托盘弹 cmd 窗口")
+
+User report (2026-10-09): starting `zhu-ye-tray.exe` pops a cmd console
+window. Root cause: neither `zhu-ye-tray` nor `zhu-ye-settings` declared
+`windows_subsystem = "windows"`, so both linked as **console subsystem** and
+Windows allocates a console on every launch (login autostart, manual run,
+settings re-invocation, runas elevation). The IME DLL and the dev-only
+bins (`candidate-demo`, `host_e2e`) are unaffected — DLLs have no subsystem,
+and the dev tools keep their consoles.
+
+Fix (T-133): `#![windows_subsystem = "windows"]` at the top of both
+`zhu-ye-tray/src/main.rs` and `zhu-ye-settings/src/main.rs` (settings uses
+`cfg_attr(windows, ...)` so non-Windows builds stay clean). Verified in the
+release PE headers: both exes now report `Subsystem = 2 (IMAGE_SUBSYSTEM_WINDOWS_GUI)`
+instead of 3. `--shot`/`--shot-panel` still write their BMPs — only the
+console goes away.
+
 ## Related
 
 - 批五回退（单档案语义——托盘出现前系统指示器"恒竹"的边界记录）：
