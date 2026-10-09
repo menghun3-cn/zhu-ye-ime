@@ -131,6 +131,21 @@ VM 整体 UI 验收 v4 共 57 项指标全绿——托盘单实例/三态图标�
 候选电池、Shift 双翻转 + 英文态直通上屏、设置入口窗口、
 T-091 哨兵日志（shift-up ToggleMode ×2 + Activate 行）实测。
 
+## 常驻窗口程序改 GUI 子系统（T-133，用户反馈"托盘弹 cmd 窗口"）
+
+用户 2026-10-09 反馈：启动 `zhu-ye-tray.exe` 会弹出一个 cmd 命令行窗口。
+根因：`zhu-ye-tray` 与 `zhu-ye-settings` 都没有声明
+`windows_subsystem = "windows"`，两者按**控制台子系统**链接，Windows 在
+每次启动（登录自启、手动运行、设置重复唤起、runas 提权）时都分配一个新
+控制台。输入法 DLL 与仅开发用 bin（`candidate-demo`、`host_e2e`）不受
+影响——DLL 无子系统概念，开发工具保留控制台便于看输出。
+
+修复（T-133）：两个 `src/main.rs` 顶部各加 `#![windows_subsystem = "windows"]`
+（settings 用 `cfg_attr(windows, ...)`，非 Windows 编译无告警）。release
+PE 头验证通过：两个 exe 的 `Subsystem` 字段现为 2
+（IMAGE_SUBSYSTEM_WINDOWS_GUI），不再是 3。`--shot`/`--shot-panel` 仍正常
+出图——只是控制台消失。
+
 ## 关联
 
 - 批五回退（单档案语义——托盘出现前系统指示器"恒竹"的边界记录）：
