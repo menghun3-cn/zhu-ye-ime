@@ -1036,6 +1036,12 @@ pub struct BaseStats {
     pub polyphone_applied: usize,
     /// 多音缺读补丁跳过条数（字不在表/读音非法/组合已存在/表内重复）。
     pub polyphone_skipped: usize,
+    /// 日常口语句式种子表入包条数（T-145：data/patches/daily-phrases.tsv）。
+    pub daily_seed: usize,
+    /// 系词短语规则枚举入包条数（T-145：COPULA_PREFIXES × 「是」）。
+    pub daily_copula: usize,
+    /// 日常短语候选跳过条数（已在词库保留原词频/注音失败/超长/非 CJK）。
+    pub daily_skipped: usize,
     /// 规范字集（kTGHZ 8,102 字，约等于通用规范汉字表 8,105）中出现在 base 的字占比。
     pub char_set_coverage_pct: f64,
     /// 最终词条总数。
@@ -1152,6 +1158,31 @@ const TRANSLATION_PATCHES: &[(&str, &str)] = &[
 /// 生成（用户点名示例词，与「声称」同音竞争首位）也在此提频。
 const WORD_FREQ_PATCHES: &[(&str, u32)] = &[("输入框", 2500), ("生成", 4600)];
 
+/// 日常口语句式频率档（T-145）：种子表短语统一词频。高于现有「逆势」(2850)
+/// 等 nishi 候选，低于单字「你」(6690)/「是」(7160) 等绝对高频，使口语
+/// 短语处于"组内首候选"又不至于压过重要实词。
+const DAILY_PHRASE_FREQ: u32 = 4200;
+/// 系词短语规则枚举统一频率档（T-145）：略低于种子表（种子表人工甄选更稳）。
+const COPULA_PHRASE_FREQ: u32 = 4000;
+
+/// 系词短语前置白名单（T-145）：与「是」拼接生成日常高频短语
+/// （你是/我是/其实是/并不是…）。此类"语法短语"在 CEDICT/jieba/wordfreq
+/// 中均以单字形式存在、无组合数据可统计，按规则枚举生成并给统一频率档。
+/// 候选质量依赖白名单——仅收集口语高频人称/指示/疑问代词与副词，避免噪音。
+const COPULA_PREFIXES: &[&str] = &[
+    // 人称 / 指示 / 疑问代词（派生 2 字或 3 字组）。
+    "你", "我", "他", "她", "它", "您", "这", "那", "谁", "咱", "大家", "自己", "别人", "我们",
+    "你们", "他们", "她们", "这个", "那个",
+    // 常用副词 / 语气字（派生 2-3 字组，"也是/还有就是/反正是"等口语）。
+    "不", "就", "还", "都", "也", "又", "才", "只", "刚", "总", "更", "最", "挺", "真", "别",
+    "其实", "原来", "当然", "果然", "竟然", "居然", "到底", "究竟", "反正", "总算", "好在", "幸好",
+    "难道", "恐怕", "大概", "也许", "可能", "一定", "肯定", "应该", "必须", "可以", "需要", "打算",
+    "正在", "已经", "终于", "终于", "立刻", "马上", "暂时", "一直", "经常", "有时", "偶尔", "突然",
+    "忽然", "渐渐", "慢慢", "常常", "从来", "本来", "平时", "通常", "照样", "依旧", "仍然", "不断",
+    "反复", "确实", "的确", "仿佛", "似乎", "好像", "或许", "几乎", "简直", "尤其", "特别", "非常",
+    "十分", "比较", "相当", "有点", "有些",
+];
+
 /// 词性精修表（T-115 后续 #6）：jieba 词性标注对个别常用词有误
 /// （「谢谢」标 nr 人名、「想法」标 v 动词、「总是/可以」标 c 连词、
 /// 「用」标 p 介词），此处按传统词性修正，拼入译文前显示。
@@ -1163,7 +1194,84 @@ const WORD_POS_PATCHES: &[(&str, &str)] = &[
     ("用", "v."),
 ];
 
-/// 构建基础包：骨架（xdhyc 全部）→ CEDICT 词级兜底 → jieba 扩充（纯 CJK、频率标定 ≥ min_score）。
+/// 解析 T-145 日常口语句式种子表（`data/patches/daily-phrases.tsv`）。
+/// 每行一个纯 CJK 短语（2-5 字），`#` 注释与空行忽略，重复按首次出现；
+/// 拼音列不维护——构建期统一用 `tables.annotate` 注音，避免人工拼写漂移。
+pub fn load_daily_phrases(path: &Path) -> Result<Vec<String>, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("读取日常短语种子表失败（{}）: {error}", path.display()))?;
+    let mut out = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let word = line.split('\t').next().unwrap_or("").trim();
+        let width = word.chars().count();
+        if !is_cjk_word(word) || !(2..=5).contains(&width) {
+            return Err(format!(
+                "daily-phrases.tsv 第 {} 行非法（须为 2-5 字纯 CJK）: {word}",
+                index + 1
+            ));
+        }
+        if out.iter().any(|existing| existing == word) {
+            continue;
+        }
+        out.push(word.to_owned());
+    }
+    Ok(out)
+}
+
+/// 枚举"X是"系词短语（T-145）：`COPULA_PREFIXES` 白名单 × 「是」。
+/// 返回全部组合串（≤4 字、纯 CJK 由调用方过滤入包）。
+fn copula_phrases() -> Vec<String> {
+    let mut out = Vec::new();
+    for prefix in COPULA_PREFIXES {
+        let word = format!("{prefix}是");
+        if word.chars().count() <= 4 && is_cjk_word(&word) {
+            out.push(word);
+        }
+    }
+    out
+}
+
+/// 把日常短语候选并入 merged（T-145）：已有词保留原词频不覆盖（跳过计数），
+/// 新词以候选自带频率入包；注音失败/非 CJK/超长跳过。入包按来源分组计数，
+/// 返回 `(种子表入包, 枚举入包, 跳过)`。
+fn merge_daily_phrases(
+    merged: &mut HashMap<String, (String, u32, Option<String>)>,
+    annotate: impl Fn(&str) -> Option<String>,
+    seed: &[(String, u32)],
+    copula: &[(String, u32)],
+) -> (usize, usize, usize) {
+    let mut seed_count = 0usize;
+    let mut copula_count = 0usize;
+    let mut skipped = 0usize;
+    for (word, frequency) in seed.iter().chain(copula) {
+        if merged.contains_key(word) {
+            skipped += 1;
+            continue;
+        }
+        if !is_cjk_word(word) || word.chars().count() > 4 {
+            skipped += 1;
+            continue;
+        }
+        let Some(pinyin) = annotate(word) else {
+            skipped += 1;
+            continue;
+        };
+        merged.insert(word.clone(), (pinyin, *frequency, None));
+        if copula.iter().any(|(w, _)| w == word) {
+            copula_count += 1;
+        } else {
+            seed_count += 1;
+        }
+    }
+    (seed_count, copula_count, skipped)
+}
+
+/// 构建基础包：骨架（xdhyc 全部）→ CEDICT 词级兜底 → jieba 扩充（纯 CJK、
+/// 频率标定 ≥ min_score）→ 日常高频短语扩充（T-145：种子表 + 系词枚举）。
 /// 词频：wordfreq 主源（zipf×1000）优先，未命中取 jieba 标定值，再未命中按 1。
 /// 输出 `data/artifacts/base.zyct`。
 pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
@@ -1226,7 +1334,7 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
     }
 
     // b) 骨架 + CEDICT 词条：CEDICT 独有词全量入包（拼音/词频/译文均由
-    // CEDICT 兜底）；骨架已有的词不重复插入，译文统一由 d) 段补齐
+    // CEDICT 兜底）；骨架已有的词不重复插入，译文统一由 e) 段补齐
     // （T-115 后续修复：此前骨架词直接跳过，`是` 等高频字词无译文）。
     let mut cedict_words = 0usize;
     for (word, (pinyin, _)) in &cedict {
@@ -1262,7 +1370,33 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         jieba_expansion += 1;
     }
 
-    // d) 译文补齐（T-115 后续）：骨架/jieba/CEDICT 独有词中无译文的，一律用
+    // d) 日常高频短语扩充（T-145）：系词短语规则枚举 + 日常口语句式种子表。
+    //
+    // 背景：CEDICT/jieba/wordfreq 均以单字/整词收录，"你是/我是/其实是"这类
+    // 语法短语被语料拆散（wordfreq 空格分词、globalvoices 按词 token 化），
+    // 无组合数据可统计——`freq 你是` 实测不在 wordfreq、globalvoices 相邻单字
+    // 全语料仅 97 对。搜狗等输入法的"日常高频短语"来自用户打字语料聚合；
+    // 自学习词库（user_words.json）是"先有鸡"机制：候选里没有的词永远打不出、
+    // 学不到。本段以人工种子表（data/patches/daily-phrases.tsv）+ 白名单枚举
+    // 等价补齐"首次可发现性"，使 nishi 首候选即「你是」；统一频率档高于
+    // 「逆势」(2850) 等现有首候选，低于绝对高频单字。已有词跳过保留原词频。
+    let daily_phrases = load_daily_phrases(&root.join("data/patches/daily-phrases.tsv"))?;
+    let daily_seed_candidates: Vec<(String, u32)> = daily_phrases
+        .iter()
+        .map(|word| (word.clone(), DAILY_PHRASE_FREQ))
+        .collect();
+    let daily_copula_candidates: Vec<(String, u32)> = copula_phrases()
+        .iter()
+        .map(|word| (word.clone(), COPULA_PHRASE_FREQ))
+        .collect();
+    let (daily_seed, daily_copula, daily_skipped) = merge_daily_phrases(
+        &mut merged,
+        |word| tables.annotate(word),
+        &daily_seed_candidates,
+        &daily_copula_candidates,
+    );
+
+    // e) 译文补齐（T-115 后续）：骨架/jieba/CEDICT/日常短语独有词中无译文的，一律用
     // CEDICT 首义（净化后）补上；精修表优先覆盖 CEDICT 首义不宜的常用基础词。
     // 统计无译文词在补丁前后的变化：骨架高频字词此前整批缺译文，
     // 译文层（Tab 切换）过滤无译义词，导致"是/我/你/谢谢"都不出现在译文层。
@@ -1286,7 +1420,7 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         }
     }
 
-    // e) 译文词性标注（T-115 后续，用户点名；T-131 起按义标注）：拼音→英文
+    // f) 译文词性标注（T-115 后续，用户点名；T-131 起按义标注）：拼音→英文
     // 译文前显示传统词性。词性取自 jieba 词性列（load_jieba_pos），词性精修表
     // （WORD_POS_PATCHES）优先覆盖 jieba 误标；映射为传统英文缩写拼入译文显示串
     // （如「生成」→ "v. to generate"，「你好」→ "int. hello; int. hi"）；
@@ -1331,7 +1465,7 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         }
         entries.push(entry);
     }
-    // f) 多音缺读补丁（T-056 补丁表，T-129 起产品链 base 生效）：
+    // g) 多音缺读补丁（T-056 补丁表，T-129 起产品链 base 生效）：
     //    此前补丁只在 import 管线（real.zyct），base 包「谁」仅 shei、「熟」仅 shu，
     //    用户主诉输入 shui 候选无「谁」。与 import 共用 apply_patch_entries，
     //    口径一致：只增不改、词频继承该字现有最高、不引规范表外字形。
@@ -1375,6 +1509,9 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         pos_labeled,
         polyphone_applied,
         polyphone_skipped,
+        daily_seed,
+        daily_copula,
+        daily_skipped,
         char_set_coverage_pct,
         entry_count: entries.len(),
         file_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
@@ -1386,7 +1523,7 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         stats.file_size as f64 / 1_048_576.0
     );
     println!(
-        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，译文补齐 {}，词性标注 {}（T-115 后续），多音补丁 {}/跳过 {}（T-129），规范字集覆盖 {:.1}%",
+        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，译文补齐 {}，词性标注 {}（T-115 后续），多音补丁 {}/跳过 {}（T-129），日常短语 种子 {} + 枚举 {}（跳过 {}，T-145），规范字集覆盖 {:.1}%",
         stats.skeleton_words,
         stats.wordfreq_hits,
         stats.wordfreq_hit_pct,
@@ -1396,6 +1533,9 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         stats.pos_labeled,
         stats.polyphone_applied,
         stats.polyphone_skipped,
+        stats.daily_seed,
+        stats.daily_copula,
+        stats.daily_skipped,
         stats.char_set_coverage_pct
     );
     println!("内容 SHA-256: {}", stats.sha256);
@@ -1917,5 +2057,129 @@ mod tests {
         let (pinyin, translation) = &map["简体"];
         assert_eq!(pinyin, "jianti");
         assert_eq!(translation.as_deref(), Some("simplified"));
+    }
+
+    #[test]
+    fn t145_种子表解析_注释空行非法行与去重() {
+        let dir = std::env::temp_dir().join("zhu-ye-dict-t145-seed");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("daily-phrases.tsv");
+        std::fs::write(
+            &path,
+            "# 注释\n你是\n我是\t冗余列忽略\n\n坏词abc\n你是\n\n这\n", // "这"不足 2 字应报错
+        )
+        .expect("写种子表失败");
+        let result = load_daily_phrases(&path);
+        // "这"（1 字）触发非法行错误。
+        assert!(result.is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn t145_种子表解析_合法表按序去重() {
+        let dir = std::env::temp_dir().join("zhu-ye-dict-t145-seed2");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("daily-phrases.tsv");
+        std::fs::write(&path, "# 注释\n你是\n\n我是\n你是\n怎么了\n什么时候\n")
+            .expect("写种子表失败");
+        let words = load_daily_phrases(&path).expect("解析失败");
+        assert_eq!(words, vec!["你是", "我是", "怎么了", "什么时候"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn t145_系词枚举_含你我是且全部短纯中文() {
+        let phrases = copula_phrases();
+        assert!(phrases.iter().any(|w| w == "你是"));
+        assert!(phrases.iter().any(|w| w == "我是"));
+        assert!(phrases.iter().any(|w| w == "其实是"));
+        assert!(phrases.iter().any(|w| w == "应该是"));
+        for word in &phrases {
+            assert!(is_cjk_word(word), "非纯 CJK: {word}");
+            assert!(word.chars().count() <= 4, "超长: {word}");
+        }
+    }
+
+    #[test]
+    fn t145_短语入包_已有词保留新词按源计频() {
+        let mut merged = HashMap::from([
+            (
+                "逆势".to_owned(),
+                ("nishi".to_owned(), 2850, Some("n.".to_owned())),
+            ),
+            ("是不是".to_owned(), ("shibushi".to_owned(), 5320, None)),
+        ]);
+        let annotate = |word: &str| -> Option<String> {
+            match word {
+                "你是" => Some("nishi".to_owned()),
+                "我是" => Some("woshi".to_owned()),
+                "他是" => Some("tashi".to_owned()),
+                "谁是" => Some("sheishi".to_owned()),
+                _ if word == "无法注音" => None,
+                _ => None,
+            }
+        };
+        let seed: Vec<(String, u32)> = [("你是", DAILY_PHRASE_FREQ), ("我是", DAILY_PHRASE_FREQ)]
+            .into_iter()
+            .map(|(w, f)| (w.to_owned(), f))
+            .collect();
+        let copula: Vec<(String, u32)> =
+            [("他是", COPULA_PHRASE_FREQ), ("谁是", COPULA_PHRASE_FREQ)]
+                .into_iter()
+                .map(|(w, f)| (w.to_owned(), f))
+                .collect();
+        let (seed_count, copula_count, skipped) =
+            merge_daily_phrases(&mut merged, annotate, &seed, &copula);
+        assert_eq!((seed_count, copula_count), (2, 2));
+        // 不在候选里的跳过计数 = 0。
+        assert_eq!(skipped, 0);
+        // 已有词保留原词频（"是不是" 5320 未被覆盖）。
+        assert_eq!(merged["是不是"], ("shibushi".to_owned(), 5320, None));
+        // 新词按来源频率入包。
+        assert_eq!(
+            merged["你是"],
+            ("nishi".to_owned(), DAILY_PHRASE_FREQ, None)
+        );
+        assert_eq!(
+            merged["我是"],
+            ("woshi".to_owned(), DAILY_PHRASE_FREQ, None)
+        );
+        assert_eq!(
+            merged["他是"],
+            ("tashi".to_owned(), COPULA_PHRASE_FREQ, None)
+        );
+        assert_eq!(
+            merged["谁是"],
+            ("sheishi".to_owned(), COPULA_PHRASE_FREQ, None)
+        );
+        assert_eq!(merged.len(), 6);
+    }
+
+    #[test]
+    fn t145_短语入包_已有词与无法注音跳过() {
+        let mut merged = HashMap::from([("你是".to_owned(), ("nishi".to_owned(), 5000, None))]);
+        let seed: Vec<(String, u32)> = [("你是", DAILY_PHRASE_FREQ)]
+            .into_iter()
+            .map(|(w, f)| (w.to_owned(), f))
+            .collect();
+        let copula: Vec<(String, u32)> = [("无法注音", COPULA_PHRASE_FREQ)]
+            .into_iter()
+            .map(|(w, f)| (w.to_owned(), f))
+            .collect();
+        let (seed_count, copula_count, skipped) = merge_daily_phrases(
+            &mut merged,
+            |word| {
+                if word == "你是" {
+                    Some("nishi".to_owned())
+                } else {
+                    None
+                }
+            },
+            &seed,
+            &copula,
+        );
+        assert_eq!((seed_count, copula_count, skipped), (0, 0, 2));
+        // 「你是」已有（5000）不被 4200 覆盖。
+        assert_eq!(merged["你是"], ("nishi".to_owned(), 5000, None));
     }
 }
