@@ -1872,8 +1872,19 @@ fn candidate_ui_item_tone(candidate: &Candidate, tone_spaced: &str) -> Candidate
 /// 首选切分的全部音节边界（T-128）：取 `segment_all` 首方案（最长匹配优先），
 /// 返回方案内除串首/串尾外的所有切分点（如 `nihao` → `[2]`，`xian` → `[]`）；
 /// 无法切分时返回空。用于自动分隔符显示（全部音节边界都显式标 `'`）。
+///
+/// T-141：整串无法完全切分时**退化为最长可切分前缀**——从串尾逐步收窄到
+/// 第一个能完整切分的最长前缀，取同一 `segment_all` 首方案（DP 顺序一致，
+/// 保证前缀边界与整串可切分时完全相同）；尾部残段不产生新边界，整体跟在
+/// 最后一个音节后。例：`youshenmeshimah` 无法切分，最长可切分前缀为
+/// `youshenmeshima` → 边界仍 `[3,7,9,12]`，显示 `you'shen'me'shi'mah`。
+/// 完全切不动的串（如 `zzzz`）仍返回空、原样显示。
 fn preferred_segment_boundaries(table: &SyllableTable, input: &str) -> Vec<usize> {
-    let Some(segments) = segment_all(table, input).into_iter().next() else {
+    let Some(segments) = segment_all(table, input)
+        .into_iter()
+        .next()
+        .or_else(|| longest_segmentable_prefix(table, input))
+    else {
         return Vec::new();
     };
     if segments.len() < 2 {
@@ -1886,6 +1897,14 @@ fn preferred_segment_boundaries(table: &SyllableTable, input: &str) -> Vec<usize
         boundaries.push(position);
     }
     boundaries
+}
+
+/// 最长可切分前缀的首选切分（T-141）：从 `len-1` 递减试探完整切分，命中
+/// 即返回该前缀的 `segment_all` 首方案；无任何可切分前缀时返回 `None`。
+fn longest_segmentable_prefix(table: &SyllableTable, input: &str) -> Option<Vec<String>> {
+    (1..input.len())
+        .rev()
+        .find_map(|len| segment_all(table, &input[..len]).into_iter().next())
 }
 
 /// 拼音分词提示；使用标准音节表生成空格分隔的拼音，无法切分时保持原串。
@@ -2084,6 +2103,58 @@ mod tests {
         let mut other = engine();
         type_text(&mut other, "zzzz");
         assert_eq!(other.composing_display(), "zzzz");
+    }
+
+    #[test]
+    fn 尾音节缺字身时手动分隔符保留() {
+        // 用户输入 B：you'shen'me'shi'mah（末尾 'ma' 后多一个 h）——
+        // 整串无法切分时手动分隔符必须原样保留（不再被"无自动边界"吞掉）。
+        for tail in ["ma", "mah"] {
+            let mut engine = engine();
+            for seg in ["you", "shen", "me", "shi"] {
+                type_text(&mut engine, seg);
+                assert!(engine.insert_separator(), "分隔符应插入（段 {seg} 后）");
+            }
+            type_text(&mut engine, tail);
+            assert_eq!(
+                engine.composing_display(),
+                format!("you\u{2019}shen\u{2019}me\u{2019}shi\u{2019}{tail}"),
+                "尾音节 {tail}（无法切分）应保留全部手动分隔符"
+            );
+            assert_eq!(engine.composing(), format!("youshenmeshi{tail}"));
+        }
+    }
+
+    #[test]
+    fn 尾部残段时自动分隔退化为最长可切分前缀() {
+        // 用户反馈（T-141）：纯字母输入 you'shen'me'shi'ma（未按 `'`，分隔为
+        // T-128 自动边界显示）后继续追加 h → youshenmeshimah 无法完整切分，
+        // 自动边界整体消失，页眉退成无分隔连续串。期望：按**最长可切分前缀**
+        // （与首选切分同源）保留前端全部分隔，尾部残段不产生新边界。
+        let mut sut = engine();
+        type_text(&mut sut, "youshenmeshima");
+        assert_eq!(
+            sut.composing_display(),
+            "you\u{2019}shen\u{2019}me\u{2019}shi\u{2019}ma",
+            "A 场景（可完整切分）自动边界全显示"
+        );
+        // B：追加 h 后整串不可切分，仍应保留 A 的全部分隔（前端边界不变）。
+        type_text(&mut sut, "h");
+        assert_eq!(
+            sut.composing_display(),
+            "you\u{2019}shen\u{2019}me\u{2019}shi\u{2019}mah",
+            "B 场景尾部残段 h：自动分隔退化为最长可切分前缀 youshenmeshima 的边界"
+        );
+        // 完全不可切分串（任一前缀都切不动）保持原样（既有 zzzz 基线）。
+        let mut other = engine();
+        type_text(&mut other, "zzzz");
+        assert_eq!(other.composing_display(), "zzzz");
+        // 残段较长也整体保留（xianjingd：xian|jing + 残 d）。
+        let mut third = engine();
+        type_text(&mut third, "xianjingd");
+        let display = third.composing_display();
+        assert_eq!(display, "xian\u{2019}jingd");
+        assert_eq!(third.composing(), "xianjingd");
     }
 
     #[test]

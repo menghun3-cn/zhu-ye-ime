@@ -157,6 +157,38 @@ the glyph body to a 1–3 px fringe. Verified on the demo: `xi'an` renders
 unchanged spacing; light/dark themes both clean. Not applied to candidate-row
 pinyin (`nǎ'er`) — that is already fine.
 
+## Auto boundaries degrade to the longest segmentable prefix (T-141, user: "分隔符被系统移除")
+
+User typed the plain letter string `youshenmeshimah` (A `you'shen'me'shi'ma`
+then one more `h`; they never pressed `'`). The header showed
+`you'shen'me'shi'ma` for A but a separator-free `youshenmeshimah` for B.
+
+Root cause: A's separators were **auto** boundaries (T-128 decision ③). A
+reproducing unit test confirmed `composing_display()` gives
+`you'shen'me'shi'ma` for `youshenmeshima` but `youshenmeshimah` (no separators)
+after appending `h` — `preferred_segment_boundaries` returns empty when
+`segment_all` cannot split the whole string, so *every* auto boundary vanished
+on the first mistyped trailing key.
+
+Key constraint: `segment_all` enumerates all splits via DP in ascending
+end/start position order, and the A-case first plan is `you|shen|me|shi|ma`
+because `me` (ends at 9) is completed before `men` (ends at 10) — *not*
+longest-match. A naive longest-greedy re-segmenter would flip the boundary to
+`men`, diverging from the segmentable case. The fix therefore reuses the same
+DP first-plan semantics: when the whole string cannot be segmented,
+`preferred_segment_boundaries` falls back to `longest_segmentable_prefix` —
+walk `len-1` downwards and take the longest prefix that segments fully,
+returning its first plan; the trailing residue is kept as-is after the last
+syllable and produces no new boundary. `youshenmeshimah` → prefix
+`youshenmeshima` → boundaries still `[3,7,9,12]` → displays
+`you'shen'me'shi'mah`. Strings with no segmentable prefix at all (`zzzz`)
+still return empty and display verbatim. Display layer only — `composing`,
+`manual_seps`, and constrained-candidate logic are untouched; manual
+separators (T-128 decision ②) were never affected (their regression test
+keeps passing). This partially supersedes the T-128 wording "无法切分时返回空"
+in this note's Decision section, which now applies only to fully
+unsegmentable strings.
+
 ## Related
 
 - [full pinyin segmentation core (T-007)](../../implemented/feature/2026-09-19-full-pinyin-segmentation-core.md) — `segment_all` and the first-plan rule this design builds on.

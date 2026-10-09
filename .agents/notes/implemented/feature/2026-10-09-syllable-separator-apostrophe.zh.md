@@ -128,6 +128,31 @@ T-134 把显示字形换成 U+2019，但页眉字体是宋体，U+2019 在宋体
 （位于 x-height 上方）· 宋体 `a n`，间距不变；浅/深主题均正常。候选行拼音
 （`nǎ'er`）不受影响。
 
+## 自动分隔退化为最长可切分前缀（T-141，用户"分隔符被系统移除"）
+
+用户输入的是纯字母串 `youshenmeshimah`（先输 A `you'shen'me'shi'ma`、再
+多敲一个 h；从未按过 `'` 键）。现象：A 页眉完整 `you'shen'me'shi'ma`，
+B 页眉退成无分隔连续串 `youshenmeshimah`。
+
+根因：A 的分隔是**自动**边界（T-128 决策③）。复现单测确认
+`composing_display()` 对 `youshenmeshima` 输出 `you'shen'me'shi'ma`，但
+追加 h 后输出 `youshenmeshimah`（无分隔）——`preferred_segment_boundaries`
+在 `segment_all` 无法整串切分时返回空，于是**全部**自动边界在末尾误击
+第一个键时就整体消失。
+
+关键约束：`segment_all` 用 DP 按结束/起始位置**递增**顺序枚举全部方案，
+A 场景首方案是 `you|shen|me|shi|ma`——因为 `me`（结束于 9）先于 `men`
+（结束于 10）完成，**不是最长匹配**。若用朴素最长贪心重切会把边界翻成
+`men`，与可切分情形不一致。因此修复复用同一 DP 首方案语义：整串切不动
+时 `preferred_segment_boundaries` 退化到新辅助 `longest_segmentable_prefix`
+——从 `len-1` 递减取第一个能完整切分的最长前缀，返回其首方案；尾部残段
+整体跟在最后一音节之后、不产生新边界。`youshenmeshimah` → 前缀
+`youshenmeshima` → 边界仍 `[3,7,9,12]` → 显示 `you'shen'me'shi'mah`。
+完全没有可切分前缀的串（`zzzz`）仍返回空、原样显示。纯显示层——
+`composing` / `manual_seps` / 候选约束逻辑零改动；手动分隔符（T-128
+决策②）一直不受影响（其回归测试保持通过）。本节约唐 T-128 节"无法切分
+时返回空"的表述——该口径现只适用于完全切不动的串。
+
 ## Related
 
 - [全拼切分核心（T-007）](../../implemented/feature/2026-09-19-full-pinyin-segmentation-core.zh.md) —— 本设计依赖的 `segment_all` 与首方案规则。
