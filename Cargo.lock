@@ -1317,6 +1317,7 @@ dependencies = [
  "serde",
  "serde_json",
  "windows",
+ "winresource",
  "zhu-ye-core",
  "zhu-ye-ui",
 ]

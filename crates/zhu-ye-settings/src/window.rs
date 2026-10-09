@@ -25,14 +25,15 @@ use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW, GetClientRect,
-    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, LoadCursorW, PostMessageW,
-    PostQuitMessage, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA,
-    IDC_ARROW, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
-    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED,
-    WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW,
+    GetClassLongPtrW, GetClientRect, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
+    GetWindowTextW, LoadCursorW, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GCLP_HICON, GWLP_USERDATA, IDC_ARROW,
+    MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE,
+    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE,
+    WM_PAINT, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_USER, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW,
 };
 use zhu_ye_core::identity::DICTIONARY_FILE_NAME;
 use zhu_ye_core::{ModeChoice, ThemeChoice};
@@ -55,8 +56,8 @@ use crate::wide::to_utf16;
 
 /// 窗口类名；第二条实例用它查找已有窗口。
 pub const WINDOW_CLASS_NAME: &str = "ZhuYeSettingsWindow";
-/// 窗口标题。
-pub const WINDOW_TITLE: &str = "竹叶输入法 设置";
+/// 窗口标题（T-142：去掉" 设置"后缀，标题栏直接显示品牌名）。
+pub const WINDOW_TITLE: &str = "竹叶输入法";
 
 /// 后台更新器任务完成的回执消息（spawn 的线程完成后投递，结果经 mpsc 取回）。
 const WM_UPDATER_DONE: u32 = WM_USER + 0x120;
@@ -401,6 +402,11 @@ pub fn run(options: RunOptions) -> Result<(), String> {
                 return Err(format!("创建设置窗口失败: {error}"));
             }
         };
+
+        // T-142：本窗口 `WM_NCCREATE` 未转发 `DefWindowProcW`（自定义绘制样板），
+        // 窗口内部标题缓冲区不会从创建参数初始化（GetWindowText 恒空）；这里在
+        // 创建完成后显式写入标题，标题栏才显示 "竹叶输入法"。
+        let _ = SetWindowTextW(hwnd, PCWSTR(title.as_ptr()));
 
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
@@ -2103,7 +2109,19 @@ unsafe fn paint(hwnd: HWND, state: &mut WindowState) {
                         if let Some(path) = state.shot_path.clone() {
                             match state.back.save_bmp(width, height, &path) {
                                 Ok(()) => {
-                                    eprintln!("zhu-ye-settings: 截图已写出 {}", path.display())
+                                    // T-142 验收自证：进程内读自己窗口标题与类图标
+                                    // （跨进程 GetWindowText 受会话/桌面隔离影响，不可靠），
+                                    // 标题栏与任务栏图标均由这两者决定。
+                                    let mut buf = [0u16; 64];
+                                    let n = GetWindowTextW(hwnd, &mut buf);
+                                    let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+                                    let class_icon = GetClassLongPtrW(hwnd, GCLP_HICON);
+                                    eprintln!(
+                                        "zhu-ye-settings: 截图已写出 {}（标题=[{}]，类图标=0x{:X}）",
+                                        path.display(),
+                                        title,
+                                        class_icon as usize
+                                    );
                                 }
                                 Err(error) => eprintln!("zhu-ye-settings: {error}"),
                             }
@@ -2972,13 +2990,22 @@ fn register_window_class(instance: HINSTANCE) -> Result<(), String> {
     }
     let class = to_utf16(WINDOW_CLASS_NAME);
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default();
+    // T-142：窗口图标取模块资源中的品牌"竹"图标（build.rs 用 winresource
+    // 嵌入 zhu.ico，resource id 1）——标题栏左侧与任务栏隐藏出竹叶 LOGO；
+    // 加载失败时回退空图标（与改动前行为一致，不阻断窗口启动）。
+    //
+    // `PCWSTR(1)` 是 MAKEINTRESOURCEW(1)：低位 word 为资源 ID 的伪指针，
+    // 不是地址，不能用 `ptr::dangling`（其值 2 会把资源 ID 变成 2）。
+    #[allow(clippy::manual_dangling_ptr)] // MAKEINTRESOURCEW(1) 语义需要指针值 1
+    let icon_name = PCWSTR(1usize as *const u16);
+    let icon = unsafe { LoadIconW(Some(instance), icon_name) }.unwrap_or_default();
     let class_def = WNDCLASSW {
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(wnd_proc),
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: instance,
-        hIcon: Default::default(),
+        hIcon: icon,
         hCursor: cursor,
         hbrBackground: HBRUSH::default(),
         lpszMenuName: PCWSTR::null(),

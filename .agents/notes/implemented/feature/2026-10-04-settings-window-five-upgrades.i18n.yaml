@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object README.md
 #   git hash-object README.zh.md
-2026-10-04-settings-window-five-upgrades.md: 822fd6157e5d7861f34a26ff7d4e822836c67215
-2026-10-04-settings-window-five-upgrades.zh.md: 2c6d5b58d6c01b3ace716252bbd53422d3734550
+2026-10-04-settings-window-five-upgrades.md: 18eccd621f501042d5e65c4225900af31af3643a
+2026-10-04-settings-window-five-upgrades.zh.md: f322d3dd2ccec323fb14d41c1591ef078c15078e
