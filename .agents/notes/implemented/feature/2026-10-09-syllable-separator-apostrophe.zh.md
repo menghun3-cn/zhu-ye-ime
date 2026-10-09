@@ -107,6 +107,27 @@ U+0027，而页眉组合串由**宋体（SimSun）粗体**渲染
 panic），改为按字符 `pop()`。测试断言全部用 `\u{2019}` 转义。候选行拼音
 （Segoe UI 渲染、词典数据为儿化 ASCII `'`，如 `nǎ'er`）不动——其字形观感正常。
 
+## 页眉分隔符改画成直撇（T-139，用户"看起来是个逗号在上面"第二轮）
+
+T-134 把显示字形换成 U+2019，但页眉字体是宋体，U+2019 在宋体下仍然是
+"粗圆头逗钩"。96dpi 像素证据：宋体 U+2019 字形 4×5px、带圆头
+（12 个深像素）；Segoe UI 的 U+0027 直撇是 2px 宽的细竖条（6 个像素）。
+用户要的是"只是撇号"的观感。
+
+修复（T-139）：页眉渲染改为逐段绘制。`draw_header_mixed` 按
+`SYLLABLE_SEP_DISPLAY`（U+2019）切开显示串，各段在公共基线上用各自字体
+绘制：主段继续用宋体半粗（`main_font`）；每个分隔符段改用英文键盘直撇
+`'`（新常量 `SYLLABLE_SEP_APOSTROPHE: char = '\u{0027}'`）、以 Segoe UI
+常规字体（`sep_font`，字号与页眉一致）绘制。纯显示层——`composing` /
+`manual_seps` / 键语义不变。辅助函数：`draw_seg`（先 SelectObject 段字体，
+再对段矩形 DrawTextW：段顶 = 基线 − 该字体 ascent、段高 = tmHeight）与
+`text_extent`（对已选字体 GetTextExtentPoint32W 取布进宽）。分隔符段矩形
+右缘加 8px 缓冲：「布进宽」含字形左侧空白（`'` 笔画偏右），若按布进宽
+精确裁右缘，字形主体会被裁成 1–3px 残边（调试中曾一度误判为"没画出来"，
+实为直撇本来就细）。demo 验证：`xi'an` 渲染为 宋体 `x` · Segoe UI 直撇
+（位于 x-height 上方）· 宋体 `a n`，间距不变；浅/深主题均正常。候选行拼音
+（`nǎ'er`）不受影响。
+
 ## Related
 
 - [全拼切分核心（T-007）](../../implemented/feature/2026-09-19-full-pinyin-segmentation-core.zh.md) —— 本设计依赖的 `segment_all` 与首方案规则。

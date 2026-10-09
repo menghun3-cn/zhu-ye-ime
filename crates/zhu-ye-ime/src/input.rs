@@ -24,16 +24,10 @@ pub const CANDIDATE_PAGE_SIZE: usize = 9;
 /// 前缀候选（T-029）补全组最多进入排序的条数；防止短前缀命中过多词条。
 const PREFIX_COMPLETION_CAP: usize = 32;
 
-/// 音节分隔符的**显示**字符（T-134）：英文弯撇 `'`（U+2019，RIGHT SINGLE
-/// QUOTATION MARK，英文排版正式撇号）。
-///
-/// T-128 初版显示用键盘直撇 `'`（U+0027），但页眉主字体为宋体（SimSun）
-/// 粗体，其 U+0027 字形是"顶部带钩的竖线"——在粗体下观感像"上逗号"
-/// （用户 2026-10-09 反馈）。换 U+2019 后宋体/雅黑均为标准 9 形弯撇，
-/// 与搜狗拼音隔音符观感一致。仅影响 `composing_display` 输出（显示层）；
-/// 查询键 `composing` 不含分隔符（去噪），手动边界以 `manual_seps` 存
-/// 字符下标，与显示字符无关。
-pub const SYLLABLE_SEP_DISPLAY: char = '\u{2019}';
+/// 音节分隔符的**显示**字符（T-134，定义见 `candidate_ui`）：英文弯撇 `'`
+/// （U+2019）。T-139 起绘制层用 Segoe UI 直撇渲染该分隔符（页眉
+/// `draw_header_mixed`）；此处转发保持既有引用路径不变。
+pub use crate::candidate_ui::SYLLABLE_SEP_DISPLAY;
 
 /// 缩写前缀补全（M6-R）最多追加的条数。
 const ABBREVIATION_COMPLETION_CAP: usize = 32;

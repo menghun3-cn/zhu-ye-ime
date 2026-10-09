@@ -10,19 +10,22 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
     CreateFontIndirectW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
     FillRect, GetCurrentObject, GetDC, GetDIBits, GetMonitorInfoW, GetObjectW, GetStockObject,
-    GetSysColor, GetTextMetricsW, InvalidateRect, MonitorFromWindow, ReleaseDC, RoundRect,
-    SelectObject, SetBkMode, SetTextColor, UpdateWindow, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE,
-    COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
-    DEFAULT_CHARSET, DEFAULT_GUI_FONT, DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX,
-    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC, HFONT,
-    HGDIOBJ, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, OBJ_FONT, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TEXTMETRICW, TRANSPARENT,
+    GetSysColor, GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, MonitorFromWindow,
+    ReleaseDC, RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, AC_SRC_ALPHA,
+    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CLEARTYPE_QUALITY,
+    CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
+    COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DEFAULT_PITCH,
+    DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE,
+    FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, OBJ_FONT, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL, PS_SOLID,
+    SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -41,6 +44,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::candidate_ui::SYLLABLE_SEP_DISPLAY;
 use crate::candidate_ui::{
     display_main_text, index_marker, theme, theme_from_system_colors, theme_with_candidate,
     CandidateMetrics, CandidateUiTheme, CandidateUiView, SystemColors, UiColor, UiRect,
@@ -365,6 +369,12 @@ struct CandidateWindowState {
     /// Segoe UI 13px 的 tmHeight≈16px——拼音 rect 若按 13px 绘制，glyph 底部
     /// descender 会被 `DrawTextW` 裁掉；字形带按真实 tmHeight 铺高后拼音完整）。
     pin_tm_height: i32,
+    /// 页眉音节分隔符专用字体（T-139）：宋体（SimSun）的弯引号/撇号字形
+    /// （U+0027、U+2019）观感都是"上逗号"，用户要求"看起来只是撇号"；页眉
+    /// 组合串里的分隔符改用西文 Segoe UI 的 U+0027 直撇单独绘制（分段渲染，
+    /// 见 `draw_header_mixed`），其余字母/中文仍用宋体主字体。
+    sep_font: HFONT,
+    sep_font_is_stock: bool,
     theme_pref: ThemePreference,
     forced_dpi: Option<u32>,
     quit_on_destroy: bool,
@@ -391,6 +401,8 @@ impl CandidateWindowState {
         let (pin_font, pin_font_is_stock) =
             create_font(metrics.pin_font_height, FW_NORMAL.0 as i32, "Segoe UI");
         let pin_tm_height = query_font_tm_height(pin_font);
+        let (sep_font, sep_font_is_stock) =
+            create_font(metrics.font_height, FW_NORMAL.0 as i32, "Segoe UI");
         Self {
             view,
             theme: resolve_with_custom(options.theme, options.custom_theme.as_ref()),
@@ -400,6 +412,8 @@ impl CandidateWindowState {
             pin_font,
             pin_font_is_stock,
             pin_tm_height,
+            sep_font,
+            sep_font_is_stock,
             theme_pref: options.theme,
             forced_dpi: options.dpi,
             quit_on_destroy,
@@ -434,6 +448,16 @@ impl CandidateWindowState {
         self.pin_font = pin_font;
         self.pin_font_is_stock = pin_font_is_stock;
         self.pin_tm_height = query_font_tm_height(pin_font);
+        let old_sep_font = mem::take(&mut self.sep_font);
+        if !self.sep_font_is_stock {
+            unsafe {
+                let _ = DeleteObject(old_sep_font.into());
+            }
+        }
+        let (sep_font, sep_font_is_stock) =
+            create_font(metrics.font_height, FW_NORMAL.0 as i32, "Segoe UI");
+        self.sep_font = sep_font;
+        self.sep_font_is_stock = sep_font_is_stock;
         self.metrics = metrics;
     }
 
@@ -620,12 +644,26 @@ impl CandidateWindowState {
                 );
             }
         }
-        draw_text(
-            hdc,
-            header_text,
-            metrics.header_text_rect_with(hint_alloc),
-            self.theme.foreground,
-        );
+        // T-139：分隔符（U+2019）在宋体下观感仍是"上逗号"，页眉组合串改为
+        // 分段绘制——分隔符段用 Segoe UI 直撇渲染（`draw_header_mixed`），
+        // 其余（字母/中文）仍用宋体主字体；含分隔符才走混合路径。
+        if header_text.contains(SYLLABLE_SEP_DISPLAY) {
+            draw_header_mixed(
+                hdc,
+                header_text,
+                metrics.header_text_rect_with(hint_alloc),
+                self.theme.foreground,
+                self.font,
+                self.sep_font,
+            );
+        } else {
+            draw_text(
+                hdc,
+                header_text,
+                metrics.header_text_rect_with(hint_alloc),
+                self.theme.foreground,
+            );
+        }
         if !self.view.pinyin_hint.is_empty() && self.view.pinyin_hint != header_text {
             draw_text(
                 hdc,
@@ -651,6 +689,11 @@ impl Drop for CandidateWindowState {
         if !self.pin_font_is_stock && !self.pin_font.is_invalid() {
             unsafe {
                 let _ = DeleteObject(self.pin_font.into());
+            }
+        }
+        if !self.sep_font_is_stock && !self.sep_font.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(self.sep_font.into());
             }
         }
     }
@@ -1041,8 +1084,132 @@ fn draw_text(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
     }
 }
 
-/// 读取绘制 DC 当前字体逻辑尺寸（GDI 负 lfHeight ≈ 字符单元高，直接当
-/// DirectWrite 字号用；取不到时退 15px 保全路径）。
+/// 页眉直撇分隔符的**绘制**字符（T-139）：西文键盘撇号 U+0027（ASCII
+/// apostrophe）——在 Segoe UI 下是清晰的直撇（竖直微斜、无圆头），
+/// 区别于 U+2019 弯引号/逗号形的"上逗号"观感。数据层分隔符仍是
+/// `SYLLABLE_SEP_DISPLAY`（U+2019），仅绘制层替换为直撇。
+const SYLLABLE_SEP_APOSTROPHE: char = '\u{0027}';
+
+/// 页眉组合串分段绘制（T-139）：音节分隔符 U+2019 在宋体下仍是"上逗号"
+/// 观感（用户两轮反馈），改用西文 Segoe UI **直撇**（U+0027）单独绘制；
+/// 其余字母/中文段仍用宋体主字体，段间按实测宽度推进、共享同一基线。
+///
+/// 基线统一：两种字体的 `tmHeight`/`tmAscent` 不同（Segoe UI 16px 的
+/// tmHeight≈19 高于宋体 16px 的 ≈16），不能直接各自 `DT_VCENTER`；以主字体
+/// 在 `rect` 内垂直居中推算公共基线，再按各自 ascent 回推段顶。取不到字体
+/// 度量时回退整串 `draw_text`。
+fn draw_header_mixed(
+    hdc: HDC,
+    text: &str,
+    rect: UiRect,
+    color: UiColor,
+    main_font: HFONT,
+    sep_font: HFONT,
+) {
+    if text.is_empty() || rect.width() <= 0 || rect.height() <= 0 {
+        return;
+    }
+    unsafe {
+        let old = SelectObject(hdc, main_font.into());
+        let mut main_tm = TEXTMETRICW::default();
+        if !GetTextMetricsW(hdc, &mut main_tm).as_bool() {
+            SelectObject(hdc, old);
+            draw_text(hdc, text, rect, color);
+            return;
+        }
+        let _ = SelectObject(hdc, sep_font.into());
+        let mut sep_tm = TEXTMETRICW::default();
+        if !GetTextMetricsW(hdc, &mut sep_tm).as_bool() {
+            SelectObject(hdc, old);
+            draw_text(hdc, text, rect, color);
+            return;
+        }
+        // 主字体在 rect 内垂直居中时的基线；分隔段/主段都对准它。
+        let (m_h, m_a) = (main_tm.tmHeight, main_tm.tmAscent);
+        let (s_h, s_a) = (sep_tm.tmHeight, sep_tm.tmAscent);
+        let baseline = rect.top + rect.height() / 2 + (m_a - m_h / 2);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(color.to_colorref()));
+        let mut x = rect.left;
+        let mut rest = text;
+        while !rest.is_empty() {
+            // 主段到下一个分隔符为止；随后（若存在）取一个分隔符字符。
+            let sep_idx = rest.find(SYLLABLE_SEP_DISPLAY);
+            let main_seg = match sep_idx {
+                Some(idx) => &rest[..idx],
+                None => rest,
+            };
+            let sep: Option<String> = match sep_idx {
+                Some(idx) => rest[idx..].chars().next().map(|ch| ch.to_string()),
+                None => None,
+            };
+            let consumed = match sep_idx {
+                Some(idx) => {
+                    idx + sep
+                        .as_ref()
+                        .map_or(0, |s| s.chars().next().unwrap_or_default().len_utf8())
+                }
+                None => main_seg.len(),
+            };
+            rest = &rest[consumed..];
+            if !main_seg.is_empty() {
+                let w = text_extent(hdc, main_font, main_seg);
+                draw_seg(hdc, main_font, main_seg, x, baseline - m_a, w, m_h);
+                x += w;
+            }
+            if sep.is_some() {
+                // T-139 核心：分隔符显示字符从 U+2019（宋体/西文都是弯"上逗号"
+                // 形）替换为西文键盘直撇 U+0027，配 Segoe UI 字体绘制。
+                let sep_ascii = SYLLABLE_SEP_APOSTROPHE.to_string();
+                let w = text_extent(hdc, sep_font, &sep_ascii);
+                draw_seg(hdc, sep_font, &sep_ascii, x, baseline - s_a, w, s_h);
+                x += w;
+            }
+        }
+        SelectObject(hdc, old);
+    }
+}
+
+/// 选中段字体后测量段文本像素宽（`GetTextExtentPoint32W`）。
+unsafe fn text_extent(hdc: HDC, font: HFONT, seg: &str) -> i32 {
+    let old = SelectObject(hdc, font.into());
+    let mut size = SIZE::default();
+    let wide: Vec<u16> = seg.encode_utf16().collect();
+    let w = if GetTextExtentPoint32W(hdc, &wide, &mut size).as_bool() {
+        size.cx
+    } else {
+        1
+    };
+    SelectObject(hdc, old);
+    w
+}
+
+/// 在公共基线上绘制一个段（显式选中段字体）：`y` 为段顶（基线 − 该字体
+/// ascent），段高 `height` 为该字体 tmHeight。返回 `DrawTextW` 绘制的行数。
+unsafe fn draw_seg(
+    hdc: HDC,
+    font: HFONT,
+    seg: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> i32 {
+    let old = SelectObject(hdc, font.into());
+    let mut wide: Vec<u16> = seg.encode_utf16().collect();
+    // 右缘 +8 缓冲：`GetTextExtentPoint32W` 返回的是 advance 宽（含默认
+    // 字距），而部分字形（如直撇 `'`）笔画偏右、会被精确右缘裁掉主体。
+    let mut seg_rect = RECT {
+        left: x,
+        top: y,
+        right: x + width + 8,
+        bottom: y + height,
+    };
+    let ret = DrawTextW(hdc, &mut wide, &mut seg_rect, DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(hdc, old);
+    ret
+}
+
 fn current_font_size(hdc: HDC) -> f32 {
     unsafe {
         let hfont = GetCurrentObject(hdc, OBJ_FONT);

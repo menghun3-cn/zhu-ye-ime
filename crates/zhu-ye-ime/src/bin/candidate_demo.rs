@@ -40,6 +40,7 @@ fn run() -> Result<(), String> {
     let mut emoji_row = false;
     let mut long_input = false;
     let mut no_pin = false;
+    let mut sep_input = false;
 
     let mut index = 0usize;
     while index < args.len() {
@@ -72,11 +73,13 @@ fn run() -> Result<(), String> {
             "--emoji" => emoji_row = true,
             "--long" => long_input = true,
             "--no-pin" => no_pin = true,
+            // T-139：页眉组合串带音节分隔符（U+2019），验收直撇分段渲染。
+            "--sep" => sep_input = true,
             "--help" | "-h" => {
                 println!(
                     "用法: candidate-demo [--theme auto|light|dark|high-contrast] \
                      [--dpi <px>] [--seconds <s>] [--shot <bmp>] [--translation-mode] \
-                     [--emoji] [--long] [--no-pin]"
+                     [--emoji] [--long] [--no-pin] [--sep]"
                 );
                 return Ok(());
             }
@@ -93,7 +96,10 @@ fn run() -> Result<(), String> {
         custom_theme: None,
         show_pin: !no_pin,
     };
-    run_candidate_demo(demo_view(translation_mode, emoji_row, long_input), &options)
+    run_candidate_demo(
+        demo_view(translation_mode, emoji_row, long_input, sep_input),
+        &options,
+    )
 }
 
 fn take_value(args: &[String], index: &mut usize, arg: &str) -> Result<String, String> {
@@ -115,7 +121,12 @@ fn parse_theme(value: &str) -> Result<ThemePreference, String> {
     }
 }
 
-fn demo_view(translation_mode: bool, emoji_row: bool, long_input: bool) -> CandidateUiView {
+fn demo_view(
+    translation_mode: bool,
+    emoji_row: bool,
+    long_input: bool,
+    sep_input: bool,
+) -> CandidateUiView {
     // T-122：演示项带带调拼音，便于截图验收拼音行（字号/字重/对比度/行距）。
     let mut items = vec![
         item("你好", "Hello", "nǐ hǎo", CandidateSource::Static),
@@ -143,7 +154,12 @@ fn demo_view(translation_mode: bool, emoji_row: bool, long_input: bool) -> Candi
     // T-124：长拼音输入场景——组合串超固定 360dp 面板输入串区
     // （约 141dp）会被右侧省略号截断；带调提示同时存在以复现用户反馈
     // （`youmeiyoushenmeren` → `youmeiyoushenmere...`）。
-    let (composition, pinyin_hint) = if long_input {
+    let (composition, pinyin_hint) = if sep_input {
+        // T-139：页眉组合串带音节分隔符（U+2019 显示层字符）——验收
+        // 直撇分段渲染（`draw_header_mixed`：分隔符用 Segoe UI 直撇
+        // U+0027 绘制，其余字母/中文仍用宋体）。
+        ("xi\u{2019}an".to_owned(), String::new())
+    } else if long_input {
         (
             "youmeiyoushenmeren".to_owned(),
             "yǒu méi yǒu shén me rén".to_owned(),
