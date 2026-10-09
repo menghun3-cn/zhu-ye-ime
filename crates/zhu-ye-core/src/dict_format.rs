@@ -92,6 +92,23 @@ pub fn strip_pos_prefix(text: &str) -> &str {
     trimmed
 }
 
+/// 把译文串按 `;` 拆成多条单义（T-131）：CEDICT/精修表多义以 `a; b` 存储，
+/// 逐条 trim、去尾标点（`!`/`.`/`…`）、过滤空义，按首现顺序去重。
+/// 词性前缀（`v.` 等）保留不动——显示需要；上屏时另行 `strip_pos_prefix` 剥离。
+#[must_use]
+pub fn split_translations(text: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for part in text.split(';') {
+        let trimmed = part.trim().trim_end_matches(['!', '.', '…']).trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_owned()) {
+            continue;
+        }
+        out.push(trimmed.to_owned());
+    }
+    out
+}
+
 /// 词典头部。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictHeader {
@@ -189,7 +206,8 @@ impl DictHeader {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_translation_key, strip_pos_prefix, DictHeader, DICT_VERSION, HEADER_SIZE, MAGIC,
+        normalize_translation_key, split_translations, strip_pos_prefix, DictHeader, DICT_VERSION,
+        HEADER_SIZE, MAGIC,
     };
 
     #[test]
@@ -255,5 +273,41 @@ mod tests {
         assert_eq!(strip_pos_prefix("  adv. go ahead"), "go ahead");
         assert_eq!(strip_pos_prefix("n."), "n.");
         assert_eq!(strip_pos_prefix("节点"), "节点");
+    }
+
+    #[test]
+    fn 译文按分号拆成多条单义() {
+        // T-131：多义译文 `a; b` 拆成独立单义（你好 → hello / hi 各一条候选）。
+        assert_eq!(
+            split_translations("hello; hi"),
+            vec!["hello".to_owned(), "hi".to_owned()]
+        );
+        // 词性前缀保留（显示层需要；上屏时另剥）。
+        assert_eq!(
+            split_translations("int. hello; int. hi"),
+            vec!["int. hello".to_owned(), "int. hi".to_owned()]
+        );
+        assert_eq!(
+            split_translations("yes; to be"),
+            vec!["yes".to_owned(), "to be".to_owned()]
+        );
+        // 尾标点/空白清理：CEDICT 段尾感叹号、多余分号段不产出空义。
+        assert_eq!(
+            split_translations("hello!; ; hi"),
+            vec!["hello".to_owned(), "hi".to_owned()]
+        );
+        assert_eq!(split_translations("hello…"), vec!["hello".to_owned()]);
+        // 重复义按首现顺序去重。
+        assert_eq!(
+            split_translations("a; a; b"),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+        // 括号说明属于语义内容保留；空串/纯标点不产出义。
+        assert_eq!(
+            split_translations("to be (followed by substantives only)"),
+            vec!["to be (followed by substantives only)".to_owned()]
+        );
+        assert!(split_translations("").is_empty());
+        assert!(split_translations("; ; !").is_empty());
     }
 }

@@ -143,6 +143,29 @@ fn candidate_owned(candidate: &Candidate) -> CandidateSelection {
     }
 }
 
+/// 把中文层候选展开为译文层候选（T-131）：多义译文（`hello; hi`）拆成
+/// 多条，每行一个单义、保持原义顺序（次行分数微降保序）；无译文/拆后
+/// 全空的不进译文层。词性前缀保留在显示串里，上屏时另剥。
+fn build_translation_candidates(candidates: &[Candidate]) -> Vec<Candidate> {
+    let mut out = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let Some(translation) = candidate.translation.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let senses = zhu_ye_core::dict_format::split_translations(translation);
+        if senses.is_empty() {
+            continue;
+        }
+        for (offset, sense) in senses.into_iter().enumerate() {
+            let mut split = candidate.clone();
+            split.translation = Some(sense);
+            split.score = split.score.saturating_sub(offset as i64);
+            out.push(split);
+        }
+    }
+    out
+}
+
 /// 把「前组」（整句组）置于主候选之前；主候选与整句同文本时让位给前组。
 ///
 /// 保持组间固定顺序（整句组在前），组内顺序不变；与 `append_group` 对称。
@@ -1050,6 +1073,77 @@ impl InputEngine {
         true
     }
 
+    /// 第 `index` 个候选当前是否有可上屏译文（Ctrl+数字键路判定，T-131）。
+    /// 中文层：可见候选的译文拆义非空（取其首义）；译文层：已拆分行的单义存在。
+    #[must_use]
+    pub fn can_translate_by_index(&self, index: usize) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        match self.layer {
+            CandidateLayer::Translation => self
+                .cached_translation_candidates
+                .get(index)
+                .and_then(|c| c.translation.as_deref())
+                .is_some_and(|t| !t.is_empty()),
+            CandidateLayer::Chinese => self
+                .visible_candidates()
+                .get(index)
+                .and_then(|c| c.translation.as_deref())
+                .is_some_and(|t| !zhu_ye_core::dict_format::split_translations(t).is_empty()),
+        }
+    }
+
+    /// 直接上屏第 `index` 候选的译文（Ctrl+数字，T-131）：中文层取该候选译文
+    /// 的**首义**，译文层取拆分行的**单义**，均剥词性前缀后上屏；中文词条
+    /// 照常记录用户词。无对应译文时返回 `None`（TSF 层放行宿主）。
+    pub fn commit_translation_by_index(&mut self, index: usize) -> Option<String> {
+        if !self.is_active() {
+            return None;
+        }
+        let (word, sense, pinyin) = match self.layer {
+            CandidateLayer::Translation => {
+                let candidate = self.cached_translation_candidates.get(index)?;
+                (
+                    candidate.text.clone(),
+                    candidate.translation.clone(),
+                    candidate.pinyin.clone(),
+                )
+            }
+            CandidateLayer::Chinese => {
+                let candidate = self.visible_candidates().get(index)?;
+                let sense =
+                    zhu_ye_core::dict_format::split_translations(candidate.translation.as_deref()?)
+                        .into_iter()
+                        .next()?;
+                (
+                    candidate.text.clone(),
+                    Some(sense),
+                    candidate.pinyin.clone(),
+                )
+            }
+        };
+        let text = zhu_ye_core::dict_format::strip_pos_prefix(sense.as_deref()?).to_owned();
+        self.commit_translation_text(word, text, pinyin)
+    }
+
+    /// 译文上屏收尾（与 `commit_candidate` 同款）：记录中文词条（词+拼音）、
+    /// 清组合、置前词并刷联想。返回上屏文本。
+    fn commit_translation_text(
+        &mut self,
+        word: String,
+        text: String,
+        pinyin: Option<String>,
+    ) -> Option<String> {
+        if let Some(pinyin) = pinyin {
+            self.record_user_word(&word, &pinyin);
+        }
+        self.clear_composition();
+        self.previous_word = Some(text.clone());
+        self.refresh_suggestion();
+        Some(text)
+    }
+
     /// 组合被 TSF 宿主终止时清空内部分组状态。
     pub fn cancel_input(&mut self) {
         self.clear_composition();
@@ -1234,15 +1328,31 @@ impl InputEngine {
             items: self
                 .current_layer_candidates()
                 .iter()
-                .map(|c| self.ui_item_for(c))
+                .map(|c| {
+                    let mut item = self.ui_item_for(c);
+                    // T-131：中文层副文本只显示译文的**首义**（`int. hello; int. hi`
+                    // 只显示 `int. hello`），多义全量留给译文层逐行展示。
+                    if self.layer == CandidateLayer::Chinese && !item.translation.is_empty() {
+                        item.translation =
+                            zhu_ye_core::dict_format::split_translations(&item.translation)
+                                .into_iter()
+                                .next()
+                                .unwrap_or_default();
+                    }
+                    item
+                })
                 .collect(),
         }
     }
 
     fn commit_candidate(&mut self, selection: CandidateSelection) -> Option<String> {
         let text = if self.layer == CandidateLayer::Translation {
+            // T-131：译文上屏剥词性前缀（`v. suspicious` → 上屏 `suspicious`）。
             selection
                 .translation
+                .as_deref()
+                .map(zhu_ye_core::dict_format::strip_pos_prefix)
+                .map(str::to_owned)
                 .unwrap_or_else(|| selection.text.clone())
         } else {
             selection.text.clone()
@@ -1391,11 +1501,42 @@ impl InputEngine {
         }
     }
 
+    /// 第 `index` 个候选直上屏译文的预取（TSF commit-text，T-131）：与
+    /// `commit_translation_by_index` 同源——中文层取首义、译文层取拆分行的
+    /// 单义，均剥词性前缀后返回；无对应译文返回 `None`。
+    #[must_use]
+    pub fn preview_translation_by_index(&self, index: usize) -> Option<String> {
+        if !self.is_active() {
+            return None;
+        }
+        let sense = match self.layer {
+            CandidateLayer::Translation => self
+                .cached_translation_candidates
+                .get(index)?
+                .translation
+                .clone(),
+            CandidateLayer::Chinese => self
+                .visible_candidates()
+                .get(index)?
+                .translation
+                .as_deref()
+                .and_then(|t| {
+                    zhu_ye_core::dict_format::split_translations(t)
+                        .into_iter()
+                        .next()
+                }),
+        }?;
+        Some(zhu_ye_core::dict_format::strip_pos_prefix(&sense).to_owned())
+    }
+
     fn display_text(&self, candidate: &Candidate) -> String {
         if self.layer == CandidateLayer::Translation {
+            // T-131：译文上屏剥词性前缀（`v. suspicious` → 上屏 `suspicious`）。
             candidate
                 .translation
-                .clone()
+                .as_deref()
+                .map(zhu_ye_core::dict_format::strip_pos_prefix)
+                .map(str::to_owned)
                 .unwrap_or_else(|| candidate.text.clone())
         } else {
             candidate.text.clone()
@@ -1415,11 +1556,9 @@ impl InputEngine {
     }
 
     fn translation_candidates(&self) -> Vec<Candidate> {
-        self.candidates
-            .iter()
-            .filter(|c| c.translation.as_deref().is_some_and(|s| !s.is_empty()))
-            .cloned()
-            .collect()
+        // 与 refresh_candidates 的缓存同源（同一构建函数），供切层判空与
+        // 展示使用；候选未刷新时按当前 candidates 重算，确保语义一致。
+        build_translation_candidates(&self.candidates)
     }
 
     fn clear_composition(&mut self) {
@@ -1675,12 +1814,7 @@ impl InputEngine {
                 source: zhu_ye_core::candidate::CandidateSource::Emoji,
             });
         }
-        self.cached_translation_candidates = self
-            .candidates
-            .iter()
-            .filter(|c| c.translation.as_deref().is_some_and(|s| !s.is_empty()))
-            .cloned()
-            .collect();
+        self.cached_translation_candidates = build_translation_candidates(&self.candidates);
         // 输入串变化后选中行回到第一行。
         self.selected_on_page = 0;
         self.clamp_page();
@@ -1774,6 +1908,7 @@ mod tests {
     use zhu_ye_core::pinyin::SyllableTable;
     use zhu_ye_core::tone::ToneMap;
     use zhu_ye_core::Dictionary;
+    use zhu_ye_core::InMemoryDictionary;
     use zhu_ye_core::UserDictStore;
     use zhu_ye_core::{build_v2, seed_bigrams, seed_entries, DictionaryEntry};
 
@@ -4071,6 +4206,102 @@ mod tests {
                 .iter()
                 .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Contact),
             "清除后不得再产出联系人候选"
+        );
+    }
+
+    // ---- T-131 英译多义候选：分号拆义 / 词性上屏剥离 / Ctrl+数字直上屏 ----
+
+    /// 含多义/词性译文的专用引擎：你好（int. hello; int. hi）、怀疑
+    /// （v. suspect; v. doubt）、世界（world）、苹果（n. apple）、测试（无译文）。
+    fn multi_sense_engine() -> InputEngine {
+        let entries = vec![
+            DictionaryEntry::new("你好", "nihao", 100).with_translation("int. hello; int. hi"),
+            DictionaryEntry::new("怀疑", "huaiyi", 90).with_translation("v. suspect; v. doubt"),
+            DictionaryEntry::new("世界", "shijie", 80).with_translation("world"),
+            DictionaryEntry::new("苹果", "pingguo", 70).with_translation("n. apple"),
+            DictionaryEntry::new("测试", "ceshi", 60),
+        ];
+        InputEngine::new(Arc::new(InMemoryDictionary::from_entries(entries)))
+    }
+
+    #[test]
+    fn 译文层多义拆成多行候选() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "nihao");
+        assert!(engine.toggle_translation_layer());
+        let rows = engine.visible_candidates();
+        assert_eq!(rows.len(), 2, "你好 hello; hi 应拆成两行");
+        assert_eq!(rows[0].text, "你好");
+        assert_eq!(rows[0].translation.as_deref(), Some("int. hello"));
+        assert_eq!(rows[1].text, "你好");
+        assert_eq!(rows[1].translation.as_deref(), Some("int. hi"));
+    }
+
+    #[test]
+    fn 译文层选择上屏剥词性前缀() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "huaiyi");
+        assert!(engine.toggle_translation_layer());
+        // 第一行 v. suspect → 上屏剥 v. 前缀。
+        assert_eq!(engine.select_index(0).as_deref(), Some("suspect"));
+        assert!(!engine.is_active(), "上屏后组合结束");
+        assert_eq!(engine.previous_word(), Some("suspect"));
+    }
+
+    #[test]
+    fn 译文层空格同理剥词性() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "pingguo");
+        assert!(engine.toggle_translation_layer());
+        assert_eq!(engine.preview_space().as_deref(), Some("apple"));
+    }
+
+    #[test]
+    fn 中文层ctrl数字直上屏首义() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "nihao");
+        assert_eq!(engine.layer(), CandidateLayer::Chinese);
+        assert!(engine.can_translate_by_index(0));
+        assert_eq!(
+            engine.commit_translation_by_index(0).as_deref(),
+            Some("hello")
+        );
+        assert!(!engine.is_active(), "直上屏后组合结束");
+        assert_eq!(engine.previous_word(), Some("hello"));
+    }
+
+    #[test]
+    fn 译文层ctrl数字上屏对应行单义() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "nihao");
+        assert!(engine.toggle_translation_layer());
+        assert!(engine.can_translate_by_index(1));
+        assert_eq!(engine.commit_translation_by_index(1).as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn 无译文或越界候选ctrl数字返回none() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "ceshi");
+        assert!(!engine.can_translate_by_index(0), "无译文候选不可直上屏");
+        assert_eq!(engine.commit_translation_by_index(0), None);
+        assert!(engine.is_active(), "不可上屏时组合保持、键放行宿主");
+
+        let mut typing = multi_sense_engine();
+        type_text(&mut typing, "nihao");
+        assert!(!typing.can_translate_by_index(9), "越界候选不可直上屏");
+        assert_eq!(typing.commit_translation_by_index(9), None);
+    }
+
+    #[test]
+    fn 中文层候选窗副文本只显示首义() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "nihao");
+        let view = engine.candidate_ui_view();
+        assert!(!view.translation_mode);
+        assert_eq!(
+            view.items[0].translation, "int. hello",
+            "中文层副文本仅首义"
         );
     }
 }

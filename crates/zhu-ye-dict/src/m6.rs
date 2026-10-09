@@ -13,6 +13,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use zhu_ye_core::dict::DictionaryEntry;
+use zhu_ye_core::dict_format::split_translations;
 use zhu_ye_core::pinyin::SyllableTable;
 
 use crate::import::{is_cjk_word, parse_cedict_line, split_pinyin_syllables};
@@ -1045,15 +1046,33 @@ pub struct BaseStats {
     pub sha256: String,
 }
 
-/// 译文净化（T-115 后续）：取 CEDICT 单段中分号前的首义，去掉尾部感叹号。
-///
-/// CEDICT 首义常为 `你好 /hello; hi/` 这类"分号并列多义"，译文层逐词只展示
-/// 一条首义，用户点名示例期望 `你好 → hello` 而非 `hello; hi`；
-/// 括号说明（如 `to be (followed by substantives only)`）属于语义内容保留不删。
+/// 译文净化（T-115 后续起，T-131 调整）：保留 CEDICT 整段多义（`hello; hi`
+/// 不再截首义），只清每义尾部标点（`!`/`.`/`…`）、去空义段；括号说明
+/// （如 `to be (followed by substantives only)`）属于语义内容保留不删。
+/// 多义全串由译文层按义拆行展示、上屏时剥词性前缀（T-131）。
 fn clean_translation(text: &str) -> Option<String> {
-    let part = text.split(';').next()?.trim();
-    let trimmed = part.trim_end_matches(['!', '.', '…']).trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    let senses = split_translations(text);
+    (!senses.is_empty()).then(|| senses.join("; "))
+}
+
+/// 给译文每个义都前置词性标签（T-131）：`hello; hi` + `int.` →
+/// `int. hello; int. hi`；已以该标签开头的义保持原样；全空义段（理论不达）回退原文。
+fn pos_label_each(translation: &str, label: &str) -> String {
+    let senses = split_translations(translation);
+    if senses.is_empty() {
+        return translation.to_owned();
+    }
+    senses
+        .into_iter()
+        .map(|sense| {
+            if sense.starts_with(label) {
+                sense
+            } else {
+                format!("{label} {sense}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// 常用词译文精修表（T-115 后续）。
@@ -1083,7 +1102,7 @@ const TRANSLATION_PATCHES: &[(&str, &str)] = &[
     ("为什么", "why"),
     ("谢谢", "thanks; thank you"),
     ("再见", "goodbye"),
-    ("你好", "hello"),
+    ("你好", "hello; hi"),
     ("早上好", "good morning"),
     ("晚上好", "good evening"),
     ("晚安", "good night"),
@@ -1267,11 +1286,12 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         }
     }
 
-    // e) 译文词性标注（T-115 后续，用户点名）：拼音→英文译文前显示传统词性。
-    // 词性取自 jieba 词性列（load_jieba_pos），词性精修表（WORD_POS_PATCHES）
-    // 优先覆盖 jieba 误标；映射为传统英文缩写拼入译文显示串
-    // （如「生成」→ "v. to generate"）；反查键（英→中）在构建器侧剥掉前缀保持
-    // 纯净（dict_builder 经 strip_pos_prefix），不影响英文反查。
+    // e) 译文词性标注（T-115 后续，用户点名；T-131 起按义标注）：拼音→英文
+    // 译文前显示传统词性。词性取自 jieba 词性列（load_jieba_pos），词性精修表
+    // （WORD_POS_PATCHES）优先覆盖 jieba 误标；映射为传统英文缩写拼入译文显示串
+    // （如「生成」→ "v. to generate"，「你好」→ "int. hello; int. hi"）；
+    // 反查键（英→中）在构建器侧剥掉前缀保持纯净（dict_builder 经
+    // strip_pos_prefix），译文层上屏时同样剥前缀（T-131）。
     let jieba_pos = load_jieba_pos(&jieba_text);
     let mut pos_labeled = 0usize;
     for (word, (_, _, translation)) in merged.iter_mut() {
@@ -1286,10 +1306,11 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         let Some(label) = label else {
             continue;
         };
-        if !value.starts_with(label) {
-            value.insert_str(0, &format!("{label} "));
-            pos_labeled += 1;
+        if value.starts_with(label) {
+            continue;
         }
+        *value = pos_label_each(value, label);
+        pos_labeled += 1;
     }
 
     // 规范字集覆盖：以注音底表字集为基线（≈ 通用规范汉字表）。
@@ -1573,10 +1594,14 @@ mod tests {
     }
 
     #[test]
-    fn 译文净化取分号前首义并清尾标点() {
-        // T-115 后续：CEDICT `你好 /hello; hi/` 净化后只留 "hello"（用户点名）。
-        assert_eq!(clean_translation("hello; hi").as_deref(), Some("hello"));
-        assert_eq!(clean_translation("hello!").as_deref(), Some("hello"));
+    fn 译文净化保留整段多义并清尾标点() {
+        // T-115 后续：CEDICT 兜底译文净化去空义段/尾标点；
+        // T-131：不再截分号首义——整段多义保留（译文层按义拆行展示）。
+        assert_eq!(clean_translation("hello; hi").as_deref(), Some("hello; hi"));
+        assert_eq!(
+            clean_translation("hello!;  hi…").as_deref(),
+            Some("hello; hi")
+        );
         // 括号说明是语义内容，保留不删。
         assert_eq!(
             clean_translation("to be (followed by substantives only)").as_deref(),
@@ -1584,7 +1609,22 @@ mod tests {
         );
         // 空段 / 纯标点 -> None（不产生空译文）。
         assert_eq!(clean_translation(""), None);
-        assert_eq!(clean_translation("; hi"), None);
+        assert_eq!(clean_translation("; hi").as_deref(), Some("hi"));
+        assert_eq!(clean_translation("; ; !"), None);
+    }
+
+    #[test]
+    fn 词性标签按义前置多义各义都标记() {
+        // T-131：`hello; hi` + `int.` → `int. hello; int. hi`（译文层逐行展示、
+        // 上屏各自剥前缀）；已标过的义保持原样；全空义回退原文。
+        assert_eq!(pos_label_each("hello; hi", "int."), "int. hello; int. hi");
+        assert_eq!(pos_label_each("good; ok", "adj."), "adj. good; adj. ok");
+        assert_eq!(
+            pos_label_each("int. hello; hi", "int."),
+            "int. hello; int. hi"
+        );
+        assert_eq!(pos_label_each("world", "n."), "n. world");
+        assert_eq!(pos_label_each("...", "v."), "...");
     }
 
     #[test]
@@ -1600,7 +1640,7 @@ mod tests {
         assert_eq!(patch_of("是"), Some("yes; to be"));
         assert_eq!(patch_of("谢谢"), Some("thanks; thank you"));
         assert_eq!(patch_of("再见"), Some("goodbye"));
-        assert_eq!(patch_of("你好"), Some("hello"));
+        assert_eq!(patch_of("你好"), Some("hello; hi"));
         assert_eq!(patch_of("我"), Some("I; me"));
     }
 

@@ -5,13 +5,13 @@
 //! 中文词索引；构建方（`zhu-ye-dict`）直接调用本模块，加载方
 //! （`dict_loader`）解析同一布局。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dict::DictionaryEntry;
 use crate::dict_format::{
-    content_sha256, normalize_translation_key, strip_pos_prefix, BIGRAM_RECORD_SIZE,
-    ENTRY_RECORD_SIZE, HEADER_SIZE, PINYIN_INDEX_RECORD_SIZE, REVERSE_TRANSLATION_RECORD_SIZE,
-    TEXT_POOL_START, WORD_TRANSLATION_RECORD_SIZE,
+    content_sha256, normalize_translation_key, split_translations, strip_pos_prefix,
+    BIGRAM_RECORD_SIZE, ENTRY_RECORD_SIZE, HEADER_SIZE, PINYIN_INDEX_RECORD_SIZE,
+    REVERSE_TRANSLATION_RECORD_SIZE, TEXT_POOL_START, WORD_TRANSLATION_RECORD_SIZE,
 };
 use crate::{Error, Result};
 
@@ -182,9 +182,17 @@ pub fn build_v2(entries: &[DictionaryEntry], bigrams: &[(&str, &str, u64)]) -> R
         record[10..12].copy_from_slice(&translation_len.to_le_bytes());
         word_translation_bytes.extend_from_slice(&record);
 
-        let key = normalize_translation_key(strip_pos_prefix(source.translation));
-        let (key_offset, key_len) = intern(&key, &mut text_pool, &mut text_refs)?;
-        reverse_sources.push((key, source.word, key_offset, key_len, word_offset, word_len));
+        // T-131：多义译文（`hello; hi`）拆成多个单义反查键；词性前缀按单义
+        // 逐条剥离后建键（`int. hello` → `hello`），任一单义都能反查命中词条。
+        let mut seen_keys: HashSet<String> = HashSet::new();
+        for sense in split_translations(source.translation) {
+            let key = normalize_translation_key(strip_pos_prefix(&sense));
+            if key.is_empty() || !seen_keys.insert(key.clone()) {
+                continue;
+            }
+            let (key_offset, key_len) = intern(&key, &mut text_pool, &mut text_refs)?;
+            reverse_sources.push((key, source.word, key_offset, key_len, word_offset, word_len));
+        }
     }
     reverse_sources.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
 
@@ -316,6 +324,7 @@ mod tests {
     use crate::demo::{seed_bigrams, seed_entries};
     use crate::dict::DictionaryEntry;
     use crate::dict_format::{DictHeader, DICT_VERSION, HEADER_SIZE};
+    use crate::translate::Translator;
 
     #[test]
     fn 种子构建输出头部可解析且哈希写入() {
@@ -380,5 +389,34 @@ mod tests {
         let header = DictHeader::from_bytes(&bytes).unwrap();
         assert_eq!(header.word_translation_count, 2);
         assert_eq!(header.reverse_translation_count, 2);
+    }
+
+    #[test]
+    fn 多义译文拆成多个反查键且单义可命中() {
+        // T-131：`hello; hi` 拆成 hello / hi 两个反查键（含词性前缀按单义剥除），
+        // 任一单义都能反查命中「你好」。
+        let entries = vec![
+            DictionaryEntry::new("你好", "nihao", 100).with_translation("int. hello; int. hi"),
+            DictionaryEntry::new("世界", "shijie", 90).with_translation("world"),
+        ];
+        let bytes = build_v2(&entries, &[]).unwrap();
+        let header = DictHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(header.word_translation_count, 2);
+        assert_eq!(header.reverse_translation_count, 3);
+
+        let dir = std::env::temp_dir().join(format!("zyct-multi-sense-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("multi.zyct");
+        std::fs::write(&path, &bytes).unwrap();
+        let file = crate::dict_loader::DictionaryFile::open(&path).unwrap();
+        assert_eq!(file.en_to_zh("hello").as_deref(), Some("你好"));
+        assert_eq!(file.en_to_zh("hi").as_deref(), Some("你好"));
+        assert_eq!(file.en_to_zh("world").as_deref(), Some("世界"));
+        assert_eq!(
+            file.zh_to_en("你好").as_deref(),
+            Some("int. hello; int. hi")
+        );
+        drop(file);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
