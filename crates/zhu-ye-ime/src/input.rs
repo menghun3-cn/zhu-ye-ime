@@ -1271,11 +1271,14 @@ impl InputEngine {
                 items: self
                     .suggestion
                     .iter()
-                    .map(|text| CandidateUiItem {
-                        text: text.clone(),
+                    .map(|word| CandidateUiItem {
+                        text: word.clone(),
                         translation: String::new(),
                         pinyin: String::new(),
-                        pinyin_tone: String::new(),
+                        // T-135：联想候选也显示音标。词级带调优先、字级逐字
+                        // 拼合兜底（ToneMap 字级表覆盖常用字）；罕字查不到时
+                        // 留空 → 候选窗回退"无拼音行"（不产生假拼音）。
+                        pinyin_tone: self.tone_spaced(word),
                         source: zhu_ye_core::candidate::CandidateSource::Suggestion,
                     })
                     .collect(),
@@ -2511,6 +2514,61 @@ mod tests {
         assert_eq!(engine.handle_space().as_deref(), Some("世界"));
         assert!(engine.suggestion_active());
         assert_eq!(engine.previous_word(), Some("世界"));
+    }
+
+    #[test]
+    fn 联想候选携带带调拼音() {
+        // 未装配带调表：pinyin_tone 全空（T-135 前的基线：联想无拼音行）。
+        let mut plain = suggestion_engine();
+        commit_nihao(&mut plain);
+        let view = plain.candidate_ui_view();
+        assert!(
+            view.items.iter().all(|i| i.pinyin_tone.is_empty()),
+            "无带调表时联想不强行造拼音"
+        );
+
+        // 装配带调表（词级"你好" + 字级兜底）：整词/短语/字级拼合全部出音标。
+        let mut engine = suggestion_engine();
+        engine = engine.with_tone_map(ToneMap::from_lines(
+            "#word\n你好\tnǐ hǎo\n#char\n你\tnǐ\n好\thǎo\n世\tshì\n界\tjiè\n中\tzhōng\n国\tguó\n",
+        ));
+        commit_nihao(&mut engine);
+        let view = engine.candidate_ui_view();
+        let pin = |text: &str| {
+            view.items
+                .iter()
+                .find(|i| i.text == text)
+                .map(|i| i.pinyin_tone.as_str())
+        };
+        assert_eq!(pin("世界"), Some("shì jiè"), "字级逐字拼合");
+        assert_eq!(pin("你好世界"), Some("nǐ hǎo shì jiè"), "两词短语逐字拼合");
+        assert_eq!(pin("中国"), Some("zhōng guó"), "字级拼合");
+
+        // 字级缺音的罕字联想词留空：候选窗回退"无拼音行"，不产生假拼音。
+        let mut bigram = InMemoryBigramModel::new();
+        bigram.insert("你好", "世界", 120);
+        bigram.insert("你好", "赞", 10);
+        let mut engine = InputEngine::with_bigram(m1_seed_dictionary(), Arc::new(bigram));
+        engine = engine.with_tone_map(ToneMap::from_lines("#char\n世\tshì\n界\tjiè\n"));
+        commit_nihao(&mut engine);
+        let view = engine.candidate_ui_view();
+        assert_eq!(
+            view.items
+                .iter()
+                .find(|i| i.text == "赞")
+                .unwrap()
+                .pinyin_tone,
+            "",
+            "缺音字留空"
+        );
+        assert_eq!(
+            view.items
+                .iter()
+                .find(|i| i.text == "世界")
+                .unwrap()
+                .pinyin_tone,
+            "shì jiè"
+        );
     }
 
     #[test]

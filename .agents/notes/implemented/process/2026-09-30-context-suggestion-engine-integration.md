@@ -91,6 +91,24 @@ machinery render it as a normal (empty-composition) view:
   (s1=2444 / s2=2532 vs s3=959 composition header) separate the full
   suggestion window from the header-only state.
 
+## Suggestion rows show tone pinyin (T-135, user report "联想词没显示音标")
+
+User (2026-10-09): in pinyin-display mode, words suggested after a commit
+show no pinyin rows. Root cause: the suggestion branch of
+`candidate_ui_view` built `CandidateUiItem` with both `pinyin` and
+`pinyin_tone` hard-empty (suggestion stores `Vec<String>`), so the window's
+`show_pin` gate failed and every suggestion row rendered pin-less.
+
+Fix (T-135): the suggestion branch now fills `pinyin_tone:
+self.tone_spaced(word)` — ToneMap prefers word-level tone, falls back to
+per-char joins (its char table covers common hanzi, so two-word phrases
+assemble too); words with any unheard char stay empty, and the window falls
+back to a pin-less row instead of inventing pinyin. `pinyin` (tone-less)
+stays empty: with `pinyin_tone` present, paint uses the tone form directly
+(T-112 batch-4 logic); without it, spell-pinyin return the base text and the
+pin row is hidden — both paths correct. New test asserts empty-when-no-tone
+baseline, word/char/phrase assembly, and unheard-char fallback.
+
 ## Supersession check
 
 No active note is superseded: this note is the engine layer consuming the
