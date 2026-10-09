@@ -169,6 +169,31 @@ Pixel proof (@96dpi light, `gāo fēng` demo row): before the fix the pin ink ra
 y=234..248 (clipped flat at the 13px line); after the fix it runs y=237..252
 (the `g` descender is intact) with the same 4px gap to the main text below.
 
+## Candidate-row content band is vertically centred (T-132, user report "选项行内部下留白过多")
+
+User report (2026-10-09, right after T-131 deploy): each candidate row had too
+much whitespace below the content, looking loose.
+
+Root cause: rows with pinyin anchored the content band at the row **top** —
+pin glyph band (13px + ~3px tmHeight extension) then `pin_line_gap` (4px) then
+the 16px main-text band = 36px inside the 48px row — leaving ~12px of dead
+space at the bottom (plus `row_gap` 4px), which read as "松散". Rows without
+pinyin were already vertically centred (`DT_VCENTER`).
+
+Fix (T-132, `candidate_window.rs` paint only; panel size / pagination
+unchanged): new pure `CandidateMetrics::pin_band_top(row, pin_tm_height)`
+returns the content-band top so the whole band (pin band + gap + main band) is
+centred in the row; the pin draw rect, main/translation rects and the
+row-number rect (which follows the main band per T-126 "序号跟中文对齐") all
+derive from that top. With 96dpi constants the band sits 6px/6px top/bottom
+instead of 0px/12px.
+
+Pixel proof (@96dpi light, demo row with pinyin `nǐ men hǎo`): before, ink ran
+y=116..148 inside row 112..160 (top pad ≈4px, bottom ≈11px); after, ink runs
+y=121..153 (top pad ≈9px — pin glyph top inset — bottom ≈6px), i.e. the band
+moved down ~5px and the row now balances. Non-pinyin rows (translation mode,
+pin toggle off) are untouched (16px/16px, already centred).
+
 ## Show-pin toggle (T-127)
 
 User request: "设置里面可以设置候选框是否显示拼音及声调" — a settings toggle

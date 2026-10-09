@@ -525,6 +525,20 @@ impl CandidateMetrics {
         }
     }
 
+    /// 拼音行内容带在行内的垂直起点（T-131 行内垂直居中）。
+    ///
+    /// 内容带 = 拼音字形带（真实行高 `pin_tm_height`，T-130）+
+    /// `pin_line_gap` + 主文本带（`font_height`）。此前内容带贴行顶、
+    /// 底部悬空约 12px（行高 48 减内容带 36），用户反馈"候选行内部下留白
+    /// 过多"；本函数返回使内容带整条在 `row` 内垂直居中的顶边（上下留白
+    /// 均衡，panel 尺寸/分页不变）。内容带高于行高时返回行顶。
+    #[must_use]
+    pub fn pin_band_top(&self, row: UiRect, pin_tm_height: i32) -> i32 {
+        let pin_band = pin_tm_height.max(self.pin_font_height);
+        let content = pin_band + self.pin_line_gap + self.font_height;
+        row.top.saturating_add((row.height() - content).max(0) / 2)
+    }
+
     /// 行内按内容动态划分主文本与译文矩形（T-037）。
     ///
     /// 译文不再固定占用右侧 1/3 列，而是**紧跟主文本估算宽度之后**（含
@@ -590,7 +604,7 @@ mod tests {
     use super::{
         display_main_text, estimate_text_width, index_marker, page_footer_label, theme,
         theme_from_system_colors, theme_with_candidate, CandidateMetrics, CandidateUiItem,
-        CandidateUiView, SystemColors, UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE,
+        CandidateUiView, SystemColors, UiColor, UiRect, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE,
         SLANG_LABEL,
     };
     use zhu_ye_core::candidate::CandidateSource;
@@ -1111,5 +1125,32 @@ mod tests {
         let edge = metrics.pin_row_rect(row, wide_main, "zhang hao shi yin");
         assert!(edge.right <= row.right);
         assert!(edge.right >= edge.left);
+    }
+
+    #[test]
+    fn 拼音行内容带行内垂直居中() {
+        // T-131：内容带（拼音字形带 + pin_line_gap + 主文本带）在行内居中，
+        // 消除此前"贴行顶、底部悬空约 12px"的下留白；panel 尺寸/分页不变。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        let row = metrics.row_rect(0);
+        let tm = metrics.pin_font_height + 3; // T-130 真实行高（Segoe UI 13px）
+        let top = metrics.pin_band_top(row, tm);
+        // 常规行：内容带 16+4+16=36 < 行高 48 → 顶边 = 行顶 + (48-36)/2 = +6。
+        assert_eq!(top, row.top + 6);
+        // 拼音字形带底 = 内容带顶 + 拼音带；主文本顶 = 字形带底 + pin_line_gap：
+        // 上下留白均衡（各 6px），视觉间距仍精确等于 pin_line_gap。
+        let pin_band = tm.max(metrics.pin_font_height);
+        assert_eq!(
+            top + pin_band + metrics.pin_line_gap + metrics.font_height,
+            row.bottom - 6
+        );
+        // 内容带高于行高时贴行顶（负偏移截为 0，不越出行）。
+        let tiny = UiRect {
+            top: 40,
+            left: 0,
+            right: 100,
+            bottom: 60,
+        };
+        assert_eq!(metrics.pin_band_top(tiny, tm), tiny.top);
     }
 }
