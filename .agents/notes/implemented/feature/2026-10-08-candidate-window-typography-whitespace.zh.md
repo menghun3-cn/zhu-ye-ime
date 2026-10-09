@@ -115,6 +115,24 @@ CJK 1.0→1.06em，`fit_text` 同步）—— 所有消费方矩形（行分栏�
 
 Related：[候选窗水平布局与拼音行排版](../../implemented/feature/2026-10-08-candidate-window-layout-pinyin-typography.zh.md)（T-122）保持 active —— 本 note 原位更新其拼音参数（字重/颜色/间距/字体、主文本加粗、行高）；序号右对齐与独立 `pin` 主题键决策不变。
 
+## 拼音字形带改用真实 tmHeight（T-130，用户反馈"拼音下方被截断"）
+
+用户 2026-10-09 反馈：部分词汇上方拼音底部被截断。根因：`pin_row_rect`
+的拼音带按 `pin_font_height`（13px）取高，而这是**字符高**（`lfHeight = -13`）；
+Segoe UI 13px 的真实 `tmHeight` ≈ 16px。`DrawTextW` 按矩形裁剪，`g`/`j`/
+`p`/`q`/`y` 等字母的下伸部（descender，约 3px）被削平，而行内定位仍按
+13px 带计算。
+
+修复（全部留在 `candidate_window.rs`，布局常量不动）：pin 字体创建后
+`query_font_tm_height` 用临时兼容 DC 读 `GetTextMetricsW` 的 `tmHeight`，
+窗口状态存 `pin_tm_height`；paint 里拼音**绘制矩形**与由此推导的主文本/
+序号顶边统一按 `pin_tm_height - pin_font_height` 扩展——字形带=真实
+tmHeight，墨迹与下方汉字视觉间距仍为 `pin_line_gap`（4px）。
+
+像素证据（96dpi 浅色，`gāo fēng` 演示行）：修前拼音墨迹 y=234..248
+（在 13px 线处被切平）；修后 y=237..252（`g` 下伸完整），与下方主文本
+间距不变。
+
 ## 候选拼音显示开关（T-127）
 
 用户指令："设置里面可以设置候选框是否显示拼音及声调" —— 候选窗拼音行
