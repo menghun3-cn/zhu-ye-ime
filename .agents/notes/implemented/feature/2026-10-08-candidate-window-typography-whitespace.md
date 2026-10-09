@@ -261,6 +261,46 @@ plus the tiny-row clamp), workspace all-green; 96dpi demo probe — row 0
 (top 46): pin ink y52..60 (band top 47; ≈5-6px ink gap above includes the
 Segoe UI 13px glyph top bearing), main ink y68..83 (11px below).
 
+## Candidate-card margin zeroed, header top-aligned to 1px (T-140, user "候选词卡片内已经有内边距，外边距直接改为0；候选框输入的最上边留白太多，改为距离最上面1px")
+
+User (2026-10-09, right after T-139 deployed): two whitespace cuts — (1) the
+candidate **card to card** outer margin goes to 0 because each row already
+carries its own inner padding; (2) the **topmost whitespace of the input
+area** (the header composition band) shrinks to 1px from the top of the
+window. Both are pure layout-value changes in `CandidateMetrics`; no paint
+algorithmic change for rows.
+
+Changes (`candidate_ui.rs`):
+
+- New field `header_top: dp(1.0)` — the header region starts 1dp below the
+  window top instead of at `padding_y` (12). `header_rect` top and
+  `row_rect` top derivation (previously `padding_y + header_height`) now use
+  `header_top + header_height`.
+- `header_height` 34 → 25dp (1 top + 16 glyph band + ≈8 bottom buffer).
+  The composition band is no longer vertically centred inside the header:
+  `draw_header_mixed` baseline becomes `rect.top + main_tm.tmAscent`
+  (glyph-band top = `rect.top`), and the plain header path switches from
+  `draw_text` (DT_VCENTER) to a new `draw_text_top` (glyph band top-aligned;
+  DrawTextW without DT_VCENTER = DT_TOP; emoji colour path shared with
+  `draw_text`). The pinyin hint in the header follows the same top alignment.
+- `row_gap` 4 → 0 (rows are adjacent; the row's own inner padding — 1 above
+  the pin band, 11 below the main text per T-138 — still separates the ink).
+- `panel_size` top term changes from `padding_y * 2` to
+  `header_top + header_height + padding_y` (bottom padding stays 12).
+
+96dpi geometry: panel 542 → 490 tall (header −20, row gap −32). Row 0 top
+46 → 26 (up 20). Pixel probe (t140-xian-light): header ink starts at y=1
+(the 1px border line at y=0; glyph band top-aligned so ink y4..14), the
+T-139 straight apostrophe moved 24..26 → 4..6 (top-aligned, still x31..32);
+row 1 pin/main ink 31..40 / 48..63; row 2 top = row 1 bottom (74),
+row-gap 0 confirmed. Dark theme re-rendered. Supersedes T-136's vertical
+centring for the header region (kept active — all follow-ups part of the
+same whitespace narrative); row-internal band top alignment (T-138)
+unchanged.
+
+Followed up in the same PR as the T-139 horizon; user eyeball pending on
+the real machine.
+
 ## Show-pin toggle (T-127)
 
 User request: "设置里面可以设置候选框是否显示拼音及声调" — a settings toggle

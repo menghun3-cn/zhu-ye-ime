@@ -242,8 +242,11 @@ pub struct CandidateMetrics {
     pub panel_width: i32,
     /// 面板水平内边距。
     pub padding_x: i32,
-    /// 面板垂直线内边距。
+    /// 面板垂直内边距。
     pub padding_y: i32,
+    /// 页眉区顶边相对窗口顶部的距离（T-140：用户"候选框输入的最上边留白
+    /// 改为距离最上面 1px"——页眉贴顶 1dp，不再从 `padding_y` 缩进）。
+    pub header_top: i32,
     /// 页眉高度。
     pub header_height: i32,
     /// 单行高度。
@@ -293,15 +296,21 @@ impl CandidateMetrics {
             padding_x: dp(12.0),
             // T-126：垂直内边距 10→12（面板上下留白更舒展）。
             padding_y: dp(12.0),
+            // T-140：页眉贴顶 1dp（用户"候选框输入的最上边留白还是太多，
+            // 改为距离最上面 1px"），顶部不再受 `padding_y` 影响。
+            header_top: dp(1.0),
             // T-126：页眉 38→48（顶部输入缓冲区更舒展）；T-136：48→34
             // （用户反馈候选框顶部留白过多、重心偏下——页眉压缩 30%，
             // 拼音区收窄，首行候选随之上移紧贴，垂直"呼吸感"收紧）。
-            // 16px 字高 + 上下各 ≈9px 空间。
-            header_height: dp(34.0),
+            // T-140：34→25（用户要求最上边留白 1px）——1dp 顶距 + 16px
+            // 字带 + ≈8dp 下缓冲；组合串字形带顶对齐窗口顶（不再垂直居中）。
+            header_height: dp(25.0),
             // T-126：候选行 36→48（拼音带 + 主文本 + 每侧 ≈4-5px 呼吸内边距）。
             row_height: dp(48.0),
             // T-126：行间距 2→4（候选行之间留白加大）。
-            row_gap: dp(4.0),
+            // T-140：4→0（用户"候选词卡片内已经有内边距，外边距直接改为0"
+            // ——行内已有上下内边距，卡片之间不再留额外间距）。
+            row_gap: 0,
             // T-037：序号列收窄使候选词更贴近序号；译文紧随主文本间距减小。
             // T-122：列宽 26→22（词起点左移 4px）并让序号右对齐、词起点固定
             // 留 `marker_text_gap` 间距（4-8px 档），消除数字后多余留白。
@@ -347,7 +356,9 @@ impl CandidateMetrics {
         let footer = if rows > 0 { self.footer_height } else { 0 };
         (
             self.panel_width,
-            self.header_height + rows_height + footer + self.padding_y * 2,
+            // T-140：顶部不再计 `padding_y`（页眉贴顶 `header_top`），
+            // 底部内边距保持 `padding_y`。
+            self.header_top + self.header_height + rows_height + footer + self.padding_y,
         )
     }
 
@@ -365,14 +376,14 @@ impl CandidateMetrics {
         }
     }
 
-    /// 页眉矩形。
+    /// 页眉矩形（T-140：顶边 = `header_top` 贴窗口顶 1dp）。
     #[must_use]
     pub fn header_rect(&self) -> UiRect {
         UiRect {
             left: self.padding_x,
-            top: self.padding_y,
+            top: self.header_top,
             right: self.panel_width - self.padding_x,
-            bottom: self.padding_y + self.header_height,
+            bottom: self.header_top + self.header_height,
         }
     }
 
@@ -492,7 +503,7 @@ impl CandidateMetrics {
     #[must_use]
     pub fn row_rect(&self, index: usize) -> UiRect {
         let index = i32::try_from(index).unwrap_or(i32::MAX);
-        let top = self.padding_y + self.header_height + index * (self.row_height + self.row_gap);
+        let top = self.header_top + self.header_height + index * (self.row_height + self.row_gap);
         UiRect {
             left: self.padding_x,
             top,
@@ -820,7 +831,11 @@ mod tests {
         let metrics = CandidateMetrics::new(BASE_DPI);
         let (width, height) = metrics.panel_size(0);
         assert_eq!(width, metrics.panel_width);
-        assert_eq!(height, metrics.header_height + metrics.padding_y * 2);
+        // T-140：顶部贴边 `header_top`，底部内边距 `padding_y`（顶部不再×2）。
+        assert_eq!(
+            height,
+            metrics.header_top + metrics.header_height + metrics.padding_y
+        );
         // 一行面板比零行面板多一个整行 + 页脚条（有候选行才显示页脚，T-040）。
         let (_, one) = metrics.panel_size(1);
         assert_eq!(one - height, metrics.row_height + metrics.footer_height);
@@ -828,7 +843,8 @@ mod tests {
         // T-126：页眉 38→48、行高 36→48、行距 2→4、内边距 10→12
         // → 九行面板 398 → 536（+138dp：输入缓冲区与候选行呼吸空间）。
         // T-136：页眉 48→34（顶部压缩 30%）→ 九行面板 536 → 522（-14dp）。
-        assert_eq!(metrics.panel_size(9).1, 522 + metrics.footer_height);
+        // T-140：页眉 34→25 + 行距 4→0 + 顶距 12→1 → 九行面板 522 → 490（-32dp）。
+        assert_eq!(metrics.panel_size(9).1, 490);
         assert_eq!(metrics.panel_size(9).0, 360);
         // 零行面板不占页脚空间（T-031 页眉条行为保持）。
         assert_eq!(
