@@ -14,6 +14,16 @@ const LOGICAL_WIDTH: i32 = 880;
 const LOGICAL_HEIGHT: i32 = 700;
 /// 左侧导航列宽。
 const LOGICAL_NAV_WIDTH: i32 = 200;
+/// 导航列顶品牌块高度（T-148 视觉改版，§6.2：竹叶 LOGO + 字标 + 竹节棕细线）。
+const LOGICAL_BRAND: i32 = 64;
+/// 品牌块底到导航首行的间距（对应视觉稿 `.nav` 上内边距）。
+const LOGICAL_NAV_TOP_GAP: i32 = 10;
+/// 品牌块左右内边距（对应视觉稿 `.brand` 的横向 padding）。
+const LOGICAL_BRAND_PADDING: i32 = 20;
+/// 品牌 LOGO 边长（竹叶图形，T-142 嵌入的 zhu.ico 复用为 DrawIconEx 位图）。
+const LOGICAL_BRAND_ICON: i32 = 22;
+/// 品牌 LOGO 与字标间距。
+pub(crate) const LOGICAL_BRAND_TEXT_GAP: i32 = 10;
 /// 导航行高。
 const LOGICAL_NAV_ROW: i32 = 54;
 /// 页标题区高度。
@@ -127,16 +137,44 @@ impl SettingsMetrics {
     }
 }
 
-/// 导航行；按 `Page::ALL` 顺序从上到下排列。
+/// 导航列顶品牌块矩形（宽=导航列，底部 1px 竹节棕细线落在 `bottom-1` 行）。
+#[must_use]
+pub fn brand_rect(metrics: &SettingsMetrics, client: UiRect) -> UiRect {
+    UiRect {
+        left: client.left,
+        top: client.top,
+        right: metrics.nav_width,
+        bottom: client.top + scale(metrics.dpi, LOGICAL_BRAND),
+    }
+}
+
+/// 品牌块 LOGO 矩形（导航列内左上，垂直居中）。
+#[must_use]
+pub fn brand_icon_rect(metrics: &SettingsMetrics, client: UiRect) -> UiRect {
+    let rect = brand_rect(metrics, client);
+    let size = scale(metrics.dpi, LOGICAL_BRAND_ICON);
+    let left = rect.left + scale(metrics.dpi, LOGICAL_BRAND_PADDING);
+    let top = rect.top + (rect.height() - size) / 2;
+    UiRect {
+        left,
+        top,
+        right: left + size,
+        bottom: top + size,
+    }
+}
+
+/// 导航行；按 `Page::ALL` 顺序从上到下排列，整体位于品牌块之下。
 #[must_use]
 pub fn nav_rows(metrics: &SettingsMetrics, client: UiRect) -> Vec<(Page, UiRect)> {
+    let first_top =
+        client.top + scale(metrics.dpi, LOGICAL_BRAND) + scale(metrics.dpi, LOGICAL_NAV_TOP_GAP);
     Page::ALL
         .iter()
         .copied()
         .enumerate()
         .map(|(index, page)| {
             let step = metrics.nav_row_height + metrics.gap;
-            let top = client.top + metrics.padding + index as i32 * step;
+            let top = first_top + index as i32 * step;
             let rect = UiRect {
                 left: metrics.gap,
                 top,
