@@ -6,13 +6,14 @@
 use std::mem::size_of;
 use std::path::Path;
 
-use windows::Win32::Foundation::{COLORREF, RECT};
+use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW, CreatePen, CreateSolidBrush,
-    DeleteDC, DeleteObject, DrawTextW, FillRect, GetDIBits, RoundRect, SelectObject, SetBkMode,
-    SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, FF_DONTCARE, FW_BOLD, FW_NORMAL, FW_SEMIBOLD,
-    HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW, PS_NULL, TRANSPARENT,
+    DeleteDC, DeleteObject, DrawTextW, FillRect, GetDIBits, GetStockObject, GetTextExtentPoint32W,
+    RoundRect, SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    CLEARTYPE_QUALITY, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DRAW_TEXT_FORMAT,
+    FF_DONTCARE, FW_BOLD, FW_MEDIUM, FW_NORMAL, FW_SEMIBOLD, HBITMAP, HDC, HFONT, HGDIOBJ,
+    LOGFONTW, NULL_BRUSH, PS_NULL, PS_SOLID, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
@@ -31,6 +32,44 @@ pub(crate) unsafe fn fill(hdc: HDC, rect: UiRect, color: UiColor) {
         let native = to_native(rect);
         FillRect(hdc, &native, brush);
         let _ = DeleteObject(brush.into());
+    }
+}
+
+/// 用 1px 实色线画圆角矩形描边（chips 细描边、展开区边框等；GDI 圆角描边）。
+pub(crate) unsafe fn round_rect_outline(hdc: HDC, rect: UiRect, radius: i32, color: UiColor) {
+    unsafe {
+        let pen = CreatePen(PS_SOLID, 1, COLORREF(color.to_colorref()));
+        let previous_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        let previous_pen = SelectObject(hdc, pen.into());
+        let diameter = radius.max(1) * 2;
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            diameter,
+            diameter,
+        );
+        let _ = SelectObject(hdc, previous_pen);
+        let _ = SelectObject(hdc, previous_brush);
+        let _ = DeleteObject(pen.into());
+    }
+}
+
+/// 用指定字体测量一行文本的像素宽度（「规划中」标签跟在条目标题后的排版需要）。
+/// 注意用裸 UTF-16（不带 `to_utf16` 的尾随 NUL），否则宽度多算半个字符。
+pub(crate) unsafe fn text_width(hdc: HDC, text: &str, font: HFONT) -> i32 {
+    unsafe {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        if wide.is_empty() {
+            return 0;
+        }
+        let previous = SelectObject(hdc, font.into());
+        let mut size = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+        let _ = SelectObject(hdc, previous);
+        size.cx
     }
 }
 
@@ -207,6 +246,10 @@ pub(crate) struct Fonts {
     pub(crate) small: HFONT,
     /// 选中导航项专用：与 `body` 同字号、字重加粗（T-125 排版规范化）。
     pub(crate) nav_active: HFONT,
+    /// 按钮文字：与 `small` 同字号、字重 500（T-148 视觉改版 §5 字体角色）。
+    pub(crate) small_medium: HFONT,
+    /// 选中 chips 文字：与 `small` 同字号、字重加粗（T-148 §7 选中浅底深字 600）。
+    pub(crate) small_semibold: HFONT,
     pub(crate) body_height: i32,
     pub(crate) small_height: i32,
     dpi: u32,
@@ -241,11 +284,17 @@ impl Fonts {
             small_font.lfHeight = -scale(base_height, 13, 12);
             let mut nav_active_font = body_font;
             nav_active_font.lfWeight = FW_SEMIBOLD.0 as i32;
+            let mut small_medium_font = small_font;
+            small_medium_font.lfWeight = FW_MEDIUM.0 as i32;
+            let mut small_semibold_font = small_font;
+            small_semibold_font.lfWeight = FW_SEMIBOLD.0 as i32;
 
             self.body = CreateFontIndirectW(&body_font);
             self.title = CreateFontIndirectW(&title_font);
             self.small = CreateFontIndirectW(&small_font);
             self.nav_active = CreateFontIndirectW(&nav_active_font);
+            self.small_medium = CreateFontIndirectW(&small_medium_font);
+            self.small_semibold = CreateFontIndirectW(&small_semibold_font);
             self.body_height = body_font.lfHeight.abs();
             self.small_height = small_font.lfHeight.abs();
             self.dpi = dpi;
@@ -255,7 +304,14 @@ impl Fonts {
     /// 释放字体；DPI 变化或窗口销毁时调用。
     pub(crate) unsafe fn release(&mut self) {
         unsafe {
-            for font in [self.title, self.body, self.small, self.nav_active] {
+            for font in [
+                self.title,
+                self.body,
+                self.small,
+                self.nav_active,
+                self.small_medium,
+                self.small_semibold,
+            ] {
                 if !font.is_invalid() {
                     let _ = DeleteObject(font.into());
                 }
@@ -264,6 +320,8 @@ impl Fonts {
             self.body = HFONT::default();
             self.small = HFONT::default();
             self.nav_active = HFONT::default();
+            self.small_medium = HFONT::default();
+            self.small_semibold = HFONT::default();
             self.body_height = 0;
             self.small_height = 0;
             self.dpi = 0;

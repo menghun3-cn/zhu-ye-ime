@@ -3,7 +3,9 @@
 //! 主题文件存于 `%APPDATA%\zhu-ye-ime\themes\<名称>.json`，一份文件同时描述候选窗
 //! 与设置窗口两组配色（"候选窗与设置窗口同源读取"，S-2），键集分别对齐
 //! `CandidateUiTheme`（8 键，`pin` 拼音行色为可选键，缺省回退加深灰默认）
-//! 与 `SettingsTheme`（15 键）：
+//! 与 `SettingsTheme`（22 键；T-148 视觉改版新增 `on_accent`/`chip_border`/
+//! `tag_bg`/`tag_text`/`sprout`/`ok_text`/`expanded_bg`，均可选、缺键回退内建
+//! 预设；品牌块竹节棕 `bark` 属品牌固定色，不对外暴露）：
 //!
 //! ```json
 //! {
@@ -51,7 +53,7 @@ pub struct CandidatePalette {
     pub pin: Option<ThemeColor>,
 }
 
-/// 设置窗口配色节（键集 = `SettingsTheme` 15 键）。
+/// 设置窗口配色节（键集 = `SettingsTheme` 22 键；T-148 视觉改版新增 7 键均可选）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SettingsPalette {
     pub window: Option<ThemeColor>,
@@ -69,6 +71,20 @@ pub struct SettingsPalette {
     pub control_selected_text: Option<ThemeColor>,
     pub placeholder_text: Option<ThemeColor>,
     pub warn_text: Option<ThemeColor>,
+    /// 实叶底上的前景（实底按钮/面板选中格字色；浅色白、深色墨）。
+    pub on_accent: Option<ThemeColor>,
+    /// chips/描边按钮细描边。
+    pub chip_border: Option<ThemeColor>,
+    /// 「规划中」标签底。
+    pub tag_bg: Option<ThemeColor>,
+    /// 「规划中」标签文字。
+    pub tag_text: Option<ThemeColor>,
+    /// 新芽记号圆点（仅「规划中」）。
+    pub sprout: Option<ThemeColor>,
+    /// 状态·正常文字。
+    pub ok_text: Option<ThemeColor>,
+    /// 占位展开说明区底。
+    pub expanded_bg: Option<ThemeColor>,
 }
 
 /// 解析后的主题文件。
@@ -161,6 +177,13 @@ fn parse_settings(value: Option<&serde_json::Value>) -> SettingsPalette {
         control_selected_text: get("control_selected_text"),
         placeholder_text: get("placeholder_text"),
         warn_text: get("warn_text"),
+        on_accent: get("on_accent"),
+        chip_border: get("chip_border"),
+        tag_bg: get("tag_bg"),
+        tag_text: get("tag_text"),
+        sprout: get("sprout"),
+        ok_text: get("ok_text"),
+        expanded_bg: get("expanded_bg"),
     }
 }
 
@@ -227,6 +250,33 @@ mod tests {
         assert_eq!(file.settings.window, Some(super::ThemeColor(0x1F_1F_1F)));
         assert_eq!(file.settings.accent, Some(super::ThemeColor(0x42_A5_F5)));
         assert_eq!(file.settings.warn_text, None);
+    }
+
+    #[test]
+    fn 设置窗视觉改版新键可选解析() {
+        let file = parse_theme_file(
+            r##"{
+                "version": 1,
+                "settings": {
+                    "on_accent": "#FFFFFF", "chip_border": "#C4CFBB",
+                    "tag_bg": "#EEF3E4", "tag_text": "#4A6E28",
+                    "sprout": "#9AC36A", "ok_text": "#2C6E3F",
+                    "expanded_bg": "#F1F4EC"
+                }
+            }"##,
+        )
+        .expect("T-148 新增设置窗键应可解析");
+        let s = file.settings;
+        assert_eq!(s.on_accent, Some(super::ThemeColor(0xFF_FF_FF)));
+        assert_eq!(s.chip_border, Some(super::ThemeColor(0xC4_CF_BB)));
+        assert_eq!(s.tag_bg, Some(super::ThemeColor(0xEE_F3_E4)));
+        assert_eq!(s.tag_text, Some(super::ThemeColor(0x4A_6E_28)));
+        assert_eq!(s.sprout, Some(super::ThemeColor(0x9A_C3_6A)));
+        assert_eq!(s.ok_text, Some(super::ThemeColor(0x2C_6E_3F)));
+        assert_eq!(s.expanded_bg, Some(super::ThemeColor(0xF1_F4_EC)));
+        // 缺键仍为 None → 调用方回退预设（S-25 可选键兼容）。
+        let file = parse_theme_file(r#"{"version": 1}"#).unwrap();
+        assert_eq!(file.settings, super::SettingsPalette::default());
     }
 
     #[test]

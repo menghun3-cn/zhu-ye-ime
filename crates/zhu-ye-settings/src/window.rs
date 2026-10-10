@@ -25,22 +25,22 @@ use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, DrawIconEx, FindWindowW,
     GetClassLongPtrW, GetClientRect, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
     GetWindowTextW, LoadCursorW, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GCLP_HICON, GWLP_USERDATA, IDC_ARROW,
-    MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WINDOW_EX_STYLE,
-    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCCREATE,
-    WM_PAINT, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_USER, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, DI_NORMAL, GCLP_HICON, GWLP_USERDATA,
+    HICON, IDC_ARROW, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED,
+    WM_USER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 use zhu_ye_core::identity::DICTIONARY_FILE_NAME;
 use zhu_ye_core::{ModeChoice, ThemeChoice};
 use zhu_ye_ui::{UiRect, UiThemeKind, BASE_DPI};
 
 use crate::config;
-use crate::gdi::{draw_text, fill, fill_round, BackBuffer, Fonts};
+use crate::gdi::{draw_text, fill, fill_round, round_rect_outline, text_width, BackBuffer, Fonts};
 use crate::installed::{self, InstalledPack, PackSource};
 use crate::inventory::{self, list_packs, PackInfo};
 use crate::layout::{self, Chip, ChipValue, SettingsMetrics};
@@ -138,6 +138,9 @@ struct WindowState {
     dpi: u32,
     back: BackBuffer,
     fonts: Fonts,
+    /// 品牌图形句柄：T-142 嵌入的 zhu.ico（资源 id 1，与标题栏同源），复用为
+    /// 导航列品牌块的竹叶图形（T-148 §6.2；DrawIconEx 纯 GDI 绘制，零新增资产）。
+    brand_icon: HICON,
     /// 设置窗口出现前的前台窗口。打开工具箱面板时把焦点还给它，面板才能把字符
     /// 送进用户真正在打字的那个应用。
     previous_foreground: HWND,
@@ -283,6 +286,7 @@ impl WindowState {
             dpi: shell::system_dpi().max(BASE_DPI),
             back: BackBuffer::default(),
             fonts: Fonts::default(),
+            brand_icon: load_brand_icon(),
             previous_foreground,
             panel: None,
             packs,
@@ -1096,7 +1100,7 @@ fn apply_theme(state: &mut WindowState, choice: ThemeChoice) {
                 let base = match &choice {
                     ThemeChoice::Custom(name) => match &state.custom_theme {
                         Some((_, covered)) => {
-                            format!("已保存主题：自定义（{name}），应用 {covered}/15 键；重启输入法后候选窗生效")
+                            format!("已保存主题：自定义（{name}），应用 {covered}/22 键；重启输入法后候选窗生效")
                         }
                         None => format!(
                             "已保存主题：自定义（{name}）；未找到可用主题文件，回退当前深浅预设"
@@ -1778,9 +1782,10 @@ unsafe fn draw_user_words(
         state.fonts.small,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
     );
+    // 主动作（导出/导入）用强调实底按钮，返回是次级动作（T-148 §7 按钮语言）。
     draw_button(
         hdc,
-        state.fonts.small,
+        state.fonts.small_medium,
         theme,
         metrics,
         layout.export,
@@ -1788,13 +1793,13 @@ unsafe fn draw_user_words(
     );
     draw_button(
         hdc,
-        state.fonts.small,
+        state.fonts.small_medium,
         theme,
         metrics,
         layout.import,
         "从文件导入…",
     );
-    draw_button(
+    draw_secondary_button(
         hdc,
         state.fonts.small,
         theme,
@@ -1848,7 +1853,7 @@ unsafe fn draw_contacts(
             hdc,
             "尚未登记任何 .vcf（导入后路径记录在 config.json 的 contact_vcards）",
             empty_note,
-            theme.placeholder_text,
+            theme.secondary_text,
             state.fonts.small,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
@@ -1906,13 +1911,13 @@ unsafe fn draw_contacts(
     }
     draw_button(
         hdc,
-        state.fonts.small,
+        state.fonts.small_medium,
         theme,
         metrics,
         layout.import,
         "导入 .vcf…",
     );
-    draw_button(
+    draw_secondary_button(
         hdc,
         state.fonts.small,
         theme,
@@ -1950,7 +1955,7 @@ unsafe fn draw_themes(
             hdc,
             "no themes：把主题 JSON 放进该目录后重新进入本页（轻点“返回”再进入）",
             empty_note,
-            theme.placeholder_text,
+            theme.secondary_text,
             state.fonts.small,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
@@ -2019,7 +2024,7 @@ unsafe fn draw_themes(
             DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
     }
-    draw_button(
+    draw_secondary_button(
         hdc,
         state.fonts.small,
         theme,
@@ -2103,6 +2108,10 @@ unsafe fn draw(hdc: HDC, state: &mut WindowState, client: UiRect) {
             bottom: client.bottom,
         };
         fill(hdc, nav_area, theme.nav_background);
+
+        // 导航列品牌块：竹叶 LOGO + 字标 + 竹节棕细线（T-148 §6.2；导航行整体
+        // 下移，见 `layout::nav_rows`）。
+        draw_brand_block(hdc, state, &theme, &metrics, client);
 
         // 导航
         for (page, rect) in layout::nav_rows(&metrics, client) {
@@ -2221,22 +2230,23 @@ unsafe fn draw_items(
             state.fonts.body,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
+        // 「规划中」标签（T-148 §7）：跟在条目标题后，与新芽记号点共排版；
+        // 只出现在占位条目上（`item.state.is_planned()`）。
+        if item.state.is_planned() {
+            draw_planned_tag(hdc, item.title, state, theme, metrics, title_rect);
+        }
         let summary_rect = UiRect {
             left: row.rect.left,
             top: title_rect.bottom + metrics.gap / 2,
             right: row.rect.right,
             bottom: title_rect.bottom + metrics.gap / 2 + state.fonts.small_height,
         };
-        let summary_color = if item.state.is_planned() {
-            theme.placeholder_text
-        } else {
-            theme.secondary_text
-        };
+        // 说明一律用次要色；「规划中」信号交由标签承担（§9：占位呈现改标签式）。
         draw_text(
             hdc,
             item.summary,
             summary_rect,
-            summary_color,
+            theme.secondary_text,
             state.fonts.small,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
@@ -2254,39 +2264,36 @@ unsafe fn draw_items(
             } else {
                 theme.control_background
             };
-            fill_round(hdc, chip.rect, metrics.gap / 2, background);
+            fill_round(hdc, chip.rect, metrics.gap, background);
+            // 未选中 chips 带 1px 细描边（§7：白/墨底 + 细边框）；选中浅底深字无描边。
+            if !selected {
+                round_rect_outline(hdc, chip.rect, metrics.gap, theme.chip_border);
+            }
             let foreground = if selected {
                 theme.control_selected_text
             } else {
                 theme.item_text
+            };
+            // 选中 chips 字重 600（§7），未选中正文（T-125 字号体系不变，13px）。
+            let font = if selected {
+                state.fonts.small_semibold
+            } else {
+                state.fonts.small
             };
             draw_text(
                 hdc,
                 chip.label,
                 chip.rect,
                 foreground,
-                state.fonts.small,
+                font,
                 DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
             );
         }
 
         if let Some(note_rect) = row.expanded {
-            let text_rect = UiRect {
-                left: note_rect.left,
-                top: note_rect.top,
-                right: note_rect.right,
-                bottom: note_rect.bottom - metrics.gap / 2,
-            };
-            if let Some(message) = item.state.message() {
-                draw_text(
-                    hdc,
-                    &message,
-                    text_rect,
-                    theme.placeholder_text,
-                    state.fonts.small,
-                    DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
-                );
-            }
+            // 占位展开区（§7）：浅底 + 细边框圆角面板，说明文字用次要色；
+            // 仅当条目确有计划说明时绘制，避免空面板。
+            draw_expanded_panel(hdc, state, theme, metrics, note_rect, item.state.message());
         }
 
         fill(
@@ -2298,6 +2305,91 @@ unsafe fn draw_items(
                 bottom: row.rect.bottom,
             },
             theme.border,
+        );
+    }
+}
+
+/// 「规划中」标签（T-148 §7）：tag 底 + 标签字 + 新芽记号圆点，圆角胶囊。
+/// 起自条目标题丈量宽度之后，标题短小、越界时省略（正常不会触发）。
+unsafe fn draw_planned_tag(
+    hdc: HDC,
+    item_title: &str,
+    state: &WindowState,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    title_rect: UiRect,
+) {
+    unsafe {
+        let dot = layout::scale(metrics.dpi, 6);
+        let pad_x = layout::scale(metrics.dpi, 9);
+        let gap_x = metrics.chip_gap;
+        let pill_height = state.fonts.small_height + layout::scale(metrics.dpi, 8);
+        let label_width = text_width(hdc, "规划中", state.fonts.small);
+        let pill_width = pad_x + dot + gap_x + label_width + pad_x;
+        let left = title_rect.left + text_width(hdc, item_title, state.fonts.body) + gap_x;
+        let pill = UiRect {
+            left,
+            top: title_rect.top + ((title_rect.height() - pill_height) / 2).max(0),
+            right: left + pill_width,
+            bottom: title_rect.top + ((title_rect.height() - pill_height) / 2).max(0) + pill_height,
+        };
+        if pill.right > title_rect.right {
+            return;
+        }
+        fill_round(hdc, pill, pill_height / 2, theme.tag_bg);
+        let dot_rect = UiRect {
+            left: pill.left + pad_x,
+            top: pill.top + (pill_height - dot) / 2,
+            right: pill.left + pad_x + dot,
+            bottom: pill.top + (pill_height - dot) / 2 + dot,
+        };
+        fill_round(hdc, dot_rect, dot / 2, theme.sprout);
+        let label_rect = UiRect {
+            left: dot_rect.right + gap_x,
+            top: pill.top,
+            right: pill.right - pad_x,
+            bottom: pill.bottom,
+        };
+        draw_text(
+            hdc,
+            "规划中",
+            label_rect,
+            theme.tag_text,
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
+    }
+}
+
+/// 占位展开说明区（T-148 §7）：底 + 1px 细边框圆角面板，说明文字用次要色。
+/// 仅当条目确有计划说明时绘制，避免空面板。
+unsafe fn draw_expanded_panel(
+    hdc: HDC,
+    state: &WindowState,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    note_rect: UiRect,
+    message: Option<String>,
+) {
+    unsafe {
+        let Some(message) = message else {
+            return;
+        };
+        fill_round(hdc, note_rect, metrics.gap, theme.expanded_bg);
+        round_rect_outline(hdc, note_rect, metrics.gap, theme.border);
+        let text_rect = UiRect {
+            left: note_rect.left + metrics.padding,
+            top: note_rect.top + metrics.gap,
+            right: note_rect.right - metrics.gap,
+            bottom: note_rect.bottom - metrics.gap,
+        };
+        draw_text(
+            hdc,
+            &message,
+            text_rect,
+            theme.secondary_text,
+            state.fonts.small,
+            DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
         );
     }
 }
@@ -2431,7 +2523,7 @@ unsafe fn draw_packs(
                 hdc,
                 "基础包",
                 pack.toggle,
-                theme.placeholder_text,
+                theme.secondary_text,
                 state.fonts.small,
                 DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
             );
@@ -2449,7 +2541,7 @@ unsafe fn draw_packs(
         );
     }
 
-    draw_button(
+    draw_secondary_button(
         hdc,
         state.fonts.small,
         theme,
@@ -2459,7 +2551,7 @@ unsafe fn draw_packs(
     );
     draw_button(
         hdc,
-        state.fonts.small,
+        state.fonts.small_medium,
         theme,
         metrics,
         layout.import,
@@ -2492,9 +2584,11 @@ unsafe fn draw_manage(
         bottom: layout_rows.status.top + metrics.gap + state.fonts.body_height,
     };
     let status_color = match &state.manage {
-        Some(reg) if reg.registered() => theme.item_text,
+        // 状态行语言（T-148 §7）：已注册=正常用 ok 色，异常=警示色，
+        // 探测中=说明字。
+        Some(reg) if reg.registered() => theme.ok_text,
         Some(_) => theme.warn_text,
-        None => theme.placeholder_text,
+        None => theme.secondary_text,
     };
     draw_text(
         hdc,
@@ -2540,7 +2634,7 @@ unsafe fn draw_manage(
         );
     }
 
-    draw_button(
+    draw_secondary_button(
         hdc,
         state.fonts.small,
         theme,
@@ -2548,7 +2642,8 @@ unsafe fn draw_manage(
         layout_rows.back,
         "← 返回常用设置",
     );
-    draw_button(
+    // 「打开系统输入法设置」是次级动作（描边按钮语言，T-148 §7），不套强调色。
+    draw_secondary_button(
         hdc,
         state.fonts.small,
         theme,
@@ -2604,7 +2699,7 @@ unsafe fn draw_repair(
         );
     }
 
-    draw_button(
+    draw_secondary_button(
         hdc,
         state.fonts.small,
         theme,
@@ -2612,28 +2707,23 @@ unsafe fn draw_repair(
         layout_rows.back,
         "← 返回常用设置",
     );
-    // 提权动作与普通动作在视觉上区分：二级修复不套强调色。
+    // 一级修复是用户确认后执行的主动作：强调实底按钮。
     draw_button(
         hdc,
-        state.fonts.small,
+        state.fonts.small_medium,
         theme,
         metrics,
         layout_rows.l1,
         "一级修复（无需管理员）",
     );
-    fill_round(
+    // 提权动作与普通动作在视觉上区分：二级修复是次级动作（描边按钮）。
+    draw_secondary_button(
         hdc,
-        layout_rows.l2,
-        metrics.gap / 2,
-        theme.control_background,
-    );
-    draw_text(
-        hdc,
-        "二级修复（需管理员，UAC）",
-        layout_rows.l2,
-        theme.item_text,
         state.fonts.small,
-        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        theme,
+        metrics,
+        layout_rows.l2,
+        "二级修复（需管理员，UAC）",
     );
 }
 
@@ -2670,8 +2760,9 @@ unsafe fn draw_about(
             "在线更新：已关闭"
         },
         layout_rows.status,
+        // 状态行语言（T-148 §7）：开启=正常 ok 色，未开启=警示色（提示可开启）。
         if online {
-            theme.item_text
+            theme.ok_text
         } else {
             theme.warn_text
         },
@@ -2697,14 +2788,35 @@ unsafe fn draw_about(
     );
 
     // 结果区：任务中显示进行中；否则显示最近一次结果（如实反映错误，D-44 无假共识）。
+    // T-148 §7 检查结果区：底 + 1px 细边框圆角面板；空态给「尚无检查结果」占位。
+    if layout_rows.result.height() > 0 {
+        fill_round(hdc, layout_rows.result, metrics.gap, theme.expanded_bg);
+        round_rect_outline(hdc, layout_rows.result, metrics.gap, theme.border);
+    }
     let lines = update_result_lines(state);
     let row_height = state.fonts.small_height;
     let visible = (layout_rows.result.height() / row_height.max(1)).max(0) as usize;
+    if lines.is_empty() && layout_rows.result.height() > 0 {
+        let hint_rect = UiRect {
+            left: layout_rows.result.left + metrics.gap,
+            top: layout_rows.result.top,
+            right: layout_rows.result.right - metrics.gap,
+            bottom: layout_rows.result.bottom,
+        };
+        draw_text(
+            hdc,
+            "尚无检查结果",
+            hint_rect,
+            theme.secondary_text,
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
     for (index, line) in lines.iter().take(visible).enumerate() {
         let rect = UiRect {
-            left: layout_rows.result.left,
+            left: layout_rows.result.left + metrics.gap,
             top: layout_rows.result.top + index as i32 * row_height,
-            right: layout_rows.result.right,
+            right: layout_rows.result.right - metrics.gap,
             bottom: layout_rows.result.top + (index as i32 + 1) * row_height,
         };
         draw_text(
@@ -2731,7 +2843,7 @@ unsafe fn draw_about(
     if can_run {
         draw_button(
             hdc,
-            state.fonts.small,
+            state.fonts.small_medium,
             theme,
             metrics,
             layout_rows.check,
@@ -2747,24 +2859,26 @@ unsafe fn draw_about(
             label,
         );
     }
-    fill_round(
-        hdc,
-        layout_rows.apply,
-        metrics.gap / 2,
-        theme.control_background,
-    );
-    draw_text(
-        hdc,
-        "应用更新",
-        layout_rows.apply,
-        if can_run {
-            theme.item_text
-        } else {
-            theme.placeholder_text
-        },
-        state.fonts.small,
-        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-    );
+    // 「应用更新」是次级动作：可点用描边按钮，不可点用禁用按钮（说明字色）。
+    if can_run {
+        draw_secondary_button(
+            hdc,
+            state.fonts.small,
+            theme,
+            metrics,
+            layout_rows.apply,
+            "应用更新",
+        );
+    } else {
+        draw_disabled_button(
+            hdc,
+            state.fonts.small,
+            theme,
+            metrics,
+            layout_rows.apply,
+            "应用更新",
+        );
+    }
 
     // 版本与诊断信息小节：标题 + 分隔线 + 逐行诊断（超出可用高度截断）。
     draw_text(
@@ -2880,7 +2994,7 @@ fn update_status_lines(config_path: Option<&std::path::Path>) -> Option<Vec<Stri
     Some(lines)
 }
 
-/// 不可点按钮：底色与前景都用"禁用"色，命中端不响应。
+/// 不可点按钮：白/墨底 + 细边框（次级语言）+ 说明字色，命中端不响应。
 unsafe fn draw_disabled_button(
     hdc: HDC,
     font: HFONT,
@@ -2890,17 +3004,18 @@ unsafe fn draw_disabled_button(
     label: &str,
 ) {
     fill_round(hdc, rect, metrics.gap / 2, theme.control_background);
+    round_rect_outline(hdc, rect, metrics.gap / 2, theme.chip_border);
     draw_text(
         hdc,
         label,
         rect,
-        theme.placeholder_text,
+        theme.secondary_text,
         font,
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
     );
 }
 
-/// 底部强调色按钮。
+/// 强调按钮（实底叶色，白/墨字）：下结论前用户要确认的主动作。
 unsafe fn draw_button(
     hdc: HDC,
     font: HFONT,
@@ -2914,10 +3029,101 @@ unsafe fn draw_button(
         hdc,
         label,
         rect,
-        theme.control_selected_text,
+        theme.on_accent,
         font,
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
     );
+}
+
+/// 次级按钮（返回、恢复状态栏、打开系统输入法设置等非强调动作）：
+/// 白/墨底 + 叶色细描边（见描边按钮规格，T-148 §7）。
+unsafe fn draw_secondary_button(
+    hdc: HDC,
+    font: HFONT,
+    theme: SettingsTheme,
+    metrics: &SettingsMetrics,
+    rect: UiRect,
+    label: &str,
+) {
+    fill_round(hdc, rect, metrics.gap / 2, theme.control_background);
+    round_rect_outline(hdc, rect, metrics.gap / 2, theme.chip_border);
+    draw_text(
+        hdc,
+        label,
+        rect,
+        theme.item_text,
+        font,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+    );
+}
+
+/// 载入品牌 LOGO：与标题栏同源的 zhu.ico（T-142 build.rs 嵌入，资源 id 1）。
+///
+/// 品牌块图形（T-148 §6.2）直接复用这个已有资源，用 `DrawIconEx` 缩放到 22px
+/// 逻辑尺寸绘制——纯 GDI、零新增资产，避免自绘叶子图形（PolyBezier/预渲染位图）
+/// 引入的维护成本与失真。
+fn load_brand_icon() -> HICON {
+    #[allow(clippy::manual_dangling_ptr)] // MAKEINTRESOURCEW(1) 语义需要指针值 1
+    let icon_name = PCWSTR(1usize as *const u16);
+    unsafe {
+        let Ok(module) = GetModuleHandleW(PCWSTR::null()) else {
+            return HICON::default();
+        };
+        LoadIconW(Some(HINSTANCE(module.0)), icon_name).unwrap_or_default()
+    }
+}
+
+/// 导航列品牌块（T-148 §6.2）：竹叶 LOGO + 「竹叶输入法」字标 + 竹节棕细线。
+/// 与 `nav_rows` 共用 `layout::brand_rect`，块内不产生可点击区域。
+unsafe fn draw_brand_block(
+    hdc: HDC,
+    state: &WindowState,
+    theme: &SettingsTheme,
+    metrics: &SettingsMetrics,
+    client: UiRect,
+) {
+    unsafe {
+        let rect = layout::brand_rect(metrics, client);
+        let icon_rect = layout::brand_icon_rect(metrics, client);
+        if !state.brand_icon.is_invalid() {
+            let _ = DrawIconEx(
+                hdc,
+                icon_rect.left,
+                icon_rect.top,
+                state.brand_icon,
+                icon_rect.width(),
+                icon_rect.height(),
+                0,
+                Some(HBRUSH::default()),
+                DI_NORMAL,
+            );
+        }
+        let text_rect = UiRect {
+            left: icon_rect.right + layout::scale(metrics.dpi, layout::LOGICAL_BRAND_TEXT_GAP),
+            top: rect.top,
+            right: rect.right - layout::scale(metrics.dpi, 20),
+            bottom: rect.bottom,
+        };
+        draw_text(
+            hdc,
+            "竹叶输入法",
+            text_rect,
+            theme.title_text,
+            state.fonts.nav_active,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        // 竹节棕细线：品牌块下缘 1px（bark 属品牌固定色，不随主题文件覆盖）。
+        fill(
+            hdc,
+            UiRect {
+                left: rect.left,
+                top: rect.bottom - 1,
+                right: rect.right,
+                bottom: rect.bottom,
+            },
+            theme.bark,
+        );
+    }
 }
 
 fn register_window_class(instance: HINSTANCE) -> Result<(), String> {

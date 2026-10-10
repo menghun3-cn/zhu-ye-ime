@@ -16,7 +16,9 @@ use windows::Win32::Graphics::Gdi::{
     DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
+use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
@@ -24,8 +26,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE,
     SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE,
-    WM_THEMECHANGED, WNDCLASSW, WS_POPUP,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT,
+    WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_POPUP,
 };
 
 use zhu_ye_ui::{UiRect, UiThemeKind, BASE_DPI};
@@ -227,6 +229,8 @@ struct PanelState {
     shot_done: bool,
     back: BackBuffer,
     fonts: Fonts,
+    /// 鼠标悬停的格子下标（T-148 选中格视觉；点击即上屏，无驻留选中态）。
+    hover: Option<usize>,
 }
 
 impl PanelState {
@@ -241,6 +245,7 @@ impl PanelState {
             shot_done: false,
             back: BackBuffer::default(),
             fonts: Fonts::default(),
+            hover: None,
         }
     }
 
@@ -289,6 +294,39 @@ unsafe extern "system" fn panel_proc(
             unsafe {
                 if let Some(state) = panel_state_mut(hwnd) {
                     on_click(hwnd, state, x, y);
+                }
+            }
+            LRESULT(0)
+        }
+        // 悬停高亮选中格（T-148 §6.3）：纯绘制，不改变"点击即上屏"的交互。
+        WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            unsafe {
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: u32::try_from(std::mem::size_of::<TRACKMOUSEEVENT>()).unwrap_or(0),
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut track);
+                if let Some(state) = panel_state_mut(hwnd) {
+                    let next = hover_index(hwnd, state, x, y);
+                    if next != state.hover {
+                        state.hover = next;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            unsafe {
+                if let Some(state) = panel_state_mut(hwnd) {
+                    if state.hover.is_some() {
+                        state.hover = None;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
                 }
             }
             LRESULT(0)
@@ -451,7 +489,7 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
                 right: layout.header.right,
                 bottom: layout.header.bottom,
             },
-            theme.border,
+            theme.chip_border,
         );
 
         // 标题：面板名 + 分组跨度提示
@@ -484,7 +522,19 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
             let Some(entry) = entries.get(index) else {
                 continue;
             };
-            fill_round(hdc, *cell, metrics.gap, theme.control_background);
+            // 选中格（悬停）：实叶底 + 面板字色（T-148 §6.3；深色叶底用墨字保证对比）。
+            let selected = state.hover == Some(index);
+            let cell_bg = if selected {
+                theme.accent
+            } else {
+                theme.control_background
+            };
+            let glyph_color = if selected {
+                theme.on_accent
+            } else {
+                theme.item_text
+            };
+            fill_round(hdc, *cell, metrics.gap, cell_bg);
             let glyph = UiRect {
                 top: cell.top + metrics.gap / 2,
                 bottom: cell.bottom - state.fonts.small_height - metrics.gap / 2,
@@ -494,7 +544,7 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
                 hdc,
                 entry.text,
                 glyph,
-                theme.item_text,
+                glyph_color,
                 state.fonts.title,
                 DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
             );
@@ -519,7 +569,7 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
                 hdc,
                 &hint,
                 layout.hint,
-                theme.placeholder_text,
+                theme.secondary_text,
                 state.fonts.small,
                 DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
             );
@@ -538,7 +588,7 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
             DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         );
 
-        // 外边框
+        // 外边框（T-148 §6.3：面板外框取 chip_border 描边族，与 chips 同源）
         fill(
             hdc,
             UiRect {
@@ -547,7 +597,7 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
                 right: client.right,
                 bottom: client.top + 1,
             },
-            theme.border,
+            theme.chip_border,
         );
         fill(
             hdc,
@@ -557,7 +607,7 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
                 right: client.right,
                 bottom: client.bottom,
             },
-            theme.border,
+            theme.chip_border,
         );
         fill(
             hdc,
@@ -567,7 +617,7 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
                 right: client.left + 1,
                 bottom: client.bottom,
             },
-            theme.border,
+            theme.chip_border,
         );
         fill(
             hdc,
@@ -577,7 +627,7 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
                 right: client.right,
                 bottom: client.bottom,
             },
-            theme.border,
+            theme.chip_border,
         );
     }
 }
@@ -591,7 +641,8 @@ unsafe fn draw_button(hdc: HDC, state: &PanelState, rect: UiRect, label: &str, p
             rect,
             metrics.gap,
             if primary {
-                theme.control_selected
+                // 主按钮（返回设置）= 实叶底，字色用面板 on_accent（T-148 §7）。
+                theme.accent
             } else {
                 theme.control_background
             },
@@ -601,7 +652,7 @@ unsafe fn draw_button(hdc: HDC, state: &PanelState, rect: UiRect, label: &str, p
             label,
             rect,
             if primary {
-                theme.control_selected_text
+                theme.on_accent
             } else {
                 theme.item_text
             },
@@ -609,6 +660,26 @@ unsafe fn draw_button(hdc: HDC, state: &PanelState, rect: UiRect, label: &str, p
             DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         );
     }
+}
+
+/// 鼠标位置所在的格子下标（仅本页已有条目；落在空白/外框上为 `None`）。
+fn hover_index(hwnd: HWND, state: &PanelState, x: i32, y: i32) -> Option<usize> {
+    let mut rect = RECT::default();
+    unsafe {
+        GetClientRect(hwnd, &mut rect).ok()?;
+    }
+    let client = UiRect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    };
+    let metrics = PanelMetrics::new(state.dpi);
+    let layout = layout::panel_layout(&metrics, client, state.view.visible_len());
+    layout
+        .cells
+        .iter()
+        .position(|cell| x >= cell.left && x < cell.right && y >= cell.top && y < cell.bottom)
 }
 
 fn register_panel_class(instance: HINSTANCE) -> Result<(), String> {
