@@ -153,7 +153,7 @@
 
 
 | T-148 | 已完成 | 设置窗口视觉改版文档批次：需求 §22（FR-064）+ [设置窗口视觉设计](../docs/设置窗口视觉设计.md) + 验收 §18 + HTML 高保真视觉稿（`design/settings-window/mockup.html`）+ Agent Note + todos 登记 | FR-064 | M15 | 2026-10-09 经 grill-me 两轮确认（全部采纳推荐项）：**只换面容**——度量（T-125），信息架构、交互机制、候选窗配色不动；方向=品牌克制融合（令牌与官网同源 + UI 亮度档；浅竹纸/深墨绿黑两套；选中浅底深字；实底叶色只用于按钮与面板选中）；品牌姿态=导航列顶品牌块唯一图形，其余零图形；GDI 边界（实色/细线/圆角/ClearType，无渐变投影动画）；交付=`mockup.html`（单文件 file:// 直开、最小内联 JS 演示）+ `docs/设置窗口视觉设计.md`（对比度实测表全过 AA、GDI 实现映射表 theme.rs 字段逐一对应、S-19~S-25 决策）。对比度关键修正：深色按钮白字仅 2.3:1 → 墨字 `#10241A` 7.15:1。实现批次 T-149 占位。**2026-10-10 用户目检通过**（验收 §18.1 目检项勾选）；已合入 develop（PR #171，squash d294b41） |
-| T-149 | 已完成 | 设置窗口视觉改版实现批次：theme.rs 令牌换新 + 品牌块绘制 + chips/标签/状态行新面孔；宿主截图像素取证 | FR-064 | M15 | 实现：SettingsTheme 22 键（15 改值 + 7 新增可选：on_accent/chip_border/tag_bg/tag_text/sprout/ok_text/expanded_bg，bark 品牌固定色常量）+ 品牌块（DrawIconEx 复用 zhu.ico）+ chips/按钮三级语言/规划中标签/占位展开/检查结果区/面板 hover 新面孔 + 高对比全量映射；§18.2 取证通过（浅/深 22 帧像素采样与令牌值吻合、深浅互异）、新单测 3 个、门禁全绿；VM 目检沿用挂起口径 |
+| T-149 | 已完成 | 设置窗口视觉改版实现批次：theme.rs 令牌换新 + 品牌块绘制 + chips/标签/状态行新面孔；宿主截图像素取证 | FR-064 | M15 | 实现：SettingsTheme 22 键（15 改值 + 7 新增可选：on_accent/chip_border/tag_bg/tag_text/sprout/ok_text/expanded_bg，bark 品牌固定色常量）+ 品牌块（DrawIconEx 复用 zhu.ico）+ chips/按钮三级语言/规划中标签/占位展开/检查结果区/面板 hover 新面孔 + 高对比全量映射；§18.2 取证通过（浅/深 22 帧像素采样与令牌值吻合、深浅互异）、新单测 3 个、门禁全绿；已合入 develop（PR #172，squash）；VM 目检沿用挂起口径 |
 
 ## 周期任务登记
 
