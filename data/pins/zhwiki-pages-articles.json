@@ -1,0 +1,14 @@
+{
+  "id": "zhwiki-pages-articles",
+  "name": "中文维基百科全量页面（latest 滚动 dump，pages-articles.xml.bz2）",
+  "role": "written-corpus-t147",
+  "kind": "url",
+  "url": "https://dumps.wikimedia.org/zhwiki/latest/zhwiki-latest-pages-articles.xml.bz2",
+  "cache_file": "zhwiki-pages-articles.xml.bz2",
+  "license": "CC BY-SA 4.0（页面目文本）；可嵌入要求保留署名与相同方式共享",
+  "license_note": "维基百科文本按 CC BY-SA 4.0 授权；本仓库仅取 2/3-gram 统计出频率分（facts 类聚合数据一般不落入版权保护范围），不复制文章原文，产物不包含任何原文片段；发布前按 CC BY-SA 要求核验署名与衍生许可义务。",
+  "sha256": "5DB9052EFE9CA97AA3DA05FFE5B2F12C8FFE5E040F0A9D1CED82EC2FDA5D7E2F",
+  "size": 3430912430,
+  "note": "latest 为滚动 dump（每次发布变化）——本 pin 按 2026-10-11 快照锁定 sha256/大小；刷新需人工改这个 pin（fetched_at + sha256 + size）。构建只依赖词频统计结果，不要求与旧 dump 字节一致。",
+  "fetched_at": "2026-10-11"
+}

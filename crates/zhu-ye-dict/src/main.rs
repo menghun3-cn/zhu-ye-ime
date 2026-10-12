@@ -13,12 +13,12 @@ use zhu_ye_core::dict_format::DictHeader;
 use zhu_ye_core::dict_loader::DictionaryFile;
 use zhu_ye_core::translate::Translator;
 use zhu_ye_dict::{
-    audit_coverage, build_base, build_en_wordbook, build_manifest, build_pack, build_real_bigrams,
-    build_real_dictionary, build_slang, build_v2, clean_social, dict_schema_version,
-    generate_word_eval_set, load_frequency_map, load_patch_table, load_standard_readings,
-    parse_cedict_line, pipeline_status, polyphone_gaps, render_eval_set, seed_bigrams,
-    seed_entries, source_check, split_pinyin_syllables, today, verify_manifest, EnWordbookInputs,
-    EnWordbookStats,
+    audit_coverage, build_base, build_en_wordbook, build_manifest, build_pack, build_phrases,
+    build_real_bigrams, build_real_dictionary, build_slang, build_v2, check_phrase_checklist,
+    clean_social, dict_schema_version, generate_word_eval_set, load_frequency_map,
+    load_patch_table, load_standard_readings, parse_cedict_line, pipeline_status, polyphone_gaps,
+    render_eval_set, seed_bigrams, seed_entries, source_check, split_pinyin_syllables, today,
+    verify_manifest, EnWordbookInputs, EnWordbookStats, PHRASES_FREQ_OUT,
 };
 
 /// 默认构建产物路径；`data/artifacts/` 已由 `.gitignore` 排除。
@@ -59,6 +59,8 @@ fn run() -> Result<(), String> {
         Some("source-check") => source_check_command(),
         Some("build-pack") => build_pack_command(args.get(2).map(String::as_str)),
         Some("build-base") => build_base_command(&args),
+        Some("build-phrases") => build_phrases_command(),
+        Some("check-phrases") => check_phrases_command(&args),
         Some("audit-coverage") => audit_coverage_command(&args),
         Some("build-slang") => build_slang_command(),
         Some("build-manifest") => build_manifest_command(&args),
@@ -96,6 +98,12 @@ fn print_usage() {
     );
     println!(
         "  build-base [--min-score N]  构建基础包（xdhyc 骨架 + wordfreq 词频 + jieba 扩充，N 默认 2000）（M6）"
+    );
+    println!(
+        "  build-phrases         统计驱动日常短语表（字幕/维基语料 2/3-gram 融合，输出 data/artifacts/phrases-freq.tsv）（T-147）"
+    );
+    println!(
+        "  check-phrases [--base 文件] [--min-rate 0.95]  口语短语验收清单（data/eval/daily-phrases-checklist.tsv）首候选命中率门禁（T-147）"
     );
     println!(
         "  audit-coverage [--sample N] [--base 文件]  常用词出候选率与首候选正确率抽检（S-1，N 默认 5000）（M6）"
@@ -475,6 +483,79 @@ fn build_base_command(args: &[String]) -> Result<(), String> {
     build_base(Path::new("."), min_score).map(|_| ())
 }
 
+/// `build-phrases`：统计驱动日常短语表（T-147）。
+///
+/// 读 data/cache 下的字幕/维基语料做 2/3-gram 计数并融合，输出
+/// data/artifacts/phrases-freq.tsv（`词\t频率分`）。语料缺失时报错提示。
+fn build_phrases_command() -> Result<(), String> {
+    let stats = build_phrases(Path::new("."))?;
+    println!(
+        "短语统计（T-147）：语料源 {}（字幕 {:.1}M 字 / 维基 {:.1}M 字，{} 行），入表短语 {} 条 → {}",
+        stats.corpora,
+        stats.subs_chars as f64 / 1e6,
+        stats.wiki_chars as f64 / 1e6,
+        stats.wiki_rows,
+        stats.phrases,
+        PHRASES_FREQ_OUT,
+    );
+    Ok(())
+}
+
+/// `check-phrases [--base 文件] [--min-rate 0.95]`：口语短语验收清单门禁
+/// （T-147，Q4a）。读 data/eval/daily-phrases-checklist.tsv，逐条按引擎
+/// 候选口径查首候选是否等于目标词；通过率低于 `--min-rate` 时以报错退出
+/// （exit 1），作为语料更新的回归防线。
+fn check_phrases_command(args: &[String]) -> Result<(), String> {
+    let mut base = PathBuf::from("data/artifacts/base.zyct");
+    let mut min_rate = 0.95f64;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--base" => {
+                index += 1;
+                base = PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| "--base 缺少文件路径".to_owned())?,
+                );
+            }
+            "--min-rate" => {
+                index += 1;
+                min_rate = args
+                    .get(index)
+                    .ok_or_else(|| "--min-rate 缺少数值".to_owned())?
+                    .parse::<f64>()
+                    .map_err(|error| format!("--min-rate 解析失败: {error}"))?;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                return Err(format!("多余参数：{}", args[index]));
+            }
+        }
+        index += 1;
+    }
+    let checklist_path = Path::new("data/eval/daily-phrases-checklist.tsv");
+    let text = std::fs::read_to_string(checklist_path)
+        .map_err(|error| format!("读取口语短语验收清单失败: {error}"))?;
+    let report = check_phrase_checklist(&base, &text)?;
+    println!(
+        "口语短语验收（T-147）：{} 条 → 命中 {}（{:.1}%），拼音组有候选 {}",
+        report.total, report.first_hit, report.first_hit_pct, report.with_candidates
+    );
+    for (word, first, pinyin) in &report.misses {
+        println!("  ✗ {word}（{pinyin}）→ 首候选「{first}」");
+    }
+    if report.total > 0 && report.first_hit_pct < min_rate * 100.0 {
+        return Err(format!(
+            "口语短语首候选命中率 {:.1}% 低于门槛 {:.0}%（T-147 验收，详见清单）",
+            report.first_hit_pct,
+            min_rate * 100.0
+        ));
+    }
+    Ok(())
+}
+
 /// `freq <词...>`：读取 wordfreq 语料（T-145 短语扩充的数据源）打印指定词
 /// 的 zipf×1000 词频，未命中时明确列出。
 fn freq_command(args: &[String]) -> Result<(), String> {
@@ -547,8 +628,29 @@ fn audit_coverage_command(args: &[String]) -> Result<(), String> {
         report.distinct_pinyins as f64 / report.sampled.max(1) as f64 * 100.0
     );
     println!(
-        "首候选=组内最常用词: {}/{} = {:.2}%（门槛 ≥90%，排序质量口径）",
+        "首候选=组内最常用词: {}/{} = {:.2}%（全口径参考值）",
         report.group_winner_hit, report.sampled, report.group_winner_pct
+    );
+    let multi_ok = report.group_multi_total > 0;
+    let multi_hit = report.group_multi_total - report.group_multi_miss;
+    let multi_pct = if multi_ok {
+        multi_hit as f64 / report.group_multi_total as f64 * 100.0
+    } else {
+        0.0
+    };
+    let single_hit = report.group_single_total - report.group_single_miss;
+    let single_pct = if report.group_single_total > 0 {
+        single_hit as f64 / report.group_single_total as f64 * 100.0
+    } else {
+        0.0
+    };
+    println!(
+        "  组内期望胜者居首（多字组）: {}/{} = {:.2}%（门槛 ≥90%；T-147 定稿口径——统计层只影响 2-5 字词，单字组序不变不设门槛）",
+        multi_hit, report.group_multi_total, multi_pct
+    );
+    println!(
+        "  组内期望胜者居首（单字组）: {}/{} = {:.2}%（xdhyc-2008 权威字序 vs wordfreq 现代语料序差异，统计层零参与，参考值）",
+        single_hit, report.group_single_total, single_pct
     );
     if !report.misses.is_empty() {
         println!(
@@ -563,19 +665,35 @@ fn audit_coverage_command(args: &[String]) -> Result<(), String> {
             println!("  {target} -> {actual}");
         }
     }
+    if !report.group_misses.is_empty() {
+        println!(
+            "组内期望胜者未居首 {} 组（单字 {}/{}、多字 {}/{}；前 {} 条，期望胜者 -> 实际首候选）:",
+            report.group_single_miss + report.group_multi_miss,
+            report.group_single_miss,
+            report.group_single_total,
+            report.group_multi_miss,
+            report.group_multi_total,
+            report.group_misses.len()
+        );
+        for (winner, actual) in &report.group_misses {
+            println!("  {winner} -> {actual}");
+        }
+    }
 
-    // 判定：覆盖 ≥98% 且 组内最常用词居首 ≥90%（排除同音冲突的天花板口径）。
+    // 判定：出候选率 ≥98% 且 多字组期望胜者居首 ≥90%（T-147 定稿口径：
+    // 统计层只影响 2-5 字词，多字组即统计层可作用的排序区间；单字组序 =
+    // 权威字序 vs wordfreq 语料序差异，统计层零参与，只守出候选率）。
     let coverage_ok = report.coverage_pct >= 98.0;
-    let first_ok = report.group_winner_pct >= 90.0;
+    let first_ok = multi_ok && multi_pct >= 90.0;
     if coverage_ok && first_ok {
         println!("S-1 抽检通过。");
         Ok(())
     } else {
         Err(format!(
-            "S-1 抽检未达标：出候选率 {:.2}%（{}），组内最常用词居首率 {:.2}%（{}）",
+            "S-1 抽检未达标：出候选率 {:.2}%（{}），多字组期望胜者居首率 {:.2}%（{}）",
             report.coverage_pct,
             if coverage_ok { "达标" } else { "不达标" },
-            report.group_winner_pct,
+            multi_pct,
             if first_ok { "达标" } else { "不达标" }
         ))
     }

@@ -1,0 +1,14 @@
+{
+  "id": "opensubtitles-zh-cn",
+  "name": "OpenSubtitles zh_cn 简体中文对话字幕（2024，单行一句纯对话）",
+  "role": "spoken-corpus-t147",
+  "kind": "url",
+  "url": "https://hunspell.sourceforge.net/opensubtitles/zh_cn.txt.gz",
+  "cache_file": "opensubtitles-zh-cn.txt.gz",
+  "license": "许可状态未明（未发现明确授权条款）",
+  "license_note": "据调研（2026-10，T-147）：OpenSubtitles 语料最大且纯对话，但未找到明确许可证声明，与 Tatoeba（CC BY 2.0 FR）相比不可作为可嵌发数据；本仓库仅取 2/3-gram 统计出频率分，不复制原句，产物为统计派生（频率分本身不受版权保护）；正式发布前需复核许可或切换 Tatoeba。TSV 产物不包含任何句子原文。",
+  "sha256": "6714021A39B65D44B616D7EB1ABA0B2F5127FE0CE4891BA908357C890FF0784E",
+  "size": 172889940,
+  "note": "2024 dump（hunspell.sourceforge.net 镜像，zh_cn 一个句子一行，UTF-8 无 BOM，纯对话）。T-147 统计层源一，权重 1.0；采样确认口语风格（自来水…/坏了吗…）。",
+  "fetched_at": "2026-10-11"
+}

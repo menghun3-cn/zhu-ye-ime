@@ -2,7 +2,7 @@
 
 本文件记录项目使用到的所有第三方数据、词表、语料与工具，用于许可合规审查。新增数据源必须在此登记后才能进入数据管线。
 
-现状：D-001 CC-CEDICT、D-004 FrequencyWords 中文词频与 D-006 OPUS GlobalVoices 已于 2026-09-21 引入数据管线，用于离线导入真实词库；原始文件与生成产物保存在 `data/` 且不进入 git，派生说明见 `docs/数据清单.md`。ECDICT（D-002，CC BY-SA 4.0）已于 2026-10-02 实测下载并定稿为第九期英文词典扩容数据源（770,611 词条，SHA-256 锁定，见 数据清单.md）。2026-09-28（M6）新增 D-007 至 D-015 九个外部源，均由 `data/pins/` 锁定并校验；D-016/D-017 为项目自有数据，随 git 版本管理。2026-09-29（M6-U）新增代码依赖登记一节，登记 `ed25519-dalek`（manifest 签名，BSD-3-Clause）。2026-10-02（T-064，第五期）新增 D-018 FrequencyWords 英文词频（英文词表构建基座）与 D-019（英文大小写补丁，项目自有）。2026-10-04（T-087，第九期）新增 D-020 social-media-chinese-words（MIT，网络语扩充源）与 D-021 清洗子集（项目自有，源 MIT 派生）。
+现状：D-001 CC-CEDICT、D-004 FrequencyWords 中文词频与 D-006 OPUS GlobalVoices 已于 2026-09-21 引入数据管线，用于离线导入真实词库；原始文件与生成产物保存在 `data/` 且不进入 git，派生说明见 `docs/数据清单.md`。ECDICT（D-002，CC BY-SA 4.0）已于 2026-10-02 实测下载并定稿为第九期英文词典扩容数据源（770,611 词条，SHA-256 锁定，见 数据清单.md）。2026-09-28（M6）新增 D-007 至 D-015 九个外部源，均由 `data/pins/` 锁定并校验；D-016/D-017 为项目自有数据，随 git 版本管理。2026-09-29（M6-U）新增代码依赖登记一节，登记 `ed25519-dalek`（manifest 签名，BSD-3-Clause）。2026-10-02（T-064，第五期）新增 D-018 FrequencyWords 英文词频（英文词表构建基座）与 D-019（英文大小写补丁，项目自有）。2026-10-04（T-087，第九期）新增 D-020 social-media-chinese-words（MIT，网络语扩充源）与 D-021 清洗子集（项目自有，源 MIT 派生）。2026-10-11（T-147）新增 D-022 OpenSubtitles zh_cn（许可未明，仅统计派生入产物）与 D-023 中文维基百科全量页面（CC BY-SA 4.0，仅 2/3-gram 计数入产物），均 pins 锁定；`bzip2` crate（MIT/Apache-2.0）随 T-147 登记入代码依赖表。
 
 ## 数据源登记
 
@@ -29,6 +29,8 @@
 | D-019 | 英文大小写补丁表（en-capitals.tsv） | 英文词表大小写原形标注（D-09） | 项目自有 | 2026-10-02 | 已引入（T-064）：提交入库（data/patches/en-capitals.tsv），随版本维护；取舍原则见文件头部注释 |
 | D-020 | social-media-chinese-words（jilelab） | 网络语扩充源（第九期 FR-047/T-087，方案决策 D-52） | **MIT** | 2026-10-04（仓库 2021-05，107.78 万行，合并文件 15.4 MB，SHA-256 见 [数据清单.md](./数据清单.md) D-020） | 已引入（T-087）：7 分类 txt 由 `scripts/fetch-social-media.ps1` 下载合并，pins 锁定（data/pins/social-media-zh.json）；**派生 slang 词条按 MIT 随发行物分发**，产物头注释保留来源 |
 | D-021 | 网络语清洗子集（social-words.tsv） | slang 包词源（T-087） | 项目自有数据整理；源数据许可 MIT（D-020） | 2026-10-04 | 已引入（T-087）：`zhu-ye-dict social-clean` 确定性生成并提交入库，许可随源（MIT） |
+| D-022 | OpenSubtitles zh_cn（2024 对话字幕） | T-147 口语语料：2/3-gram 统计 → 短语频率分 | **许可状态未明**（未发现明确授权条款） | 2026-10-11（172,889,940 字节，SHA-256 见 [数据清单.md](./数据清单.md) D-022） | 已引入（T-147）：仅把频率分（统计事实，非版权表达）带入产物；**不复制任何句子原文**；发布前复核许可或切换 Tatoeba（CC BY 2.0 FR） |
+| D-023 | 中文维基百科全量页面（latest 滚动 dump） | T-147 书面语料：2/3-gram 统计 → 短语频率分 | **CC BY-SA 4.0**（页面文本） | 2026-10-11 快照锁定（3,430,912,430 字节，SHA-256 见 [数据清单.md](./数据清单.md) D-023） | 已引入（T-147）：正文只折成 2/3-gram 计数，不复制原文片段；发布按 CC BY-SA 要求核验署名与衍生许可义务 |
 
 ## 代码依赖登记
 
@@ -39,6 +41,7 @@ Rust 第三方 crate 依赖；新增依赖必须在此登记后才能进入构�
 | memmap2 | 词典只读 mmap 加载 | MIT OR Apache-2.0 | T-006 |
 | serde / serde_json | 配置、用户词与 manifest 序列化 | MIT OR Apache-2.0 | T-006 |
 | sha2 | 词典内容 SHA-256 校验 | MIT OR Apache-2.0 | T-006 |
+| **bzip2 0.4** | 维基 dump 解压（T-147 语料统计，仅构建期） | MIT OR Apache-2.0 | T-147 |
 | windows / windows-core | TSF 与 Win32 COM 绑定（仅 zhu-ye-ime） | MIT OR Apache-2.0 | T-010 |
 | **ed25519-dalek 2.2** | manifest 签名与验签（M6-U 更新分发信任链） | **BSD-3-Clause** | T-051 |
 

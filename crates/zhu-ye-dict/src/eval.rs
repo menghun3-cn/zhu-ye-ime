@@ -6,6 +6,7 @@
 //! 保证样本本身在构建与评测两侧语义对齐。
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use crate::import::{is_cjk_word, load_frequency_map, parse_cedict_line, split_pinyin_syllables};
 
@@ -79,6 +80,84 @@ pub fn render_eval_set(samples: &[EvalSample]) -> String {
     out
 }
 
+/// T-147 口语短语验收结果。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PhraseCheckReport {
+    /// 清单总条数。
+    pub total: usize,
+    /// 拼音组有候选的条数。
+    pub with_candidates: usize,
+    /// 首候选正确条数。
+    pub first_hit: usize,
+    /// 首候选未命中明细（目标词, 实际首候选, 拼音）。
+    pub misses: Vec<(String, String, String)>,
+    /// 首候选正确率（= first_hit / total）。
+    pub first_hit_pct: f64,
+}
+
+/// 口语短语验收（T-147，Q4a）：读验收清单（`词\t无调连续全拼`，`#` 注释与
+/// 空行忽略），对每条按**引擎候选口径**（`generate_candidates`）查拼音组，
+/// 首候选必须等于目标词。作为统计驱动短语扩充的回归防线：清单只增不减，
+/// 语料每轮更新后跑 `check-phrases`，正确率门槛 ≥95%（CLI 侧以退出码门禁）。
+pub fn check_phrase_checklist(
+    base_path: &Path,
+    checklist_text: &str,
+) -> Result<PhraseCheckReport, String> {
+    use zhu_ye_core::candidate::generate_candidates;
+    use zhu_ye_core::dict::Dictionary;
+    use zhu_ye_core::pinyin::SyllableTable;
+    use zhu_ye_core::DictionaryFile;
+
+    let file = DictionaryFile::open(base_path)
+        .map_err(|error| format!("打开 base 包失败（{}）: {error}", base_path.display()))?;
+    let dictionary: &dyn Dictionary = &file;
+    let table = SyllableTable::standard();
+
+    let mut report = PhraseCheckReport::default();
+    for (index, raw) in checklist_text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let word = parts.next().unwrap_or("").trim();
+        let pinyin = parts.next().unwrap_or("").trim();
+        if word.is_empty() || pinyin.is_empty() {
+            return Err(format!(
+                "口语短语验收清单第 {} 行缺词或拼音: {raw}",
+                index + 1
+            ));
+        }
+        if pinyin.contains(' ') || pinyin.chars().any(|c| c.is_ascii_uppercase()) {
+            return Err(format!(
+                "口语短语验收清单第 {} 行拼音须为无调小写连续全拼: {raw}",
+                index + 1
+            ));
+        }
+        report.total += 1;
+        let candidates = generate_candidates(&table, dictionary, pinyin);
+        if !candidates.is_empty() {
+            report.with_candidates += 1;
+        }
+        match candidates.first() {
+            Some(first) if first.text == word => report.first_hit += 1,
+            Some(first) if report.misses.len() < 200 => {
+                report
+                    .misses
+                    .push((word.to_owned(), first.text.clone(), pinyin.to_owned()));
+            }
+            None => report
+                .misses
+                .push((word.to_owned(), "(无候选)".to_owned(), pinyin.to_owned())),
+            _ => {}
+        }
+    }
+    if report.total > 0 {
+        report.first_hit_pct = report.first_hit as f64 / report.total as f64 * 100.0;
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +226,63 @@ OK OK [ou1 kei1] /ok/
         let freq = "我四个字 500\n";
         let samples = generate_word_eval_set(cedict, freq, 10);
         assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn check_phrase_checklist_按引擎口径命中首候选() {
+        use std::path::PathBuf;
+
+        let dir = std::env::temp_dir().join("zhu-ye-eval-t147-check");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = crate::build_v2(
+            &[
+                zhu_ye_core::dict::DictionaryEntry::new("你是", "nishi", 5100),
+                zhu_ye_core::dict::DictionaryEntry::new("逆势", "nishi", 2600),
+                zhu_ye_core::dict::DictionaryEntry::new("我有", "woyou", 4900),
+            ],
+            &[],
+        )
+        .expect("mini 词典构建");
+        let path: PathBuf = dir.join("mini.zyct");
+        std::fs::write(&path, bytes).unwrap();
+        let report = check_phrase_checklist(&path, "你是\tnishi\n我有\twoyou\n").unwrap();
+        assert_eq!(report.total, 2);
+        assert_eq!(report.with_candidates, 2);
+        assert_eq!(report.first_hit, 2);
+        assert!(report.misses.is_empty());
+        assert!((report.first_hit_pct - 100.0).abs() < 1e-9);
+        // 同音组按词频降序：mini 词典 nishi 组首候选是 5100 的「你是」，
+        // 2600 的「逆势」不是首候选 → 未命中且记入明细（引擎口径本身正确）。
+        let report2 = check_phrase_checklist(&path, "逆势\tnishi\n").unwrap();
+        assert_eq!(report2.first_hit, 0);
+        assert_eq!(
+            report2.misses[0],
+            ("逆势".to_owned(), "你是".to_owned(), "nishi".to_owned())
+        );
+        // 缺失词 → 无候选且计入未命中明细。
+        let report3 = check_phrase_checklist(&path, "我知道\twozhidao\n").unwrap();
+        assert_eq!(report3.with_candidates, 0);
+        assert_eq!(report3.first_hit, 0);
+        assert_eq!(report3.misses.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn check_phrase_checklist_清单非法行报错() {
+        let dir = std::env::temp_dir().join("zhu-ye-eval-t147-bad");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = crate::build_v2(&[], &[]).expect("mini 词典构建");
+        let path = dir.join("mini.zyct");
+        std::fs::write(&path, bytes).unwrap();
+        // 拼音带空格/大写 → 报错提示无调小写连续全拼。
+        let err = check_phrase_checklist(&path, "你是\tni shi\n").unwrap_err();
+        assert!(err.contains("无调小写"), "实际: {err}");
+        // 空词或空拼音 → 报错带行号。
+        let err2 = check_phrase_checklist(&path, "你是\n").unwrap_err();
+        assert!(err2.contains("第 1 行缺词或拼音"), "实际: {err2}");
+        // "#" 注释与空行忽略。
+        let report = check_phrase_checklist(&path, "# 注释\n\n你是\tnishi\n").unwrap();
+        assert_eq!(report.total, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

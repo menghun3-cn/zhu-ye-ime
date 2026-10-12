@@ -35,6 +35,9 @@ pub use m6::{
 pub mod slang;
 pub use slang::{build_slang, SlangReport};
 
+pub mod phrases;
+pub use phrases::{build_phrases, PhraseStats, PHRASES_FREQ_OUT, PHRASE_FREQ_MAX, PHRASE_FREQ_MIN};
+
 pub mod social;
 pub use social::{clean_social, SocialCleanReport, SLANG_SOCIAL};
 
@@ -44,7 +47,9 @@ pub use en_wordbook::{
 };
 
 pub mod eval;
-pub use eval::{generate_word_eval_set, render_eval_set, EvalSample};
+pub use eval::{
+    check_phrase_checklist, generate_word_eval_set, render_eval_set, EvalSample, PhraseCheckReport,
+};
 
 /// 词典二进制格式版本。
 #[must_use]
@@ -55,7 +60,7 @@ pub const fn dict_schema_version() -> u32 {
 /// 返回当前数据管线状态，供自检使用。
 #[must_use]
 pub fn pipeline_status() -> &'static str {
-    "v2 格式构建/检查可用：build、inspect、verify、import；M6：source-check、build-pack、build-base、build-slang、build-manifest、verify-manifest"
+    "v2 格式构建/检查可用：build、inspect、verify、import；M6：source-check、build-pack、build-base、build-slang、build-manifest、verify-manifest；T-147：build-phrases"
 }
 
 #[cfg(test)]
