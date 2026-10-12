@@ -882,7 +882,15 @@ pub fn themes_layout(metrics: &SettingsMetrics, client: UiRect, row_count: usize
 const LOGICAL_PANEL_WIDTH: i32 = 700;
 const LOGICAL_PANEL_PADDING: i32 = 20;
 const LOGICAL_PANEL_GAP: i32 = 6;
-const LOGICAL_PANEL_HEADER: i32 = 54;
+/// 页签行高（T-151：emoji/符号双页签）。
+const LOGICAL_PANEL_TAB_HEIGHT: i32 = 32;
+/// 页签宽（T-151）。
+const LOGICAL_PANEL_TAB_WIDTH: i32 = 96;
+/// 搜索框行高（T-151：搜索态输入行）。
+const LOGICAL_PANEL_SEARCH_HEIGHT: i32 = 40;
+/// 标题区总高 = 页签行 + 间距 + 搜索框行（T-151 前为单行 54）。
+const LOGICAL_PANEL_HEADER: i32 =
+    LOGICAL_PANEL_TAB_HEIGHT + LOGICAL_PANEL_GAP + LOGICAL_PANEL_SEARCH_HEIGHT;
 const LOGICAL_PANEL_FOOTER: i32 = 50;
 const LOGICAL_PANEL_CELL_HEIGHT: i32 = 58;
 const LOGICAL_PANEL_CELL_MIN_WIDTH: i32 = 36;
@@ -908,8 +916,14 @@ pub struct PanelMetrics {
     pub cell_width: i32,
     /// 格子高。
     pub cell_height: i32,
-    /// 标题区高。
+    /// 标题区高（页签行 + 间距 + 搜索框行）。
     pub header_height: i32,
+    /// 页签行高。
+    pub tab_height: i32,
+    /// 页签宽。
+    pub tab_width: i32,
+    /// 搜索框行高。
+    pub search_height: i32,
     /// 底栏高。
     pub footer_height: i32,
     /// 按钮宽。
@@ -939,6 +953,9 @@ impl PanelMetrics {
         let usable = desired_width - 2 * padding - (columns - 1) * gap;
         let cell_width = (usable / columns).max(scale(dpi, LOGICAL_PANEL_CELL_MIN_WIDTH));
         let cell_height = scale(dpi, LOGICAL_PANEL_CELL_HEIGHT);
+        let tab_height = scale(dpi, LOGICAL_PANEL_TAB_HEIGHT);
+        let tab_width = scale(dpi, LOGICAL_PANEL_TAB_WIDTH);
+        let search_height = scale(dpi, LOGICAL_PANEL_SEARCH_HEIGHT);
         let header_height = scale(dpi, LOGICAL_PANEL_HEADER);
         let footer_height = scale(dpi, LOGICAL_PANEL_FOOTER);
         // 高度由一整页格子加页脚推出，保证整页无需滚动即可放下。
@@ -958,6 +975,9 @@ impl PanelMetrics {
             cell_width,
             cell_height,
             header_height,
+            tab_height,
+            tab_width,
+            search_height,
             footer_height,
             button_width: scale(dpi, LOGICAL_PANEL_BUTTON_WIDTH),
             button_height: scale(dpi, LOGICAL_PANEL_BUTTON_HEIGHT),
@@ -978,8 +998,12 @@ impl PanelMetrics {
 /// 面板布局结果；绘制与命中测试共用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelLayout {
-    /// 标题区。
+    /// 标题区（页签行 + 搜索框行）。
     pub header: UiRect,
+    /// 页签（emoji、symbol 各一个，顺序固定）。
+    pub tabs: Vec<UiRect>,
+    /// 搜索框。
+    pub search: UiRect,
     /// 格子（行优先），数量等于本页条目数。
     pub cells: Vec<UiRect>,
     /// 返回设置。
@@ -1002,6 +1026,25 @@ pub fn panel_layout(metrics: &PanelMetrics, client: UiRect, cell_count: usize) -
         top: client.top,
         right: client.right,
         bottom: client.top + metrics.header_height,
+    };
+    // 页签行：两个页签并排于标题区顶部。
+    let tabs: Vec<UiRect> = (0..2i32)
+        .map(|index| {
+            let left = client.left + metrics.padding + index * (metrics.tab_width + metrics.gap);
+            UiRect {
+                left,
+                top: client.top,
+                right: left + metrics.tab_width,
+                bottom: client.top + metrics.tab_height,
+            }
+        })
+        .collect();
+    // 搜索框：页签行下方、左右内边距内通栏。
+    let search = UiRect {
+        left: client.left + metrics.padding,
+        top: client.top + metrics.tab_height + metrics.gap,
+        right: client.right - metrics.padding,
+        bottom: client.top + metrics.tab_height + metrics.gap + metrics.search_height,
     };
     let grid_top = header.bottom + metrics.padding;
     let columns = usize::try_from(metrics.columns).unwrap_or(1).max(1);
@@ -1055,6 +1098,8 @@ pub fn panel_layout(metrics: &PanelMetrics, client: UiRect, cell_count: usize) -
     };
     PanelLayout {
         header,
+        tabs,
+        search,
         cells,
         back,
         prev,
@@ -1605,6 +1650,39 @@ mod tests {
         assert_eq!(layout.hint.height(), metrics.hint_height);
         for cell in &layout.cells {
             assert!(cell.bottom <= layout.hint.top);
+        }
+    }
+
+    #[test]
+    fn 页签与搜索框位于标题区内且互不重叠() {
+        // T-151：标题区 = 页签行 + 搜索框行；搜索框通栏于页签下。
+        let metrics = PanelMetrics::new(96);
+        let client = panel_client(&metrics);
+        let layout = panel_layout(&metrics, client, 10);
+        assert_eq!(layout.tabs.len(), 2, "emoji/符号两个页签");
+        for (index, tab) in layout.tabs.iter().enumerate() {
+            assert!(tab.top >= layout.header.top);
+            assert!(tab.bottom <= layout.header.bottom, "页签在标题区内");
+            assert_eq!(tab.height(), metrics.tab_height);
+            if index > 0 {
+                assert!(tab.left >= layout.tabs[index - 1].right, "页签互不重叠");
+            }
+        }
+        let search = layout.search;
+        assert_eq!(search.height(), metrics.search_height);
+        assert!(search.top >= layout.tabs[0].bottom, "搜索框在页签行下方");
+        assert!(search.bottom <= layout.header.bottom, "搜索框在标题区内");
+        assert_eq!(search.left, client.left + metrics.padding);
+        assert_eq!(search.right, client.right - metrics.padding);
+        // 标题区总高与页签+间距+搜索框匹配（布局推位可预测）。
+        assert_eq!(
+            layout.header.height(),
+            metrics.tab_height + metrics.gap + metrics.search_height
+        );
+        // 网格区整体低于标题区（既有口径回归）。
+        let grid_top = layout.header.bottom + metrics.padding;
+        for cell in &layout.cells {
+            assert!(cell.top >= grid_top, "格子不得压到标题区");
         }
     }
 

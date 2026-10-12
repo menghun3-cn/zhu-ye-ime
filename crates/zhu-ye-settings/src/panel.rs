@@ -13,6 +13,8 @@
 
 use std::sync::OnceLock;
 
+use serde::{Deserialize, Serialize};
+
 use zhu_ye_core::EMOJI_TABLE;
 
 /// 面板每页列数与行数。
@@ -26,7 +28,10 @@ pub const PANEL_PAGE_SIZE: usize = PANEL_COLUMNS * PANEL_ROWS;
 pub const OTHER_GROUP: &str = "#";
 
 /// 面板种类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` 用于面板状态文件（T-151 页签记忆，S-33）：变体名落入
+/// `panel.json`（`"Emoji"`/`"Symbol"`），旧文件/损坏文件解析失败回默认。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PanelKind {
     /// emoji 面板。
     Emoji,
@@ -183,10 +188,62 @@ impl PanelView {
     }
 }
 
+/// 按查询过滤面板条目（T-151 搜索态，S-32）。
+///
+/// 匹配 `label`（emoji 为拼音别名）/ `group` / `text`（字符本身）三者的**子串**，
+/// 大小写不敏感；空查询返回全量（按原表顺序）。emoji 按拼音别名过滤是其主用途——
+/// 搜索框经 `WM_CHAR` 只接收 ASCII，中文别名查询暂不可达（记录在案的已知限制，
+/// 需求 §23.3 非目标）。
+#[must_use]
+pub fn filter_entries(kind: PanelKind, query: &str) -> Vec<PanelEntry> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return kind.entries().to_vec();
+    }
+    kind.entries()
+        .iter()
+        .copied()
+        .filter(|entry| {
+            entry.label.to_lowercase().contains(&query)
+                || entry.group.to_lowercase().contains(&query)
+                || entry.text.to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+/// 对任意条目序列分页（搜索命中跨页浏览与全量浏览共用同一口径）。
+///
+/// 与 [`PanelView::visible`] 的分页规则一致：空序列也至少一页（页码 `1/1`、空页）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageSlice<'a> {
+    /// 本页条目。
+    pub items: &'a [PanelEntry],
+    /// 当前页（从 0 起）。
+    pub page: usize,
+    /// 总页数。
+    pub page_count: usize,
+}
+
+/// 对条目序列按页切片。
+#[must_use]
+pub fn page_of<'a>(items: &'a [PanelEntry], page: usize, page_size: usize) -> PageSlice<'a> {
+    let page_size = page_size.max(1);
+    let page_count = items.len().div_ceil(page_size).max(1);
+    let page = page.min(page_count - 1);
+    let start = (page * page_size).min(items.len());
+    let end = (start + page_size).min(items.len());
+    PageSlice {
+        items: &items[start..end],
+        page,
+        page_count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        group_of, PanelKind, PanelView, OTHER_GROUP, PANEL_COLUMNS, PANEL_PAGE_SIZE, PANEL_ROWS,
+        filter_entries, group_of, page_of, PanelEntry, PanelKind, PanelView, OTHER_GROUP,
+        PANEL_COLUMNS, PANEL_PAGE_SIZE, PANEL_ROWS,
     };
     use std::collections::HashSet;
 
@@ -351,5 +408,56 @@ mod tests {
         assert!(view.entry_at(len - 1).is_some());
         assert!(view.entry_at(len).is_none(), "越界格子必须为 None");
         assert_eq!(view.entry_at(0), view.visible().first().copied());
+    }
+
+    #[test]
+    fn 搜索空查询返回全量且顺序不变() {
+        let all = PanelKind::Emoji.entries();
+        let hits = filter_entries(PanelKind::Emoji, "  ");
+        assert_eq!(hits, all.to_vec(), "空/空白查询 = 全量且顺序不变");
+    }
+
+    #[test]
+    fn 搜索按拼音别名子串过滤且大小写不敏感() {
+        // 别名 `ai`/`aixin` 存在（emoji 按字符去重后至少保留一个）；输入 `ai` 应命中其
+        // 全部别名含 `ai` 的 emoji，且每个命中项的别名/字符至少一处包含查询。
+        let hits = filter_entries(PanelKind::Emoji, "AI");
+        assert!(!hits.is_empty(), "`ai` 常见别名必有命中");
+        let entry = hits[0];
+        let label_has = entry.label.to_lowercase().contains("ai");
+        let text_has = entry.text.to_lowercase().contains("ai");
+        let group_has = entry.group.to_lowercase().contains("ai");
+        assert!(label_has || text_has || group_has, "命中项必须匹配");
+    }
+
+    #[test]
+    fn 搜索按字符与组名匹配() {
+        // 字符匹配：查询"★"命中装饰组里的实心星。
+        let hits = filter_entries(PanelKind::Symbol, "★");
+        assert!(!hits.is_empty(), "符号表含 ★");
+        assert!(hits.iter().any(|e| e.text == "★"), "命中含 ★ 本身");
+        // 组名匹配：查询中文组名（纯函数不限于 ASCII）命中的都属于该组。
+        let by_group = filter_entries(PanelKind::Symbol, "箭头");
+        assert!(!by_group.is_empty(), "箭头组必有符号");
+        assert!(by_group.iter().all(|e| e.group == "箭头"), "命中均属箭头组");
+    }
+
+    #[test]
+    fn 通用分页与面板分页口径一致() {
+        // page_of 在"空序列"下也至少一页，与 PanelView::page_count 的空口径一致。
+        let empty: Vec<PanelEntry> = Vec::new();
+        let page = page_of(&empty, 0, PANEL_PAGE_SIZE);
+        assert_eq!(page.items.len(), 0);
+        assert_eq!(page.page_count, 1);
+        assert_eq!(page.page, 0);
+        // 越界页钳制到末页。
+        let all = PanelKind::Symbol.entries().to_vec();
+        let page = page_of(&all[..], 999, PANEL_PAGE_SIZE);
+        assert_eq!(page.page, page.page_count - 1);
+        assert!(!page.items.is_empty());
+        // 与 PanelView::visible 口径一致：全量时首页切片相同。
+        let view = PanelView::new(PanelKind::Emoji);
+        let page0 = page_of(PanelKind::Emoji.entries(), 0, PANEL_PAGE_SIZE);
+        assert_eq!(page0.items, view.visible());
     }
 }

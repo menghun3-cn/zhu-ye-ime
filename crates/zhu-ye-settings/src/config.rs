@@ -25,6 +25,13 @@ pub fn config_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join(CONFIG_FILE))
 }
 
+/// 工具箱面板状态文件路径（T-151 位置/页签记忆，S-33）：
+/// `%APPDATA%\zhu-ye-ime\panel.json`，托盘与设置窗口进程共用（S-8 原子写口径）。
+#[must_use]
+pub fn panel_state_path() -> Option<PathBuf> {
+    data_dir().map(|dir| dir.join(crate::panel_window::PANEL_POSITION_FILE))
+}
+
 /// 产品日志目录（FR-060，T-091）：`%LOCALAPPDATA%\zhu-ye-ime\logs`。
 ///
 /// TSF 侧产品模式把文件日志写到该目录（`ime.log`，默认 warn 级别，1 MiB

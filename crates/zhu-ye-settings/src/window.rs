@@ -1070,15 +1070,22 @@ fn run_repair_l2(hwnd: HWND, state: &mut WindowState) {
 ///
 /// 关键一步是把焦点还给"打开设置前的那个窗口"：面板本身不激活，目标应用保持前台，
 /// 面板里的 `SendInput` 才落得到用户真正在打字的应用上（FR-040 的"选中即上屏"）。
+/// 面板窗口类全局唯一（T-151，S-31）：设置窗口与托盘热键两个入口互斥，已在其他
+/// 进程打开时不再创建。
 unsafe fn open_panel(hwnd: HWND, state: &mut WindowState, kind: crate::panel::PanelKind) {
     if state.panel.is_some() {
         return;
     }
-    match PanelWindow::open(PanelView::new(kind), hwnd) {
+    if panel_exists_elsewhere() {
+        state.hint = Some("工具箱面板已在其他窗口打开（可用呼出热键切换）".to_owned());
+        invalidate(hwnd);
+        return;
+    }
+    match PanelWindow::open(PanelView::new(kind), Some(hwnd)) {
         Ok(panel) => {
             state.panel = Some(panel);
             state.hint = Some(format!(
-                "{} 已打开：点击即上屏，点“返回设置”关闭",
+                "{} 已打开：点击即上屏，点“关闭”或再按呼出热键隐藏",
                 kind.title()
             ));
             let previous = state.previous_foreground;
@@ -1091,6 +1098,16 @@ unsafe fn open_panel(hwnd: HWND, state: &mut WindowState, kind: crate::panel::Pa
         Err(error) => state.hint = Some(format!("打开面板失败：{error}")),
     }
     invalidate(hwnd);
+}
+
+/// 全局单面板互斥（S-31）：面板窗口类是否已被**其他进程**（如托盘）创建。
+fn panel_exists_elsewhere() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+    let class = crate::wide::to_utf16(crate::panel_window::PANEL_CLASS_NAME);
+    match unsafe { FindWindowW(PCWSTR(class.as_ptr()), None) } {
+        Ok(existing) => !existing.is_invalid(),
+        Err(_) => false,
+    }
 }
 
 /// 执行「更多设置」的打开动作。
