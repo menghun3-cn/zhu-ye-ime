@@ -1340,6 +1340,7 @@ dependencies = [
  "windows",
  "winresource",
  "zhu-ye-core",
+ "zhu-ye-settings",
 ]
 
 [[package]]

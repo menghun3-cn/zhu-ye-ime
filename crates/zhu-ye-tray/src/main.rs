@@ -19,6 +19,12 @@
 //! `Chinese`/`English`），本程序每 500ms 轮询该文件更新图标（原子写保证
 //! 不会读到半文件）。托盘进程退出不影响输入法本体（独立进程、只读状态
 //! 文件、失败静默降级）。
+//!
+//! 自第十四期（T-151，FR-070）起，托盘同时承担**工具箱面板的全局呼出热键**
+//! 宿主：设置窗口"关窗即退"，唯有托盘进程常驻（HKCU Run 自启），注册表
+//! `RegisterHotKey` 必须由它持有时才可靠。热键按下 → `WM_HOTKEY` →
+//! 全局单面板互斥（窗口类 `ZhuYeSettingsPanel` 唯一）：已打开则关闭（toggle），
+//! 未打开则按上次页签/位置记忆创建（详见 S-30、S-31、S-33）。
 
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -33,18 +39,25 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
+};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW, PostQuitMessage,
-    RegisterClassW, SetTimer, TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HICON, IMAGE_ICON,
-    LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON,
-    TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND,
-    WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TrackPopupMenu, TranslateMessage,
+    CW_USEDEFAULT, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
+    SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_LBUTTONDBLCLK,
+    WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
+
+use zhu_ye_settings::panel::PanelView;
+use zhu_ye_settings::panel_window::{self, PANEL_CLASS_NAME};
 
 /// 托盘图标资源 ID（与 build.rs 的 101/102 对应）。
 const ICON_ZH: u16 = 101;
@@ -64,6 +77,9 @@ const CLASS_NAME: &str = "ZhuYeTrayHostWindow";
 /// 菜单项 ID。
 const MENU_OPEN_SETTINGS: usize = 1;
 const MENU_EXIT: usize = 2;
+
+/// 面板呼出热键的注册 ID（本进程内唯一，用于 RegisterHotKey/UnregisterHotKey 配对）。
+const PANEL_HOTKEY_ID: i32 = 0x5A7A;
 
 /// 托盘运行状态（经全局静态供窗口回调访问；窗口句柄以指针值存储以保持 Send）。
 struct TrayState {
@@ -171,6 +187,85 @@ fn remove_tray_icon(window: HWND) {
     data.uID = TRAY_ID;
     unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+    }
+}
+
+/// 解析 `config.json` 的 `panel_hotkey`；未配置/解析失败回默认 `ctrl+alt+e`（S-30）。
+fn panel_hotkey_spec() -> (u32, u16) {
+    use zhu_ye_core::hotkey::{parse_hotkey, DEFAULT_PANEL_HOTKEY};
+    let fallback = || parse_hotkey(DEFAULT_PANEL_HOTKEY).expect("默认热键必须可解析");
+    let configured = zhu_ye_settings::config::config_path()
+        .and_then(|path| zhu_ye_core::load_config(&path).0.panel_hotkey);
+    match configured.as_deref().and_then(parse_hotkey) {
+        Some(spec) => (spec.modifiers, spec.vk),
+        None => {
+            let spec = fallback();
+            (spec.modifiers, spec.vk)
+        }
+    }
+}
+
+/// 注册面板呼出热键（FR-070）。返回是否注册成功；失败（如被其他程序占用）时
+/// 写一行日志，托盘其余功能照常。
+fn register_panel_hotkey(window: HWND) -> bool {
+    let (modifiers, vk) = panel_hotkey_spec();
+    let result = unsafe {
+        RegisterHotKey(
+            Some(window),
+            PANEL_HOTKEY_ID,
+            HOT_KEY_MODIFIERS(modifiers),
+            u32::from(vk),
+        )
+    };
+    if result.is_ok() {
+        return true;
+    }
+    // 无控制台（windows_subsystem）：失败原因落到 `%APPDATA%\zhu-ye-ime\panel-hotkey.log`。
+    if let Some(mut path) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) {
+        path.push("zhu-ye-ime");
+        let _ = std::fs::create_dir_all(&path);
+        path.push("panel-hotkey.log");
+        let message = format!(
+            "[error] 面板呼出热键注册失败（modifiers={modifiers:#x}, vk={vk:#x}），可能被其他程序占用；静默降级为仅托盘菜单可用\n",
+        );
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, message.as_bytes()));
+    }
+    false
+}
+
+/// 呼出热键递达：面板已打开（任意进程）→ 关闭；未打开 → 按上次页签/位置创建
+/// （S-31 全局单面板：窗口类 `ZhuYeSettingsPanel` 全局唯一）。
+fn toggle_panel() {
+    let class: Vec<u16> = PANEL_CLASS_NAME.encode_utf16().collect();
+    match unsafe { FindWindowW(PCWSTR(class.as_ptr()), None) } {
+        Ok(existing) if !existing.is_invalid() => {
+            // 已打开：PostMessage(WM_CLOSE) 关闭（面板侧保持不变动窗口语义）。
+            unsafe {
+                let _ = PostMessageW(Some(existing), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+        _ => {
+            // 未打开：按记忆的页签/位置创建；托盘为宿主时不通知面板关闭事件。
+            let kind = panel_window::remembered_kind();
+            if let Err(error) = panel_window::PanelWindow::open(PanelView::new(kind), None) {
+                if let Some(mut path) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) {
+                    path.push("zhu-ye-ime");
+                    path.push("panel-hotkey.log");
+                    let message = format!("[error] 呼出面板失败：{error}\n",);
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .and_then(|mut file| {
+                            std::io::Write::write_all(&mut file, message.as_bytes())
+                        });
+                }
+            }
+        }
     }
 }
 
@@ -339,6 +434,8 @@ fn main() -> windows::core::Result<()> {
 
     let mode = read_mode();
     set_tray_icon(window, &mode, false)?;
+    // 面板呼出热键（FR-070）：注册失败（占用/系统拒绝）不阻断托盘启动。
+    register_panel_hotkey(window);
     let mut state = TrayState {
         window: window.0 as isize,
         icon_mode: mode,
@@ -379,12 +476,19 @@ unsafe extern "system" fn window_proc(
             id if id == MENU_OPEN_SETTINGS => open_settings(),
             id if id == MENU_EXIT => {
                 remove_tray_icon(window);
+                unsafe {
+                    let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
+                }
                 PostQuitMessage(0);
             }
             _ => {}
         },
+        WM_HOTKEY => toggle_panel(),
         WM_TIMER => poll(),
         WM_DESTROY => {
+            unsafe {
+                let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
+            }
             PostQuitMessage(0);
         }
         _ => return DefWindowProcW(window, message, wparam, lparam),
