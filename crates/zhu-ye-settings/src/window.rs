@@ -160,8 +160,8 @@ struct WindowState {
     update_rx: Option<Receiver<UpdateOutcome>>,
     /// 已派发的任务序号；回执消息用它识别"当前任务"（旧任务迟到回执忽略）。
     update_seq: u32,
-    /// 「关于与更新」页诊断信息逐行内容；首次绘制该页时从本地懒收集（不联网）。
-    diagnostics: Option<Vec<String>>,
+    /// 「关于与更新」页诊断信息（标签+值行）；首次绘制该页时从本地懒收集（不联网）。
+    diagnostics: Option<Vec<DiagEntry>>,
     /// 自定义主题（`Custom(name)`）解析出的设置窗配色与覆盖键数；非自定义主题为
     /// `None`。文件缺失/解析失败回退系统深浅预设（T-088 / FR-048）。
     custom_theme: Option<(SettingsTheme, usize)>,
@@ -795,7 +795,7 @@ fn on_about_sections_click(
     x: i32,
     y: i32,
 ) {
-    let layout_rows = layout::about_layout(metrics, client, 0);
+    let layout_rows = layout::about_layout(metrics, client);
     let can_run = can_run_updater(state);
     if layout::contains(layout_rows.check, x, y) {
         if can_run {
@@ -868,43 +868,82 @@ unsafe fn start_update_task(hwnd: HWND, state: &mut WindowState, kind: UpdateKin
     invalidate(hwnd);
 }
 
-/// 收集诊断信息（T-077 / FR-044）：版本、配置/数据/日志路径与已装包列表。
+/// 单条诊断信息：标签（固定列宽的左栏）+ 值行（右栏，每行独立换行排布）。
+#[derive(Debug, Clone)]
+struct DiagEntry {
+    label: &'static str,
+    value_lines: Vec<String>,
+}
+
+/// 收集诊断信息（T-077 / FR-044 / T-150）：版本、联机说明、配置/数据/日志路径
+/// 与已装包列表——卡片化后以「标签 + 值行」结构返回，由 `draw_about` 逐条成卡。
 ///
 /// 全部本地读取，不 spawn 更新器、不发网络请求（D-44）。已装包清单复用
 /// `list_packs_now` 的本地盘面（清单 + 配置 + exe 目录），与「添加词库」同源。
-fn build_diagnostics(config_path: Option<&std::path::Path>) -> Vec<String> {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "竹叶输入法 v{}（引擎与设置窗口同源发布）",
-        zhu_ye_core::core_version()
-    ));
-    lines.push("联机更新由独立更新器进程完成（D-44），本窗口自身不联网。".to_owned());
+fn build_diagnostics(config_path: Option<&std::path::Path>) -> Vec<DiagEntry> {
+    let mut entries = Vec::new();
+    entries.push(DiagEntry {
+        label: "版本",
+        value_lines: vec![format!(
+            "竹叶输入法 v{}（引擎与设置窗口同源发布）",
+            zhu_ye_core::core_version()
+        )],
+    });
+    entries.push(DiagEntry {
+        label: "联机更新",
+        value_lines: vec!["由独立更新器进程完成下载与替换（D-44），本窗口自身不联网。".to_owned()],
+    });
     match config_path {
-        Some(path) => lines.push(format!("配置文件：{}", path.display())),
-        None => lines.push("配置文件：（未找到，APPDATA 未设置）".to_owned()),
+        Some(path) => entries.push(DiagEntry {
+            label: "配置文件",
+            value_lines: vec![path.display().to_string()],
+        }),
+        None => entries.push(DiagEntry {
+            label: "配置文件",
+            value_lines: vec!["（未找到，APPDATA 未设置）".to_owned()],
+        }),
     }
     match config::data_dir() {
-        Some(dir) => lines.push(format!("数据目录：{}", dir.display())),
-        None => lines.push("数据目录：（未找到，APPDATA 未设置）".to_owned()),
+        Some(dir) => entries.push(DiagEntry {
+            label: "数据目录",
+            value_lines: vec![dir.display().to_string()],
+        }),
+        None => entries.push(DiagEntry {
+            label: "数据目录",
+            value_lines: vec!["（未找到，APPDATA 未设置）".to_owned()],
+        }),
     }
     match config::product_log_dir() {
-        Some(dir) => lines.push(format!(
-            "日志目录：{}（默认记录错误，级别见 config.json log_level）",
-            dir.display()
-        )),
-        None => lines.push("日志目录：（未找到，LOCALAPPDATA 未设置）".to_owned()),
+        Some(dir) => entries.push(DiagEntry {
+            label: "日志目录",
+            value_lines: vec![format!(
+                "{}（默认记录错误，级别见 config.json log_level）",
+                dir.display()
+            )],
+        }),
+        None => entries.push(DiagEntry {
+            label: "日志目录",
+            value_lines: vec!["（未找到，LOCALAPPDATA 未设置）".to_owned()],
+        }),
     }
     let packs = list_packs_now(config_path);
     if packs.is_empty() {
-        lines.push("已装包：（无）".to_owned());
+        entries.push(DiagEntry {
+            label: "已装包",
+            value_lines: vec!["（无）".to_owned()],
+        });
     } else {
-        lines.push(format!("已装包（{}）：", packs.len()));
+        let mut lines = vec![format!("{} 个：", packs.len())];
         for pack in packs {
             let flag = if pack.enabled { "已启用" } else { "停用" };
             lines.push(format!("  {}（{}，{flag}）", pack.name, pack.id));
         }
+        entries.push(DiagEntry {
+            label: "已装包",
+            value_lines: lines,
+        });
     }
-    lines
+    entries
 }
 
 /// 汇总一级修复的逐项结果为底部提示（每项一行，行数有限时截断）。
@@ -2747,8 +2786,7 @@ unsafe fn draw_about(
     if state.diagnostics.is_none() {
         state.diagnostics = Some(build_diagnostics(state.config_path.as_deref()));
     }
-    let diag_count = state.diagnostics.as_ref().map_or(0, Vec::len);
-    let layout_rows = layout::about_layout(metrics, client, diag_count);
+    let layout_rows = layout::about_layout(metrics, client);
     let online = state.settings.online_update;
 
     // 状态行：在线更新开关状态（P-03 默认关）。
@@ -2880,7 +2918,9 @@ unsafe fn draw_about(
         );
     }
 
-    // 版本与诊断信息小节：标题 + 分隔线 + 逐行诊断（超出可用高度截断）。
+    // 版本与诊断信息小节（T-150）：标题下每条信息一张卡，卡内「标签 | 值」双栏，
+    // 值列按可用宽度换行；卡面与检查结果区同款（expanded_bg 圆角底 + border
+    // 描边）。卡片在 `diag_cards` 区内从顶向下排布，超出区底即截断不绘制。
     draw_text(
         hdc,
         "版本与诊断信息",
@@ -2889,42 +2929,66 @@ unsafe fn draw_about(
         state.fonts.body,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
     );
-    fill(
-        hdc,
-        UiRect {
-            left: layout_rows.diag_title.left,
-            top: layout_rows.diag_title.bottom - 1,
-            right: layout_rows.diag_title.right,
-            bottom: layout_rows.diag_title.bottom,
-        },
-        theme.border,
-    );
-    let diag_lines = state
+    let diag = state
         .diagnostics
         .as_ref()
         .map_or_else(Vec::new, Clone::clone);
-    for (index, row_rect) in layout_rows.diag_rows.iter().enumerate() {
-        let Some(line) = diag_lines.get(index) else {
+    let pad = metrics.gap;
+    let label_w = layout::diag_label_width(metrics);
+    let row_h = layout::diag_row_height(metrics);
+    let value_left = layout_rows.diag_cards.left + pad + label_w + metrics.chip_gap;
+    let value_avail = layout_rows.diag_cards.right - pad - value_left;
+    let mut y = layout_rows.diag_cards.top;
+    for entry in &diag {
+        // 值行先按可用宽换行（GDI 真实测宽），卡高随行数伸缩。
+        let mut lines: Vec<String> = Vec::new();
+        for line in &entry.value_lines {
+            lines.extend(layout::wrap_text(
+                line,
+                |part| text_width(hdc, part, state.fonts.small),
+                value_avail,
+            ));
+        }
+        let card = UiRect {
+            left: layout_rows.diag_cards.left,
+            top: y,
+            right: layout_rows.diag_cards.right,
+            bottom: y + pad * 2 + lines.len() as i32 * row_h,
+        };
+        if card.bottom > layout_rows.diag_cards.bottom {
             break;
-        };
-        let rect = UiRect {
-            left: row_rect.left + metrics.gap,
-            top: row_rect.top,
-            right: row_rect.right,
-            bottom: row_rect.bottom,
-        };
+        }
+        fill_round(hdc, card, metrics.gap, theme.expanded_bg);
+        round_rect_outline(hdc, card, metrics.gap, theme.border);
         draw_text(
             hdc,
-            line,
-            rect,
-            if index == 0 {
-                theme.item_text
-            } else {
-                theme.secondary_text
+            entry.label,
+            UiRect {
+                left: card.left + pad,
+                top: card.top,
+                right: card.left + pad + label_w,
+                bottom: card.bottom,
             },
+            theme.secondary_text,
             state.fonts.small,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
+        for (index, line) in lines.iter().enumerate() {
+            draw_text(
+                hdc,
+                line,
+                UiRect {
+                    left: value_left,
+                    top: card.top + pad + index as i32 * row_h,
+                    right: card.right - pad,
+                    bottom: card.top + pad + (index as i32 + 1) * row_h,
+                },
+                theme.item_text,
+                state.fonts.small,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+        }
+        y = card.bottom + metrics.gap;
     }
 }
 
