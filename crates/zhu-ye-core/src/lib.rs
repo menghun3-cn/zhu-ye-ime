@@ -22,6 +22,7 @@ pub mod en_words;
 pub mod error;
 pub mod file_log;
 pub mod format;
+pub mod hotkey;
 pub mod identity;
 pub mod log_level;
 pub mod manifest;

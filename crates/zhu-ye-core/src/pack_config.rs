@@ -255,6 +255,12 @@ pub struct ConfigFile {
     /// 关闭后候选窗不画拼音行：行内主文本/序号回到整行垂直居中形态。
     #[serde(default = "default_candidate_show_pin")]
     pub candidate_show_pin: bool,
+    /// 工具箱 emoji/符号面板的呼出热键（第十四期 FR-070，T-151）；缺失则用内建
+    /// 默认 `ctrl+alt+e`（见 `crate::hotkey::DEFAULT_PANEL_HOTKEY`）。
+    /// 字符串格式 `ctrl+alt+e`（修饰 + `+` + 键）；托盘启动时解析，非法值回默认并记日志。
+    /// **不递增 `CONFIG_FORMAT_VERSION`**（旧配置无此字段按默认处理）。
+    #[serde(default)]
+    pub panel_hotkey: Option<String>,
 }
 
 fn default_version() -> u32 {
@@ -292,6 +298,7 @@ impl Default for ConfigFile {
             default_mode: ModeChoice::Chinese,
             log_level: crate::log_level::LogLevel::default(),
             candidate_show_pin: true,
+            panel_hotkey: None,
         }
     }
 }
@@ -708,6 +715,24 @@ mod tests {
         assert_eq!(ConfigFile::from_json(&text).unwrap(), off);
         // 序列化写出布尔值（而非缺失键），供设置窗口/TSF 双侧读取。
         assert!(text.contains(r#""candidate_show_pin": false"#), "{text}");
+    }
+
+    #[test]
+    fn 面板热键默认缺省且自定义可往返() {
+        // T-151：新字段默认 None（调用方回退 ctrl+alt+e），旧配置无字段按默认。
+        let config = ConfigFile::default();
+        assert_eq!(config.panel_hotkey, None, "默认不写该键");
+        let legacy = ConfigFile::from_json(r#"{"enabled_packs": ["it"]}"#).unwrap();
+        assert_eq!(legacy.panel_hotkey, None, "旧配置（无该字段）应为 None");
+        // 显式自定义序列化往返一致。
+        let custom = ConfigFile::from_json(r#"{"panel_hotkey": "ctrl+shift+e"}"#).unwrap();
+        assert_eq!(custom.panel_hotkey.as_deref(), Some("ctrl+shift+e"));
+        let text = custom.to_json().unwrap();
+        assert_eq!(ConfigFile::from_json(&text).unwrap(), custom);
+        assert!(text.contains(r#""panel_hotkey": "ctrl+shift+e""#), "{text}");
+        // 显式 null 与缺省等价（宽松解析）。
+        let nulled = ConfigFile::from_json(r#"{"panel_hotkey": null}"#).unwrap();
+        assert_eq!(nulled.panel_hotkey, None);
     }
 
     #[test]
