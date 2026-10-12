@@ -21,8 +21,12 @@ use zhu_ye_settings::window::{self, RunOptions};
 enum Mode {
     /// 打开设置窗口。
     Settings(Box<RunOptions>),
-    /// 画出工具箱面板的一帧并写出 BMP（验收取证）。
-    PanelShot { view: PanelView, path: PathBuf },
+    /// 画出工具箱面板的一帧并写出 BMP（验收取证；`query` 预置搜索查询）。
+    PanelShot {
+        view: PanelView,
+        query: String,
+        path: PathBuf,
+    },
     /// 二级修复：TSF 两棵 HKLM 注册树重注册（由主窗口经 runas 提权拉起）。
     RepairRegistry,
 }
@@ -47,8 +51,8 @@ fn main() -> ExitCode {
 
     // 取证模式不落任何状态，也不与正在运行的设置窗口互斥。
     let options = match mode {
-        Mode::PanelShot { view, path } => {
-            return match panel_window::run_shot(view, &path) {
+        Mode::PanelShot { view, query, path } => {
+            return match panel_window::run_shot(view, &query, &path) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(message) => {
                     eprintln!("zhu-ye-settings: {message}");
@@ -97,6 +101,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
     let mut shot_panel: Option<PanelKind> = None;
     let mut panel_path: Option<PathBuf> = None;
     let mut panel_page = 0usize;
+    let mut panel_query = String::new();
     let mut args = args.peekable();
 
     while let Some(arg) = args.next() {
@@ -155,6 +160,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
                     .parse::<usize>()
                     .map_err(|_| "「--panel-page」需要非负整数".to_owned())?;
             }
+            "--panel-query" => {
+                panel_query = next_value(&mut args, "--panel-query")?;
+            }
             "--help" | "-h" => return Ok(None),
             other => return Err(format!("未知参数：{other}")),
         }
@@ -169,6 +177,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
                 kind,
                 page: panel_page,
             },
+            query: panel_query,
             path,
         }));
     }
@@ -219,5 +228,6 @@ fn print_usage() {
     println!("                   [--repair]              截图时进入「修复输入法」子视图");
     println!("  zhu-ye-settings --shot-panel emoji|symbol <文件.bmp>");
     println!("                   [--panel-page <页码>]  画出工具箱面板一帧并写出 BMP");
+    println!("                   [--panel-query <词>]   预置搜索查询（过滤网格帧，取证）");
     println!("  zhu-ye-settings --repair-registry   重注册 TSF 两棵注册树（提权环境执行）");
 }

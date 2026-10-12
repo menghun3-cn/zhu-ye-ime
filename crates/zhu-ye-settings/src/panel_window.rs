@@ -1,33 +1,46 @@
 //! 工具箱面板：非激活浮层窗口。
 //!
 //! 面板用 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST` 浮在最上层，并且
-//! **永不夺取焦点**（`WM_MOUSEACTIVATE` 回 `MA_NOACTIVATE`）。因此用户的目标应用在整个
+//! **常态永不夺取焦点**（`WM_MOUSEACTIVATE` 回 `MA_NOACTIVATE`）。因此用户的目标应用在整个
 //! 浏览过程中保持前台，点击格子时 `deliver` 送出的字符才落得到那里——这是"选中即上屏"
 //! 的实现前提。
 //!
-//! 代价：非激活窗口收不到键盘输入，所以面板没有 Esc 关闭，只能点"返回设置"。
+//! 第十四期（FR-070，T-151）交互重构：
+//! - 顶部 **emoji / 符号双页签**（点击或 Tab 切换，`layout.tabs`）；
+//! - **搜索框**：点击进入搜索态 = 临时激活的窄化例外（S-32）——进入前记录前台窗口为
+//!   目标，`WM_CHAR` 输入即按拼音别名/字符/组名子串过滤（`panel::filter_entries`），
+//!   Esc 退出搜索并还焦目标；搜索态选中 → 还焦后 `deliver` 上屏；
+//! - 呼出热键（托盘 `RegisterHotKey`）**toggle** 关闭（S-31），补上非激活窗口收不到
+//!   键盘的关闭位；面板窗口类全局唯一，`FindWindow` 互斥。
+//! - 面板位置记忆（S-33）：关闭时把窗口矩形写回 `panel.json`，下次呼出原位弹出；
+//!   首次无记忆则贴鼠标光标。
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, EndPaint, InvalidateRect, UpdateWindow, DT_CENTER, DT_END_ELLIPSIS,
-    DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, SRCCOPY,
+    BeginPaint, BitBlt, EndPaint, InvalidateRect, ScreenToClient, UpdateWindow, DT_CENTER,
+    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_ESCAPE, VK_LEFT, VK_RIGHT, VK_TAB,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE,
-    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT,
-    WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
+    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect, LoadCursorW, PostMessageW,
+    PostQuitMessage, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    GWLP_USERDATA, GWL_EXSTYLE, HWND_TOPMOST, IDC_ARROW, MA_ACTIVATE, MA_NOACTIVATE,
+    SPI_GETWORKAREA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE,
+    WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE, WM_THEMECHANGED,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_POPUP,
 };
 
 use zhu_ye_ui::{UiRect, UiThemeKind, BASE_DPI};
@@ -35,7 +48,7 @@ use zhu_ye_ui::{UiRect, UiThemeKind, BASE_DPI};
 use crate::deliver::{deliver_text, Delivery};
 use crate::gdi::{draw_text, fill, fill_round, BackBuffer, Fonts};
 use crate::layout::{self, PanelMetrics};
-use crate::panel::PanelView;
+use crate::panel::{filter_entries, page_of, PanelEntry, PanelKind, PanelView, PANEL_PAGE_SIZE};
 use crate::shell;
 use crate::theme::{settings_theme, settings_theme_from_system_colors, SettingsTheme};
 use crate::wide::to_utf16;
@@ -45,8 +58,12 @@ pub const PANEL_CLASS_NAME: &str = "ZhuYeSettingsPanel";
 
 /// 面板关闭时通知设置窗口的自定义消息。
 ///
-/// 面板不激活，因此无法靠"焦点回到设置窗口"来判断关闭时机；关闭动作显式通知。
+/// 面板不激活，因此无法靠"焦点回到设置窗口"来判断关闭时机；关闭动作显式通知
+/// （托盘回调 `WM_HOTKEY` toggle 关闭时同样收不到——只有宿主窗口才需要通知）。
 pub const WM_PANEL_CLOSED: u32 = WM_APP + 1;
+
+/// 面板窗口状态文件：关闭时记忆位置与页签（S-33；托盘/设置窗口共用，S-8 原子写）。
+pub const PANEL_POSITION_FILE: &str = "panel.json";
 
 /// 已打开的面板窗口；`Drop` 销毁窗口。
 pub struct PanelWindow {
@@ -54,11 +71,15 @@ pub struct PanelWindow {
 }
 
 impl PanelWindow {
-    /// 创建并显示面板。不启动消息循环：面板与设置窗口同线程，共用设置窗口的消息循环。
+    /// 创建并显示面板。不启动消息循环：面板与宿主（设置窗口或托盘）同线程，
+    /// 共用宿主的消息循环。
+    ///
+    /// `host`：面板关闭时接收 `WM_PANEL_CLOSED` 通知的窗口；托盘宿主传 `None`。
+    /// 位置：优先读 `panel.json` 记忆（S-33），无记忆首次贴鼠标光标。
     ///
     /// # Errors
     /// 注册窗口类或创建窗口失败时返回描述。
-    pub fn open(view: PanelView, settings_hwnd: HWND) -> Result<Self, String> {
+    pub fn open(view: PanelView, host: Option<HWND>) -> Result<Self, String> {
         unsafe {
             let module = GetModuleHandleW(PCWSTR::null())
                 .map_err(|error| format!("获取模块句柄失败: {error}"))?;
@@ -76,7 +97,13 @@ impl PanelWindow {
             };
             let _ = AdjustWindowRectExForDpi(&mut frame, WS_POPUP, false, WINDOW_EX_STYLE(0), dpi);
 
-            let state = Box::new(PanelState::new(view, settings_hwnd, None));
+            let state = Box::new(PanelState::new(
+                view,
+                host.unwrap_or_default(),
+                None,
+                String::new(),
+                false,
+            ));
             let state_ptr = Box::into_raw(state);
             let class = to_utf16(PANEL_CLASS_NAME);
             let title = to_utf16(PANEL_CLASS_NAME);
@@ -101,7 +128,12 @@ impl PanelWindow {
                     return Err(format!("创建工具箱面板失败: {error}"));
                 }
             };
-            position_panel(hwnd, frame.right - frame.left, frame.bottom - frame.top);
+            position_panel(
+                hwnd,
+                frame.right - frame.left,
+                frame.bottom - frame.top,
+                true,
+            );
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let _ = UpdateWindow(hwnd);
             Ok(Self { hwnd })
@@ -128,12 +160,14 @@ impl Drop for PanelWindow {
 
 /// 截图模式：建立面板、画出一帧、写出 BMP 后退出。
 ///
-/// 供验收取证，与设置窗口的 `--shot` 同路数。
+/// 供验收取证，与设置窗口的 `--shot` 同路数。`query` 预置搜索查询（`--panel-query`），
+/// 渲染过滤后的网格帧（搜索态取证）。截图用固定居中位置，不走位置记忆，保证帧可比。
 ///
 /// # Errors
 /// 建窗、绘制或写文件失败时返回描述。
-pub fn run_shot(view: PanelView, path: &Path) -> Result<(), String> {
+pub fn run_shot(view: PanelView, query: &str, path: &Path) -> Result<(), String> {
     let path = path.to_path_buf();
+    let query = query.to_owned();
     unsafe {
         // 与设置窗口同口径：不启用 Per-Monitor V2 时 `GetDpiForSystem` 返回 96，
         // 截图就不是真实缩放下的样子。
@@ -152,7 +186,13 @@ pub fn run_shot(view: PanelView, path: &Path) -> Result<(), String> {
             bottom: client_height,
         };
         let _ = AdjustWindowRectExForDpi(&mut frame, WS_POPUP, false, WINDOW_EX_STYLE(0), dpi);
-        let state = Box::new(PanelState::new(view, HWND::default(), Some(path)));
+        let state = Box::new(PanelState::new(
+            view,
+            HWND::default(),
+            Some(path),
+            query,
+            true,
+        ));
         let state_ptr = Box::into_raw(state);
         let class = to_utf16(PANEL_CLASS_NAME);
         let hwnd = match CreateWindowExW(
@@ -175,7 +215,12 @@ pub fn run_shot(view: PanelView, path: &Path) -> Result<(), String> {
                 return Err(format!("创建工具箱面板失败: {error}"));
             }
         };
-        position_panel(hwnd, frame.right - frame.left, frame.bottom - frame.top);
+        position_panel(
+            hwnd,
+            frame.right - frame.left,
+            frame.bottom - frame.top,
+            false,
+        );
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         let _ = UpdateWindow(hwnd);
         let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
@@ -187,24 +232,59 @@ pub fn run_shot(view: PanelView, path: &Path) -> Result<(), String> {
     }
 }
 
-/// 把面板居中到工作区（避开任务栏）。
-unsafe fn position_panel(hwnd: HWND, width: i32, height: i32) {
+/// 工作区矩形（避开任务栏）；失败返回 `None`（调用方回退默认位置）。
+unsafe fn work_area() -> Option<RECT> {
+    let mut work = RECT::default();
     unsafe {
-        let mut work = RECT::default();
-        let ok = SystemParametersInfoW(
+        SystemParametersInfoW(
             SPI_GETWORKAREA,
             0,
             Some((&mut work as *mut RECT).cast()),
             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS::default(),
         )
-        .is_ok();
-        let (left, top) = if ok {
-            (
-                work.left + (work.right - work.left - width) / 2,
-                work.top + (work.bottom - work.top - height) / 2,
-            )
+        .ok()?;
+    }
+    Some(work)
+}
+
+/// 把面板放到目标位置（S-33）：有记忆读出并钳制到工作区，无记忆贴鼠标光标右下，
+/// 无论如何都保证完整可见；截图模式固定居中。
+unsafe fn position_panel(hwnd: HWND, width: i32, height: i32, use_memory: bool) {
+    unsafe {
+        let work = work_area();
+        let fallback = |default: (i32, i32)| -> (i32, i32) {
+            match work {
+                Some(rect) if width < rect.right - rect.left && height < rect.bottom - rect.top => {
+                    let left = default.0.clamp(rect.left, rect.right - width);
+                    let top = default.1.clamp(rect.top, rect.bottom - height);
+                    (left, top)
+                }
+                _ => (80, 80),
+            }
+        };
+        let (left, top) = if use_memory {
+            match PanelPosition::load() {
+                Some(position) => fallback((position.left, position.top)),
+                // 首次呼出：贴鼠标光标右下（偏移 12px，光标不再被面板盖住）。
+                None => {
+                    let mut point = POINT::default();
+                    if GetCursorPos(&mut point).is_ok() {
+                        fallback((point.x + 12, point.y + 12))
+                    } else {
+                        fallback((80, 80))
+                    }
+                }
+            }
         } else {
-            (80, 80)
+            match work {
+                Some(rect) if width < rect.right - rect.left && height < rect.bottom - rect.top => {
+                    (
+                        rect.left + (rect.right - rect.left - width) / 2,
+                        rect.top + (rect.bottom - rect.top - height) / 2,
+                    )
+                }
+                _ => (80, 80),
+            }
         };
         let _ = SetWindowPos(
             hwnd,
@@ -223,7 +303,8 @@ struct PanelState {
     view: PanelView,
     theme_kind: UiThemeKind,
     dpi: u32,
-    settings_hwnd: HWND,
+    /// 关闭时通知的宿主窗口（设置窗口）；托盘宿主传 `None`（无需通知）。
+    host_hwnd: HWND,
     hint: Option<String>,
     shot_path: Option<PathBuf>,
     shot_done: bool,
@@ -231,21 +312,39 @@ struct PanelState {
     fonts: Fonts,
     /// 鼠标悬停的格子下标（T-148 选中格视觉；点击即上屏，无驻留选中态）。
     hover: Option<usize>,
+    /// 搜索查询（T-151，S-32）：空 = 全量浏览；非空 = `filter_entries` 过滤结果。
+    query: String,
+    /// 是否处于搜索态（面板已临时激活以接收键盘）。
+    search_active: bool,
+    /// 进入搜索态前的前台窗口——搜索态还焦与选中上屏的目标（S-32）。
+    target_hwnd: HWND,
+    /// 独立消息循环场景（截图模式）在面板关闭后 `PostQuitMessage`。
+    quit_on_close: bool,
 }
 
 impl PanelState {
-    fn new(view: PanelView, settings_hwnd: HWND, shot_path: Option<PathBuf>) -> Self {
+    fn new(
+        view: PanelView,
+        host_hwnd: HWND,
+        shot_path: Option<PathBuf>,
+        query: String,
+        quit_on_close: bool,
+    ) -> Self {
         Self {
             view,
             theme_kind: shell::resolve_theme_kind(),
             dpi: shell::system_dpi().max(BASE_DPI),
-            settings_hwnd,
+            host_hwnd,
             hint: None,
             shot_path,
             shot_done: false,
             back: BackBuffer::default(),
             fonts: Fonts::default(),
             hover: None,
+            query,
+            search_active: false,
+            target_hwnd: HWND::default(),
+            quit_on_close,
         }
     }
 
@@ -256,6 +355,47 @@ impl PanelState {
             settings_theme(self.theme_kind)
         }
     }
+}
+
+/// 面板状态文件的 JSON 载荷（S-33：位置 + 页签记忆）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PanelPosition {
+    kind: PanelKind,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+impl PanelPosition {
+    /// 读取记忆位置；无文件/解析失败为 `None`（首次呼出贴光标）。
+    fn load() -> Option<Self> {
+        let path = crate::config::panel_state_path()?;
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    /// 原子写（临时文件 + rename，S-8 口径）：失败静默（记忆是增强项，不打断使用）。
+    fn save(&self) {
+        let Some(path) = crate::config::panel_state_path() else {
+            return;
+        };
+        let mut tmp = path.clone();
+        tmp.set_extension("json.tmp");
+        if let Ok(text) = serde_json::to_string(self) {
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, path);
+            }
+        }
+    }
+}
+
+/// 读取记忆的页签（托盘热键呼出用；无记忆/损坏回 emoji）。
+#[must_use]
+pub fn remembered_kind() -> PanelKind {
+    PanelPosition::load()
+        .map(|position| position.kind)
+        .unwrap_or(PanelKind::Emoji)
 }
 
 unsafe extern "system" fn panel_proc(
@@ -273,8 +413,31 @@ unsafe extern "system" fn panel_proc(
             }
             LRESULT(1)
         }
-        // 非激活：点击面板既不激活它、也不把焦点从用户的目标应用拿走。
-        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        // 常态非激活：点击面板既不激活它、也不把焦点从用户的目标应用拿走。
+        // 搜索框例外（T-151，S-32）：点搜索框 = 进入搜索态，返回 MA_ACTIVATE 让
+        // 鼠标点击合法激活面板以接收键盘；进入前记录前台窗口为目标。
+        WM_MOUSEACTIVATE => {
+            // lParam 为屏幕坐标：先转客户区再命中测试。
+            let mut point = POINT {
+                x: (lparam.0 & 0xFFFF) as i16 as i32,
+                y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+            };
+            unsafe {
+                let _ = ScreenToClient(hwnd, &mut point);
+                if let Some(state) = panel_state_mut(hwnd) {
+                    if hit_search_box(hwnd, state, point.x, point.y) {
+                        if !state.search_active {
+                            state.search_active = true;
+                            state.target_hwnd = GetForegroundWindow();
+                            // 移除 NOACTIVATE 使本次点击可激活窗口。
+                            set_no_activate(hwnd, false);
+                        }
+                        return LRESULT(MA_ACTIVATE as isize);
+                    }
+                }
+                LRESULT(MA_NOACTIVATE as isize)
+            }
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             unsafe {
@@ -294,6 +457,77 @@ unsafe extern "system" fn panel_proc(
             unsafe {
                 if let Some(state) = panel_state_mut(hwnd) {
                     on_click(hwnd, state, x, y);
+                }
+            }
+            LRESULT(0)
+        }
+        // 搜索态（临时激活）下接收键盘：字符进查询、Esc 退出还焦、Tab 切页签、
+        // Backspace 删字符、左右键翻页。
+        WM_CHAR => {
+            let ch = char::from_u32(wparam.0 as u32);
+            unsafe {
+                if let Some(state) = panel_state_mut(hwnd) {
+                    if state.search_active {
+                        if let Some(ch) = ch {
+                            // 只收可显示字符（含空格）；控制字符由 WM_KEYDOWN 处理。
+                            if !ch.is_control() {
+                                state.query.push(ch);
+                                state.view.page = 0;
+                                state.hover = None;
+                                invalidate(hwnd);
+                            }
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            let vk = u32::from(wparam.0 as u16);
+            unsafe {
+                if let Some(state) = panel_state_mut(hwnd) {
+                    if state.search_active {
+                        match vk {
+                            v if v == u32::from(VK_ESCAPE.0) => {
+                                let target = state.target_hwnd;
+                                leave_search(hwnd, state, true);
+                                if !target.is_invalid() {
+                                    let _ = SetForegroundWindow(target);
+                                }
+                            }
+                            v if v == u32::from(VK_TAB.0) => {
+                                state.view.kind = match state.view.kind {
+                                    PanelKind::Emoji => PanelKind::Symbol,
+                                    PanelKind::Symbol => PanelKind::Emoji,
+                                };
+                                state.view.page = 0;
+                                state.hover = None;
+                                invalidate(hwnd);
+                            }
+                            v if v == u32::from(VK_BACK.0) => {
+                                state.query.pop();
+                                state.view.page = 0;
+                                state.hover = None;
+                                invalidate(hwnd);
+                            }
+                            v if v == u32::from(VK_LEFT.0) => {
+                                // 搜索态翻页按过滤结果的页数（不是全量分页）。
+                                if state.view.page > 0 {
+                                    state.view.page -= 1;
+                                }
+                                invalidate(hwnd);
+                            }
+                            v if v == u32::from(VK_RIGHT.0) => {
+                                let filtered = filtered_entries(state);
+                                let page_count = page_of(&filtered, 0, PANEL_PAGE_SIZE).page_count;
+                                if state.view.page + 1 < page_count {
+                                    state.view.page += 1;
+                                }
+                                invalidate(hwnd);
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             LRESULT(0)
@@ -349,13 +583,23 @@ unsafe extern "system" fn panel_proc(
         WM_DESTROY => {
             unsafe {
                 if let Some(state) = panel_state_mut(hwnd) {
-                    let settings = state.settings_hwnd;
+                    let host = state.host_hwnd;
+                    let quit = state.quit_on_close;
+                    let target = state.target_hwnd;
+                    let search_active = state.search_active;
+                    // 位置 + 页签记忆（S-33）：关闭前把窗口矩形写回 panel.json。
+                    remember_position(hwnd, state);
                     drop(Box::from_raw(state as *mut PanelState));
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                    // 通知设置窗口：面板已关，该把焦点收回来了。
-                    if !settings.is_invalid() {
-                        let _ = PostMessageW(Some(settings), WM_PANEL_CLOSED, WPARAM(0), LPARAM(0));
-                    } else {
+                    // 搜索态下关闭：把焦点还给进入搜索态前的窗口（避免焦点悬空）。
+                    if search_active && !target.is_invalid() {
+                        let _ = SetForegroundWindow(target);
+                    }
+                    // 通知宿主（设置窗口）：面板已关。托盘宿主无需通知；
+                    // 截图模式的独立消息循环靠 PostQuitMessage 退出。
+                    if !host.is_invalid() {
+                        let _ = PostMessageW(Some(host), WM_PANEL_CLOSED, WPARAM(0), LPARAM(0));
+                    } else if quit {
                         PostQuitMessage(0);
                     }
                 } else {
@@ -386,31 +630,65 @@ unsafe fn panel_state_mut(hwnd: HWND) -> Option<&'static mut PanelState> {
     unsafe { pointer.as_mut() }
 }
 
-/// 处理点击：格子投递字符，翻页改页，返回关闭面板。
+/// 处理点击：格子投递字符（搜索态先还焦），翻页改页，返回/页签/搜索框各自处理。
 unsafe fn on_click(hwnd: HWND, state: &mut PanelState, x: i32, y: i32) {
     let Some(client) = (unsafe { client_rect(hwnd) }) else {
         return;
     };
     let metrics = PanelMetrics::new(state.dpi);
-    let layout = layout::panel_layout(&metrics, client, state.view.visible_len());
+    let filtered = filtered_entries(state);
+    let slice = page_of(&filtered, state.view.page, PANEL_PAGE_SIZE);
+    let layout = layout::panel_layout(&metrics, client, slice.items.len());
 
+    // 页签：点击切换（emoji / 符号），查询与分页状态随新页签重置。
+    for (index, tab) in layout.tabs.iter().enumerate() {
+        if layout::contains(*tab, x, y) {
+            let desired = [PanelKind::Emoji, PanelKind::Symbol][index.min(1)];
+            if state.view.kind != desired {
+                state.view.kind = desired;
+                state.view.page = 0;
+                state.hover = None;
+                unsafe { invalidate(hwnd) };
+            }
+            return;
+        }
+    }
+    // 搜索框：进入搜索态的动作已在 WM_MOUSEACTIVATE 完成；这里只刷新（光标提示）。
+    if layout::contains(layout.search, x, y) {
+        unsafe { invalidate(hwnd) };
+        return;
+    }
     if layout::contains(layout.back, x, y) {
         unsafe { close_panel(hwnd) };
         return;
     }
     if layout::contains(layout.prev, x, y) {
-        state.view.prev_page();
+        if slice.page > 0 {
+            state.view.page -= 1;
+        }
         unsafe { invalidate(hwnd) };
         return;
     }
     if layout::contains(layout.next, x, y) {
-        state.view.next_page();
+        if slice.page + 1 < slice.page_count {
+            state.view.page += 1;
+        }
         unsafe { invalidate(hwnd) };
         return;
     }
     for (index, cell) in layout.cells.iter().enumerate() {
         if layout::contains(*cell, x, y) {
-            if let Some(entry) = state.view.entry_at(index) {
+            if let Some(entry) = slice.items.get(index).copied() {
+                // 搜索态选中：先还焦给进入搜索态前的目标窗口，再投递，字符落在目标应用。
+                if state.search_active {
+                    let target = state.target_hwnd;
+                    unsafe { leave_search(hwnd, state, false) };
+                    if !target.is_invalid() {
+                        unsafe {
+                            let _ = SetForegroundWindow(target);
+                        }
+                    }
+                }
                 let delivery = deliver_text(entry.text);
                 state.hint = delivery.hint().map(str::to_owned);
                 if delivery == Delivery::Typed {
@@ -422,6 +700,78 @@ unsafe fn on_click(hwnd: HWND, state: &mut PanelState, x: i32, y: i32) {
             return;
         }
     }
+}
+
+/// 当前查询下的条目序列（全量浏览或过滤命中），绘制/命中测试/分页共用。
+fn filtered_entries(state: &PanelState) -> Vec<PanelEntry> {
+    filter_entries(state.view.kind, &state.query)
+}
+
+/// 搜索框命中测试（客户区坐标）；布局失败（无客户区）按未命中处理。
+fn hit_search_box(hwnd: HWND, state: &PanelState, x: i32, y: i32) -> bool {
+    let Some(client) = (unsafe { client_rect(hwnd) }) else {
+        return false;
+    };
+    let metrics = PanelMetrics::new(state.dpi);
+    let layout = layout::panel_layout(&metrics, client, 0);
+    layout::contains(layout.search, x, y)
+}
+
+/// 退出搜索态：恢复 NOACTIVATE（回到非激活点格即上屏），可选清空查询（Esc 取消）。
+unsafe fn leave_search(hwnd: HWND, state: &mut PanelState, clear: bool) {
+    if !state.search_active {
+        if clear {
+            state.query.clear();
+        }
+        return;
+    }
+    state.search_active = false;
+    if clear {
+        state.query.clear();
+    }
+    state.hover = None;
+    set_no_activate(hwnd, true);
+    unsafe { invalidate(hwnd) };
+}
+
+/// 开关面板窗口的 `WS_EX_NOACTIVATE`（搜索态启用键盘时临时移除，S-32）。
+unsafe fn set_no_activate(hwnd: HWND, no_activate: bool) {
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as i32;
+        let updated = if no_activate {
+            ex | WS_EX_NOACTIVATE.0 as i32
+        } else {
+            ex & !(WS_EX_NOACTIVATE.0 as i32)
+        };
+        if updated != ex {
+            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, updated as isize);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+            );
+        }
+    }
+}
+
+/// 关闭前面板的位置/页签记忆（S-33）。
+unsafe fn remember_position(hwnd: HWND, state: &PanelState) {
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return;
+    }
+    PanelPosition {
+        kind: state.view.kind,
+        left: rect.left,
+        top: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+    }
+    .save();
 }
 
 unsafe fn client_rect(hwnd: HWND) -> Option<UiRect> {
@@ -475,8 +825,10 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
     unsafe {
         state.fonts.ensure(state.dpi);
     }
-    let layout = layout::panel_layout(&metrics, client, state.view.visible_len());
-    let entries = state.view.visible();
+    let filtered = filtered_entries(state);
+    let slice = page_of(&filtered, state.view.page, PANEL_PAGE_SIZE);
+    let layout = layout::panel_layout(&metrics, client, slice.items.len());
+    let entries = slice.items;
 
     unsafe {
         fill(hdc, client, theme.window);
@@ -492,30 +844,80 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
             theme.chip_border,
         );
 
-        // 标题：面板名 + 分组跨度提示
-        let title = UiRect {
-            left: layout.header.left + metrics.padding,
-            top: layout.header.top,
-            right: layout.header.right - metrics.padding,
-            bottom: layout.header.bottom,
-        };
-        let first = entries.first().map(|entry| entry.group).unwrap_or("");
-        let last = entries.last().map(|entry| entry.group).unwrap_or("");
-        let heading = if first.is_empty() {
-            state.view.kind.title().to_owned()
-        } else if first == last {
-            format!("{}（{} 组）", state.view.kind.title(), first)
+        // 页签：选中 = 主字色 + 底边 2px 叶色下划线；未选中 = 次要字色。
+        for (index, tab) in layout.tabs.iter().enumerate() {
+            let active = index
+                == match state.view.kind {
+                    PanelKind::Emoji => 0,
+                    PanelKind::Symbol => 1,
+                };
+            draw_text(
+                hdc,
+                [PanelKind::Emoji, PanelKind::Symbol][index.min(1)].title(),
+                *tab,
+                if active {
+                    theme.title_text
+                } else {
+                    theme.secondary_text
+                },
+                state.fonts.title,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+            if active {
+                // 页签下划线置于标题基线下方一小段，不压住搜索框。
+                let underline = UiRect {
+                    left: tab.left + metrics.gap / 2,
+                    top: tab.bottom - metrics.gap,
+                    right: tab.right - metrics.gap / 2,
+                    bottom: tab.bottom - metrics.gap / 2,
+                };
+                fill(hdc, underline, theme.accent);
+            }
+        }
+
+        // 搜索框：外框（搜索态用叶色强调）+ 内底；无查询时画占位提示。
+        let search_border = if state.search_active {
+            theme.accent
         } else {
-            format!("{}（{}–{} 组）", state.view.kind.title(), first, last)
+            theme.chip_border
         };
-        draw_text(
+        fill_round(hdc, layout.search, metrics.gap / 2, search_border);
+        fill_round(
             hdc,
-            &heading,
-            title,
-            theme.title_text,
-            state.fonts.title,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            UiRect {
+                left: layout.search.left + 1,
+                top: layout.search.top + 1,
+                right: layout.search.right - 1,
+                bottom: layout.search.bottom - 1,
+            },
+            (metrics.gap / 2 - 1).max(0),
+            theme.control_background,
         );
+        let search_text = state.query.clone();
+        if search_text.is_empty() {
+            let placeholder = if state.search_active {
+                "输入拼音别名过滤…"
+            } else {
+                "点击输入关键词过滤（拼音别名/字符）"
+            };
+            draw_text(
+                hdc,
+                placeholder,
+                layout.search,
+                theme.secondary_text,
+                state.fonts.small,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+        } else {
+            draw_text(
+                hdc,
+                &search_text,
+                layout.search,
+                theme.item_text,
+                state.fonts.small,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+        }
 
         // 格子：字符居中，副标签在下方（emoji 为拼音别名，符号为组名）
         for (index, cell) in layout.cells.iter().enumerate() {
@@ -557,31 +959,42 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
                 hdc,
                 entry.label,
                 label,
-                theme.secondary_text,
+                if selected {
+                    theme.on_accent
+                } else {
+                    theme.secondary_text
+                },
                 state.fonts.small,
                 DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
             );
         }
 
-        // 提示
-        if let Some(hint) = state.hint.clone() {
-            draw_text(
-                hdc,
-                &hint,
-                layout.hint,
-                theme.secondary_text,
-                state.fonts.small,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
-            );
-        }
+        // 提示：默认显示操作提示；搜索无命中时提示"无匹配"。
+        let hint = state.hint.clone().unwrap_or_else(|| {
+            if !state.query.is_empty() && slice.items.is_empty() {
+                format!("无匹配「{}」，请换更短的关键词", state.query)
+            } else if state.search_active {
+                "输入拼音别名过滤 · Esc 退出 · Tab 切换面板".to_owned()
+            } else {
+                format!("点击格子上屏 · 呼出热键 {}", hotkey_display())
+            }
+        });
+        draw_text(
+            hdc,
+            &hint,
+            layout.hint,
+            theme.secondary_text,
+            state.fonts.small,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
 
         // 页脚
-        draw_button(hdc, state, layout.back, "返回设置", false);
+        draw_button(hdc, state, layout.back, "关闭", false);
         draw_button(hdc, state, layout.prev, "上一页", false);
         draw_button(hdc, state, layout.next, "下一页", false);
         draw_text(
             hdc,
-            &state.view.page_label(),
+            &format!("{}/{}", slice.page + 1, slice.page_count),
             layout.page_label,
             theme.secondary_text,
             state.fonts.small,
@@ -632,6 +1045,20 @@ unsafe fn draw(hdc: HDC, state: &mut PanelState, client: UiRect) {
     }
 }
 
+/// 配置里的呼出热键描述（解析失败/未配置回默认 "Ctrl+Alt+E"）。
+fn hotkey_display() -> String {
+    use zhu_ye_core::hotkey::{parse_hotkey, HotkeySpec, DEFAULT_PANEL_HOTKEY};
+    let configured = crate::config::config_path()
+        .and_then(|path| zhu_ye_core::load_config(&path).0.panel_hotkey)
+        .and_then(|spec| parse_hotkey(&spec))
+        .map(HotkeySpec::display);
+    configured.unwrap_or_else(|| {
+        parse_hotkey(DEFAULT_PANEL_HOTKEY)
+            .map(HotkeySpec::display)
+            .unwrap_or_default()
+    })
+}
+
 unsafe fn draw_button(hdc: HDC, state: &PanelState, rect: UiRect, label: &str, primary: bool) {
     let theme = state.theme();
     let metrics = PanelMetrics::new(state.dpi);
@@ -641,7 +1068,7 @@ unsafe fn draw_button(hdc: HDC, state: &PanelState, rect: UiRect, label: &str, p
             rect,
             metrics.gap,
             if primary {
-                // 主按钮（返回设置）= 实叶底，字色用面板 on_accent（T-148 §7）。
+                // 主按钮 = 实叶底，字色用面板 on_accent（T-148 §7）。
                 theme.accent
             } else {
                 theme.control_background
@@ -675,7 +1102,9 @@ fn hover_index(hwnd: HWND, state: &PanelState, x: i32, y: i32) -> Option<usize> 
         bottom: rect.bottom,
     };
     let metrics = PanelMetrics::new(state.dpi);
-    let layout = layout::panel_layout(&metrics, client, state.view.visible_len());
+    let filtered = filtered_entries(state);
+    let slice = page_of(&filtered, state.view.page, PANEL_PAGE_SIZE);
+    let layout = layout::panel_layout(&metrics, client, slice.items.len());
     layout
         .cells
         .iter()
