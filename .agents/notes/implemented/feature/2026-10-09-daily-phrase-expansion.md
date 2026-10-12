@@ -54,7 +54,11 @@ most grammatical phrases. There is nothing to take.
 measuring: `globalvoices_zhs.tok.gz` is word-tokenized news text — adjacent
 single CJK chars across the whole 8 MB corpus number only 97 pairs, and neither
 你是 nor 我是 occurs once. The social-media source is a word list, not running
-text. No n-gram data exists to derive phrase frequencies with.
+text. No n-gram data exists to derive phrase frequencies with. **Superseded
+2026-10-11 for the ranking layer:** [Statistical daily phrases](2026-10-11-statistical-daily-phrases.md)
+(T-147) supplies real corpora (OpenSubtitles + zhwiki) whose 2/3-gram
+statistics now drive frequencies; this note's manual tiers survive as the
+fallback layer for what statistics miss.
 
 **Seed table only, no enumeration.** Rejected: coverage stays at manual breadth;
 enumeration makes the "X是" family systematic (90+ copula phrases for free,
