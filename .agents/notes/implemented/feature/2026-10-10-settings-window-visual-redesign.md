@@ -104,7 +104,13 @@ gradient/shadow/translucency/animation, S-24).
   and dark (`#1F2822`/`#192019`/…) palettes exactly; the bark hairline sits at
   logical y=63; nav rail-sel and chip surfaces count as designed; the ≥7-row
   first-screen assertion is unchanged; About result box shows its expand
-  surface. Full table in 验收标准 §18.2.
+  surface. T-150 turns the version/diagnostics section into per-item cards
+  (`expanded_bg` + `line` border, label/value double columns; value rows wrap to
+  the available width via GDI measuring, card height grows with wrapped-line
+  count, cards past the card-area bottom are cut). T-150 pixel evidence
+  (host `--shot --page about`, light/dark): card surfaces 204077px each, card
+  border `#DDE5D6` 9844, label/value text counts normal, dark-frame raw pixels
+  confirm dark rendering. Full tables in 验收标准 §18.2 and §18.3.
 - VM interactive inspection (dark real-machine cursor hover, high-contrast
   live colours) stays pending under the established settings-window
   acceptance口径 (vm-accept-sop).
@@ -113,8 +119,9 @@ gradient/shadow/translucency/animation, S-24).
 
 - **Costs**: theme surface is larger (22 keys + the reserved constant), theme
   files can now tune seven more surfaces; the panel gains a small
-  TrackMouseEvent hover lifecycle; About text is inset by one `gap` inside its
-  new result container.
+  TrackMouseEvent hover lifecycle; since T-150 the About diagnostics render as
+  per-item cards (height grows with wrapped lines, a fixed 88px label column,
+  the geometry layer only provides the card-area boundary).
 - **Benefits**: the window finally reads as part of the bamboo brand; the dark
   accent contrast is audited to AA (7.15:1 vs the rejected 2.3:1 white);
   existing custom themes keep parsing and fall back gracefully; zero new

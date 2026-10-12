@@ -598,8 +598,9 @@ pub struct AboutLayout {
     pub apply: UiRect,
     /// "版本与诊断信息"小节标题行。
     pub diag_title: UiRect,
-    /// 诊断信息行；行数由诊断内容决定，超出可用高度截断。
-    pub diag_rows: Vec<UiRect>,
+    /// 诊断卡片区：标题下方到内容区底边的连续区域，卡片由绘制端动态排布
+    /// （每条信息一张卡，卡高按值换行行数计算），超出该区底部不再绘制。
+    pub diag_cards: UiRect,
 }
 
 /// 关于页扁平区块的行高常量（96 DPI 逻辑值；诊断行按 small 字体高度加呼吸留白）。
@@ -608,11 +609,45 @@ const LOGICAL_HINT_ROW: i32 = 20;
 const LOGICAL_DIAG_ROW: i32 = 21;
 /// 结果区固定显示行数（更新器输出超出部分截断）。
 const LOGICAL_RESULT_ROWS: i32 = 3;
+/// 诊断卡片内标签列宽（`small` 13px 下 6 个汉字 ≈ 78px，留余量到 88px）。
+const LOGICAL_DIAG_LABEL_W: i32 = 88;
+
+/// 诊断卡片内单行取值行高（96 DPI 逻辑值）。
+#[must_use]
+pub fn diag_row_height(metrics: &SettingsMetrics) -> i32 {
+    scale(metrics.dpi, LOGICAL_DIAG_ROW)
+}
+
+/// 诊断卡片内标签列的固定宽度（96 DPI 逻辑值）。
+#[must_use]
+pub fn diag_label_width(metrics: &SettingsMetrics) -> i32 {
+    scale(metrics.dpi, LOGICAL_DIAG_LABEL_W)
+}
+
+/// 把文本按可用宽度贪心换行成多行：逐字符累积宽度，`width_of` 返回子串宽度
+/// （绘制端注入真实 GDI 测宽；测试注入假宽度）。空串视为一行。
+///
+/// 换行只在整串超宽时发生（短行保持单行）；不含连字/断词优化——值列是路径、
+/// 包名与说明文字，字符级断行即可读。
+#[must_use]
+pub fn wrap_text(text: &str, width_of: impl Fn(&str) -> i32, avail: i32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        let test = format!("{current}{ch}");
+        if !current.is_empty() && width_of(&test) > avail {
+            lines.push(std::mem::take(&mut current));
+        }
+        current.push(ch);
+    }
+    lines.push(current);
+    lines
+}
 
 /// 计算「关于与更新」页扁平布局：开关条目行（调用方用 `item_rows` 绘制）之下，
 /// 依次是更新状态/提示、结果区、检查/应用按钮、诊断信息小节。
 #[must_use]
-pub fn about_layout(metrics: &SettingsMetrics, client: UiRect, diag_count: usize) -> AboutLayout {
+pub fn about_layout(metrics: &SettingsMetrics, client: UiRect) -> AboutLayout {
     let content = content_rect(metrics, client);
     let gap = metrics.gap;
     let section = |top: i32, height: i32| UiRect {
@@ -652,14 +687,14 @@ pub fn about_layout(metrics: &SettingsMetrics, client: UiRect, diag_count: usize
     top = apply.bottom + gap;
     let diag_title = section(top, status_h);
     top = diag_title.bottom + gap;
-    // 诊断行只生成到内容区底边内；超出部分由绘制端按行数截断（诊断内容至多十余行）。
-    let diag_rows: Vec<UiRect> = (0..diag_count)
-        .map(|index| {
-            let row_top = top + index as i32 * diag_row_h;
-            section(row_top, diag_row_h)
-        })
-        .take_while(|row| row.bottom <= content.bottom)
-        .collect();
+    // 诊断卡片区：标题下方到内容区底边的连续区域；卡片形状/数量由绘制端
+    // 按内容测宽动态排布（超出该区不再绘制）。
+    let diag_cards = UiRect {
+        left: content.left,
+        top,
+        right: content.right,
+        bottom: content.bottom,
+    };
     AboutLayout {
         status,
         hint,
@@ -667,7 +702,7 @@ pub fn about_layout(metrics: &SettingsMetrics, client: UiRect, diag_count: usize
         check,
         apply,
         diag_title,
-        diag_rows,
+        diag_cards,
     }
 }
 
@@ -1280,7 +1315,7 @@ mod tests {
     fn 关于页扁平布局各区块依次排列且不重叠() {
         let metrics = SettingsMetrics::new(96);
         let content = content_rect(&metrics, CLIENT);
-        let layout = super::about_layout(&metrics, CLIENT, 5);
+        let layout = super::about_layout(&metrics, CLIENT);
         // 状态行紧接开关条目行（条目行由 item_rows 绘制，高为 item_height）。
         assert_eq!(
             layout.status.top,
@@ -1299,52 +1334,96 @@ mod tests {
         assert_eq!(layout.check.right + metrics.gap, layout.apply.left);
         assert_eq!(layout.apply.right, content.right);
         assert_eq!(layout.check.bottom, layout.apply.bottom);
-        // 诊断小节标题在按钮之下，诊断行首尾相接且按诊断数生成。
+        // 诊断小节标题在按钮之下，卡片区从标题下方一直延伸到内容区底边：
+        // 卡片数量/形状由绘制端按内容测宽动态排布，几何层只提供边界。
         assert_eq!(layout.diag_title.top, layout.apply.bottom + metrics.gap);
-        assert_eq!(layout.diag_rows.len(), 5);
         assert_eq!(
-            layout.diag_rows[0].top,
+            layout.diag_cards.top,
             layout.diag_title.bottom + metrics.gap
         );
-        for pair in layout.diag_rows.windows(2) {
-            assert_eq!(pair[1].top, pair[0].bottom);
-        }
-        // 5 行诊断全部落在内容区内。
+        assert_eq!(layout.diag_cards.bottom, content.bottom);
+        assert_eq!(layout.diag_cards.left, content.left);
+        assert_eq!(layout.diag_cards.right, content.right);
         assert!(
-            layout
-                .diag_rows
-                .last()
-                .is_none_or(|row| row.bottom <= content.bottom),
-            "常规诊断行不得越出内容区底部"
+            layout.diag_cards.height() >= 2 * super::scale(96, super::LOGICAL_DIAG_ROW),
+            "常规窗口下卡片区至少容得下两行诊断的高度"
+        );
+        // 卡片区与按钮、结果区互不重叠。
+        assert!(layout.diag_cards.top >= layout.apply.bottom + metrics.gap);
+    }
+
+    #[test]
+    fn 关于页卡片区在矮窗口下仍贯穿到内容区底且不与上方区块重叠() {
+        let metrics = SettingsMetrics::new(96);
+        // 620 高矮窗口：区块压缩但卡片区边界依旧成立（绘制端自行截断卡片）。
+        let short_client = UiRect {
+            top: 0,
+            bottom: 620,
+            ..CLIENT
+        };
+        let short_content = content_rect(&metrics, short_client);
+        let layout = super::about_layout(&metrics, short_client);
+        assert_eq!(layout.diag_cards.bottom, short_content.bottom);
+        assert!(
+            layout.diag_cards.top >= layout.apply.bottom + metrics.gap,
+            "卡片区不得侵入按钮"
+        );
+        // 极端情况（高度极小）下卡片区允许为空但不 panic，且水平范围仍贴内容区。
+        let tiny_client = UiRect {
+            top: 0,
+            bottom: 120,
+            ..CLIENT
+        };
+        let tiny_content = content_rect(&metrics, tiny_client);
+        let tiny = super::about_layout(&metrics, tiny_client);
+        assert_eq!(tiny.diag_cards.left, tiny_content.left);
+        assert_eq!(tiny.diag_cards.right, tiny_content.right);
+    }
+
+    #[test]
+    fn 诊断标签列宽与行高常量可换算() {
+        let metrics = SettingsMetrics::new(96);
+        assert_eq!(
+            super::diag_label_width(&metrics),
+            super::scale(96, super::LOGICAL_DIAG_LABEL_W)
+        );
+        assert_eq!(
+            super::diag_row_height(&metrics),
+            super::scale(96, super::LOGICAL_DIAG_ROW)
         );
     }
 
     #[test]
-    fn 关于页诊断行超出内容区时截断不越界() {
-        let metrics = SettingsMetrics::new(96);
-        let content = content_rect(&metrics, CLIENT);
-        // 9 行（接近真实诊断最大量）在 620 高的矮窗口里放不下时被截断：
-        // 生成的行数全部落在内容区内、首尾相接，且不 panic。
-        let crowded = super::about_layout(&metrics, CLIENT, 9);
-        assert!(
-            crowded
-                .diag_rows
-                .last()
-                .is_none_or(|row| row.bottom <= content.bottom),
-            "最后一行不得越出内容区底部"
+    fn 文本换行按可用宽度贪心断行且短文本保持单行() {
+        // 假测宽：每字符 7px；可用 35px → 每行 5 字符。
+        let width_of = |s: &str| s.chars().count() as i32 * 7;
+        assert_eq!(
+            super::wrap_text("ABCDEFGHIJ", width_of, 35),
+            vec!["ABCDE".to_owned(), "FGHIJ".to_owned()]
         );
-        for pair in crowded.diag_rows.windows(2) {
-            assert_eq!(pair[1].top, pair[0].bottom, "行必须首尾相接");
-        }
-        // 极端数量同样截断在内容区内。
-        let extreme = super::about_layout(&metrics, CLIENT, 200);
-        assert!(!extreme.diag_rows.is_empty(), "常规量下至少一行诊断");
-        assert!(
-            extreme
-                .diag_rows
-                .last()
-                .is_none_or(|row| row.bottom <= content.bottom),
-            "极端数量下诊断行也必须在内容区内截断"
+        // 恰好等于可用宽度不换行（严格大于才断）。
+        assert_eq!(
+            super::wrap_text("ABCDE", width_of, 35),
+            vec!["ABCDE".to_owned()]
+        );
+        // 短文本保持单行；空串为一行。
+        assert_eq!(
+            super::wrap_text("配置", width_of, 35),
+            vec!["配置".to_owned()]
+        );
+        assert_eq!(super::wrap_text("", width_of, 35), vec![String::new()]);
+        // 单字符宽度超过可用宽度时不 panic，逐字符成行。
+        let wide = super::wrap_text("中文长字", |_| 99, 35);
+        assert_eq!(wide, vec!["中", "文", "长", "字"]);
+        // 已断行后继续累积不受前一宽影响。
+        let two = super::wrap_text("一二三四五六七八九", |s| s.chars().count() as i32 * 10, 30);
+        assert_eq!(
+            two,
+            vec![
+                "一二三".to_owned(),
+                "四五六".to_owned(),
+                "七八九".to_owned()
+            ]
         );
     }
 
