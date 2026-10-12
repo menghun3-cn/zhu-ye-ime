@@ -17,6 +17,7 @@ use zhu_ye_core::dict_format::split_translations;
 use zhu_ye_core::pinyin::SyllableTable;
 
 use crate::import::{is_cjk_word, parse_cedict_line, split_pinyin_syllables};
+use crate::phrases::PHRASES_FREQ_OUT;
 
 /// 仓库相对目录常量（与 `scripts/fetch-sources.ps1` 保持一致）。
 pub const PINS_DIR: &str = "data/pins";
@@ -1042,6 +1043,16 @@ pub struct BaseStats {
     pub daily_copula: usize,
     /// 日常短语候选跳过条数（已在词库保留原词频/注音失败/超长/非 CJK）。
     pub daily_skipped: usize,
+    /// 统计驱动日常短语入包条数（T-147：语料 2/3-gram 融合表，含覆盖与新增）。
+    pub statistical_phrases: usize,
+    /// 统计驱动覆盖已有词条数（T-147：统计优先于 wordfreq/jieba 频率）。
+    pub statistical_overwritten: usize,
+    /// 统计短语注音失败/非法跳过条数（T-147）。
+    pub statistical_skipped: usize,
+    /// 口语治理覆盖已有词条数（T-147：phrase-overrides.tsv 强制拼音/频率）。
+    pub override_overwritten: usize,
+    /// 口语治理新增条数（T-147：统计表未覆盖的短语以治理频率入包）。
+    pub override_added: usize,
     /// 规范字集（kTGHZ 8,102 字，约等于通用规范汉字表 8,105）中出现在 base 的字占比。
     pub char_set_coverage_pct: f64,
     /// 最终词条总数。
@@ -1162,6 +1173,24 @@ const WORD_FREQ_PATCHES: &[(&str, u32)] = &[("输入框", 2500), ("生成", 4600
 /// 等 nishi 候选，低于单字「你」(6690)/「是」(7160) 等绝对高频，使口语
 /// 短语处于"组内首候选"又不至于压过重要实词。
 const DAILY_PHRASE_FREQ: u32 = 4200;
+
+/// 口语治理覆盖表路径（T-147，`data/patches/phrase-overrides.tsv`，
+/// `词\t拼音\t频率`）。统计管道（phrases.rs）只产出"语料出现频率"，对
+/// 三类统计层无法自愈的口语词，本表在 merge 阶段强制写音/写频：
+/// a) 多音字短语定音——字级注音取《新华字典》音序首音（如「行吧」被
+///    注成"银行"的 hangba），词级覆盖为口语音 xingba；
+/// b) 同音高频竞争词提频——统计显示对手更高频（你又>你有、己的>记得、
+///    在马>在吗、那儿>哪儿、我在那>我在哪、应该把>应该吧），覆盖为
+///    用户期望短语的组内最高频；
+/// c) 统计低频漏收整词入包——字幕 count 低于置信门槛（ppm<1）而未进
+///    统计表的整词短语（如「我喜欢你吗」5 字），直接以治理频率入包。
+/// 与 T-145 种子表（纯词、统一档位）解耦：本表带拼音与频率，只在
+/// merge 阶段生效，不改变统计表产物。
+const PHRASE_OVERRIDES: &str = "data/patches/phrase-overrides.tsv";
+
+/// 口语治理词频下限/上限（T-147）：与统计分区间一致（[3800, 6300]），
+/// 治理提频不越出统计尺度的合理范围（不高于日志分 6300 的语义上限）。
+const PHRASE_OVERRIDE_FREQ_RANGE: std::ops::RangeInclusive<u32> = 3800..=6300;
 /// 系词短语规则枚举统一频率档（T-145）：略低于种子表（种子表人工甄选更稳）。
 const COPULA_PHRASE_FREQ: u32 = 4000;
 
@@ -1270,6 +1299,205 @@ fn merge_daily_phrases(
     (seed_count, copula_count, skipped)
 }
 
+/// 读取 T-147 统计驱动短语频率表（`data/artifacts/phrases-freq.tsv`，
+/// 每行 `词\t频率分`；残段降档的词多一列降档前原始分，v2 起）。
+/// 文件不存在返回空表（统计层未生成时构建照常，由调用方提示）；存在但
+/// 格式损坏则报错。返回值：词 → (降档后分, 降档前分)，未降档时两分相同。
+fn load_statistical_phrases(path: &Path) -> Result<HashMap<String, (u32, u32)>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(format!("读取统计短语表失败（{}）: {error}", path.display())),
+    };
+    let mut out = HashMap::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let word = parts.next().unwrap_or("").trim();
+        let freq = parts.next().unwrap_or("").trim();
+        let raw_freq = parts.next().unwrap_or("").trim();
+        // 读表用宽松字桶（与 phrases.rs 计数端一致，Q3a）：统计表允许含
+        // 扩展 A/B 生僻字（如「䲁科」）；严格过滤在 merge_statistical_phrases
+        // 入包时进行（is_cjk_word + 注音），双层防御。
+        if !(2..=5).contains(&word.chars().count())
+            || !word.chars().all(crate::phrases::is_cjk_char)
+        {
+            return Err(format!(
+                "phrases-freq.tsv 第 {} 行词非法（须为 2-5 字纯 CJK）: {word}",
+                index + 1
+            ));
+        }
+        let frequency: u32 = freq.parse().map_err(|error| {
+            format!(
+                "phrases-freq.tsv 第 {} 行频率非法（{freq}）: {error}",
+                index + 1
+            )
+        })?;
+        // 第 3 列（降档前分）可选：旧格式两列时以频率分为准。
+        let raw_score = if raw_freq.is_empty() {
+            frequency
+        } else {
+            let value: u32 = raw_freq.parse().map_err(|error| {
+                format!(
+                    "phrases-freq.tsv 第 {} 行降档前频率非法（{raw_freq}）: {error}",
+                    index + 1
+                )
+            })?;
+            if value < frequency {
+                return Err(format!(
+                    "phrases-freq.tsv 第 {} 行降档前分低于降档后分: {word}",
+                    index + 1
+                ));
+            }
+            value
+        };
+        if out.contains_key(word) {
+            return Err(format!(
+                "phrases-freq.tsv 第 {} 行重复词: {word}",
+                index + 1
+            ));
+        }
+        out.insert(word.to_owned(), (frequency, raw_score));
+    }
+    Ok(out)
+}
+
+/// 把统计短语并入 merged（T-147）：**统计优先**——已有词覆盖为统计频率，
+/// 新词按统计频率入包；注音失败/非 CJK/超长跳过。返回
+/// `(覆盖已有数, 新增数, 跳过数)`。
+///
+/// **残段降档豁免（T-147 v2）**：降档本意是压低长词内部残段（「己的」），
+/// 但高频词的自然搭配（「时间」的「的时间」结构）同样触发延伸占比判定，
+/// 把真实常用词误降 10%。官方先验词（骨架/wordfreq/jieba/CEDICT 已存在
+/// 于 merged 的词）以工具书/语料先验确认是真实常用组合——**覆盖时恢复
+/// 降档前分**；统计新词（merged 无此词）保持降档分，仍受残段抑制。
+fn merge_statistical_phrases(
+    merged: &mut HashMap<String, (String, u32, Option<String>)>,
+    annotate: impl Fn(&str) -> Option<String>,
+    table: &HashMap<String, (u32, u32)>,
+) -> (usize, usize, usize) {
+    let mut overwritten = 0usize;
+    let mut added = 0usize;
+    let mut skipped = 0usize;
+    for (word, (frequency, raw_score)) in table {
+        if !is_cjk_word(word) || word.chars().count() > 5 {
+            skipped += 1;
+            continue;
+        }
+        let Some(pinyin) = annotate(word) else {
+            skipped += 1;
+            continue;
+        };
+        match merged.get_mut(word) {
+            Some(entry) => {
+                // 官方先验词（骨架/wordfreq/jieba/CEDICT 已收）：统计**只升
+                // 不降**——降档词恢复原始分（v2 豁免），未降档的覆盖同样不得
+                // 把官方高频词压到统计分之下；统计分更高（口语真实频）才取
+                // 代。统计排序对官方词保持"证据增强"姿态，不重写先验次序。
+                if *raw_score > entry.1 {
+                    entry.1 = *raw_score;
+                }
+                overwritten += 1;
+            }
+            None => {
+                // 统计新词降档后分低于统计门槛（raw≥3800 但 ×0.9 后 <3800
+                // 的残段弱词）不入包——官方词的原始分已在上面的覆盖分支恢复。
+                if *frequency < crate::phrases::PHRASE_FREQ_MIN {
+                    skipped += 1;
+                    continue;
+                }
+                merged.insert(word.clone(), (pinyin, *frequency, None));
+                added += 1;
+            }
+        }
+    }
+    (overwritten, added, skipped)
+}
+
+/// 读取口语治理覆盖表（T-147，`data/patches/phrase-overrides.tsv`）：
+/// 每行 `词\t空格分隔无调拼音\t频率`；词须 2-5 字纯 CJK，音节数须等于字数
+/// 且每个音节在引擎标准全拼表内，频率须在 [`PHRASE_OVERRIDE_FREQ_RANGE`]。
+/// 文件缺失报错（治理表是受控数据，缺表应显式暴露而非静默放行）；非法行
+/// 报错并给出行号。
+fn load_phrase_overrides(path: &Path) -> Result<HashMap<String, (String, u32)>, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("读取口语治理覆盖表失败（{}）: {error}", path.display()))?;
+    let table = SyllableTable::standard();
+    let mut out = HashMap::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let word = parts.next().unwrap_or("").trim();
+        let syllables = parts.next().unwrap_or("").trim();
+        let freq = parts.next().unwrap_or("").trim();
+        let char_count = word.chars().count();
+        if !(2..=5).contains(&char_count) || !word.chars().all(crate::phrases::is_cjk_char) {
+            return Err(format!(
+                "phrase-overrides.tsv 第 {} 行词非法（须为 2-5 字纯 CJK）: {word}",
+                index + 1
+            ));
+        }
+        let syllables: Vec<&str> = syllables.split_whitespace().collect();
+        if syllables.len() != char_count || syllables.iter().any(|s| !table.is_complete_syllable(s))
+        {
+            return Err(format!(
+                "phrase-overrides.tsv 第 {} 行拼音非法（须 {} 个引擎全拼音节，空格分隔无调）: {}",
+                index + 1,
+                char_count,
+                syllables.join(" ")
+            ));
+        }
+        let frequency: u32 = freq.parse().map_err(|error| {
+            format!(
+                "phrase-overrides.tsv 第 {} 行频率非法（{freq}）: {error}",
+                index + 1
+            )
+        })?;
+        if !PHRASE_OVERRIDE_FREQ_RANGE.contains(&frequency) {
+            return Err(format!(
+                "phrase-overrides.tsv 第 {} 行频率越界（须在 [3800, 6300]，实际 {frequency}）: {word}",
+                index + 1
+            ));
+        }
+        if out.contains_key(word) {
+            return Err(format!(
+                "phrase-overrides.tsv 第 {} 行重复词: {word}",
+                index + 1
+            ));
+        }
+        out.insert(word.to_owned(), (syllables.concat(), frequency));
+    }
+    Ok(out)
+}
+
+/// 把口语治理覆盖并入 merged（T-147）：**强制覆盖**——已有词改写拼音与频率
+/// （可能改变拼音组，如「行吧」从 hangba 移到 xingba），新词按治理频率入包。
+/// 返回 `(覆盖已有数, 新增数)`；拼音/频率合法性由 [`load_phrase_overrides`]
+/// 前置校验（非法行整体报错，不会出现静默跳过）。
+fn merge_phrase_overrides(
+    merged: &mut HashMap<String, (String, u32, Option<String>)>,
+    overrides: &HashMap<String, (String, u32)>,
+) -> (usize, usize) {
+    let mut overwritten = 0usize;
+    let mut added = 0usize;
+    for (word, (pinyin, frequency)) in overrides {
+        if merged.contains_key(word) {
+            overwritten += 1;
+        } else {
+            added += 1;
+        }
+        // 强制写音写频；译文留待 e 段（译文补齐）统一处理。
+        merged.insert(word.clone(), (pinyin.clone(), *frequency, None));
+    }
+    (overwritten, added)
+}
+
 /// 构建基础包：骨架（xdhyc 全部）→ CEDICT 词级兜底 → jieba 扩充（纯 CJK、
 /// 频率标定 ≥ min_score）→ 日常高频短语扩充（T-145：种子表 + 系词枚举）。
 /// 词频：wordfreq 主源（zipf×1000）优先，未命中取 jieba 标定值，再未命中按 1。
@@ -1370,16 +1598,36 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         jieba_expansion += 1;
     }
 
-    // d) 日常高频短语扩充（T-145）：系词短语规则枚举 + 日常口语句式种子表。
+    // d) 统计驱动日常短语（T-147）：语料 2/3-gram 融合频率表 → **统计优先**
+    // 覆盖。背景：T-145 的种子表+枚举补齐了"首次可发现性"，但排序仍是固定
+    // 档位；本段引入真实语料统计（字幕/维基，见 phrases.rs 与 docs/licenses.md），
+    // 出现在统计表中的短语一律以统计频率为准——已有词覆盖原频、新词入包，
+    // 使 nishi 首候选由「你的语料出现次数」决定而非人工档位。
+    let statistical_map = load_statistical_phrases(&root.join(PHRASES_FREQ_OUT))?;
+    let (statistical_overwritten, statistical_added, statistical_skipped) =
+        if statistical_map.is_empty() {
+            (0, 0, 0)
+        } else {
+            merge_statistical_phrases(&mut merged, |word| tables.annotate(word), &statistical_map)
+        };
+
+    // d1b) 口语治理覆盖（T-147）：多音定音（行吧→xingba）/同音提频（你有>
+    // 你又）/统计漏收整词入包（我喜欢你吗）。强制写音写频，见 constants
+    // PHRASE_OVERRIDES 注释；不改变统计表产物（phrases.rs 不动）。
+    let phrase_overrides = load_phrase_overrides(&root.join(PHRASE_OVERRIDES))?;
+    let (override_overwritten, override_added) =
+        merge_phrase_overrides(&mut merged, &phrase_overrides);
+
+    // d2) 日常高频短语扩充（T-145）：系词短语规则枚举 + 日常口语句式种子表。
     //
     // 背景：CEDICT/jieba/wordfreq 均以单字/整词收录，"你是/我是/其实是"这类
     // 语法短语被语料拆散（wordfreq 空格分词、globalvoices 按词 token 化），
     // 无组合数据可统计——`freq 你是` 实测不在 wordfreq、globalvoices 相邻单字
     // 全语料仅 97 对。搜狗等输入法的"日常高频短语"来自用户打字语料聚合；
     // 自学习词库（user_words.json）是"先有鸡"机制：候选里没有的词永远打不出、
-    // 学不到。本段以人工种子表（data/patches/daily-phrases.tsv）+ 白名单枚举
-    // 等价补齐"首次可发现性"，使 nishi 首候选即「你是」；统一频率档高于
-    // 「逆势」(2850) 等现有首候选，低于绝对高频单字。已有词跳过保留原词频。
+    // 学不到。T-145 以人工种子表（data/patches/daily-phrases.tsv）+ 白名单
+    // 枚举等价补齐"首次可发现性"；T-147 统计层（d 段）优先覆盖后，本段只对
+    // 统计表未覆盖的组合回退/兜底（已有词保留原词频，含统计覆盖后的频率）。
     let daily_phrases = load_daily_phrases(&root.join("data/patches/daily-phrases.tsv"))?;
     let daily_seed_candidates: Vec<(String, u32)> = daily_phrases
         .iter()
@@ -1512,6 +1760,11 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         daily_seed,
         daily_copula,
         daily_skipped,
+        statistical_phrases: statistical_overwritten + statistical_added,
+        statistical_overwritten,
+        statistical_skipped,
+        override_overwritten,
+        override_added,
         char_set_coverage_pct,
         entry_count: entries.len(),
         file_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
@@ -1523,7 +1776,7 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         stats.file_size as f64 / 1_048_576.0
     );
     println!(
-        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，译文补齐 {}，词性标注 {}（T-115 后续），多音补丁 {}/跳过 {}（T-129），日常短语 种子 {} + 枚举 {}（跳过 {}，T-145），规范字集覆盖 {:.1}%",
+        "骨架 {} 词（含镜像拼音），wordfreq 命中 {}（{:.1}%），jieba 扩充 {}，CEDICT 兜底 {}，译文补齐 {}，词性标注 {}（T-115 后续），多音补丁 {}/跳过 {}（T-129），统计短语 {}（覆盖 {} / 新增 {} / 跳过 {}，T-147），口语治理 {}（覆盖 {} / 新增 {}，T-147），日常短语 种子 {} + 枚举 {}（跳过 {}，T-145），规范字集覆盖 {:.1}%",
         stats.skeleton_words,
         stats.wordfreq_hits,
         stats.wordfreq_hit_pct,
@@ -1533,6 +1786,13 @@ pub fn build_base(root: &Path, min_score: u32) -> Result<BaseStats, String> {
         stats.pos_labeled,
         stats.polyphone_applied,
         stats.polyphone_skipped,
+        stats.statistical_phrases,
+        stats.statistical_overwritten,
+        stats.statistical_phrases - stats.statistical_overwritten,
+        stats.statistical_skipped,
+        stats.override_overwritten + stats.override_added,
+        stats.override_overwritten,
+        stats.override_added,
         stats.daily_seed,
         stats.daily_copula,
         stats.daily_skipped,
@@ -1602,6 +1862,17 @@ pub struct CoverageReport {
     pub misses: Vec<String>,
     /// 出候选但首候选不是目标词的词（最多记录 [`MAX_MISSES`] 条）。
     pub first_misses: Vec<(String, String)>,
+    /// 首候选不是组内期望胜者的词（最多记录 [`MAX_MISSES`] 条）——诊断
+    /// 统计排序层对常用词组首的影响（T-147 引入后用于区分"统计胜者合理
+    /// 抢首"与"统计拉偏误伤"）。
+    pub group_misses: Vec<(String, String)>,
+    /// 组首 miss 中期望胜者为单字/多字的计数（骨架权威字序 vs wordfreq/
+    /// 统计频率的差异集中在单字组；该分布决定排序质量口径的边界）。
+    pub group_single_miss: usize,
+    pub group_multi_miss: usize,
+    /// 期望胜者为单字/多字的样本总数（口径占比）。
+    pub group_single_total: usize,
+    pub group_multi_total: usize,
     /// 不同拼音的组数（同音词组只可能有一个居首）。
     pub distinct_pinyins: usize,
     /// 首候选为"该拼音组内官方排名最优词"的数量。
@@ -1679,8 +1950,28 @@ pub fn audit_coverage(
         }
         // 组内期望胜者口径：排除同音冲突干扰。
         if let Some((_, winner)) = best_by_pinyin.get(pinyin.as_str()) {
+            if winner.chars().count() == 1 {
+                report.group_single_total += 1;
+            } else {
+                report.group_multi_total += 1;
+            }
             if candidates.first().map(|c| c.text.as_str()) == Some(*winner) {
                 report.group_winner_hit += 1;
+            } else {
+                if winner.chars().count() == 1 {
+                    report.group_single_miss += 1;
+                } else {
+                    report.group_multi_miss += 1;
+                }
+                if report.group_misses.len() < MAX_MISSES {
+                    report.group_misses.push((
+                        winner.to_string(),
+                        candidates
+                            .first()
+                            .map(|c| c.text.clone())
+                            .unwrap_or_default(),
+                    ));
+                }
             }
         }
     }
@@ -2181,5 +2472,177 @@ mod tests {
         assert_eq!((seed_count, copula_count, skipped), (0, 0, 2));
         // 「你是」已有（5000）不被 4200 覆盖。
         assert_eq!(merged["你是"], ("nishi".to_owned(), 5000, None));
+    }
+
+    #[test]
+    fn t147_统计表解析_带注释与非法行报错() {
+        let dir = std::env::temp_dir().join("zhu-ye-t147-parse");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("phrases-freq.tsv");
+        // 两列/三列混合：第 3 列为残段降档前原始分（v2）；无则降档后分即原分。
+        std::fs::write(&path, "# 注释\n你是\t5100\n记得\t4701\t5223\n䲁科\t4800\n").unwrap();
+        let map = load_statistical_phrases(&path).unwrap();
+        // 未降档：两分相同。
+        assert_eq!(map.get("你是"), Some(&(5100, 5100)));
+        // 降档词：携带降档前原始分（m6 官方词豁免用）。
+        assert_eq!(map.get("记得"), Some(&(4701, 5223)));
+        // 宽松字桶（Q3a）：扩展 A 字组成的词允许读入，入包时由严格过滤拦截。
+        assert_eq!(map.get("䲁科"), Some(&(4800, 4800)));
+        // 文件不存在 → 空表（统计层未生成时构建照常）。
+        assert!(load_statistical_phrases(&dir.join("不存在.tsv"))
+            .unwrap()
+            .is_empty());
+        // 非法行报错（带行号）。
+        let bad = dir.join("bad.tsv");
+        std::fs::write(&bad, "你是\t5100\nnot-cjk\t4900\n").unwrap();
+        let err = load_statistical_phrases(&bad).unwrap_err();
+        assert!(err.contains("第 2 行词非法"), "实际: {err}");
+        // 降档前分低于降档后分报错。
+        let bad2 = dir.join("bad2.tsv");
+        std::fs::write(&bad2, "你是\t5100\t4900\n").unwrap();
+        let err2 = load_statistical_phrases(&bad2).unwrap_err();
+        assert!(err2.contains("第 1 行降档前分低于降档后分"), "实际: {err2}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn t147_统计入包_已有词被覆盖新词按统计频() {
+        let mut merged = HashMap::from([
+            ("你是".to_owned(), ("nishi".to_owned(), 4200, None)),
+            ("逆势".to_owned(), ("nishi".to_owned(), 2850, None)),
+        ]);
+        let table = HashMap::from([
+            ("你是".to_owned(), (5100, 5100)),
+            ("我有".to_owned(), (4900, 4900)),
+            ("无法注音".to_owned(), (4800, 4800)),
+        ]);
+        let (overwritten, added, skipped) = merge_statistical_phrases(
+            &mut merged,
+            |word| {
+                if word == "无法注音" {
+                    None
+                } else {
+                    Some("xx".to_owned())
+                }
+            },
+            &table,
+        );
+        // 统计优先：已有「你是」被统计频率覆盖（拼音保留原样）；「我有」新增；注音失败跳过。
+        assert_eq!((overwritten, added, skipped), (1, 1, 1));
+        assert_eq!(merged["你是"], ("nishi".to_owned(), 5100, None));
+        assert_eq!(merged["我有"], ("xx".to_owned(), 4900, None));
+        assert_eq!(merged["逆势"], ("nishi".to_owned(), 2850, None));
+    }
+
+    #[test]
+    fn t147_统计入包_官方先验词豁免残段降档() {
+        // 官方先验词（merged 已有，如「时间」来自 wordfreq/jieba）虽被统计层
+        // 判定残段降档（的时间/时间了 自然搭配），恢复降档前分；
+        // 统计新词（如「己的」）保持降档分。涵蓋 max 语义：官方先验分更高
+        // 时统计不得压低（「事件」5600 > 统计 5114 → 保留 5600）。
+        let mut merged = HashMap::from([
+            ("时间".to_owned(), ("shijian".to_owned(), 5100, None)),
+            ("事件".to_owned(), ("shijian".to_owned(), 5600, None)),
+        ]);
+        let table = HashMap::from([
+            // 时间 被降档（原始 5445 → 4901），且统计 raw 高于官方先验 → 抬升 5445；
+            // 事件 未降档，统计分低于官方先验 → 官方 5600 保留。
+            ("时间".to_owned(), (4901, 5445)),
+            ("事件".to_owned(), (5114, 5114)),
+            ("己的".to_owned(), (4730, 5255)),
+        ]);
+        let (overwritten, added, skipped) =
+            merge_statistical_phrases(&mut merged, |_| Some("xx".to_owned()), &table);
+        assert_eq!((overwritten, added, skipped), (2, 1, 0));
+        // 官方词恢复降档前分（统计 raw 高于先验 → 抬升 5445）。
+        assert_eq!(merged["时间"], ("shijian".to_owned(), 5445, None));
+        // 事件：统计 5114 < 官方先验 5600 → 只升不降，官方先验分保留。
+        assert_eq!(merged["事件"], ("shijian".to_owned(), 5600, None));
+        // 非官方的统计新词保留降档分，仍受残段抑制。
+        assert_eq!(merged["己的"], ("xx".to_owned(), 4730, None));
+    }
+
+    #[test]
+    fn t147_统计入包_六字超长与非纯中文跳过() {
+        let mut merged = HashMap::new();
+        let table = HashMap::from([
+            ("你是不是知道".to_owned(), (5200, 5200)),
+            ("abc你".to_owned(), (4800, 4800)),
+        ]);
+        let (overwritten, added, skipped) =
+            merge_statistical_phrases(&mut merged, |_| Some("xx".to_owned()), &table);
+        assert_eq!((overwritten, added, skipped), (0, 0, 2));
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn t147_治理表加载_合法行与注释空行() {
+        let dir = std::env::temp_dir().join(format!("zy-m6-ovr-ok-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("创建临时目录");
+        let path = dir.join("phrase-overrides.tsv");
+        fs::write(
+            &path,
+            "# 注释行\n行吧\txing ba\t4600\n我有\two you\t5200\n\n",
+        )
+        .expect("写临时表");
+        let map = load_phrase_overrides(&path).expect("加载失败");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("行吧"), Some(&("xingba".to_owned(), 4600)));
+        assert_eq!(map.get("我有"), Some(&("woyou".to_owned(), 5200)));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn t147_治理表加载_非法行报错() {
+        let dir = std::env::temp_dir().join(format!("zy-m6-ovr-bad-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("创建临时目录");
+        let cases: &[(&str, &str)] = &[
+            // 非法音节
+            ("行吧\txing xyz\t4600", "非法音节"),
+            // 音节数 ≠ 字数
+            ("行吧\txing\t4600", "音节数不符"),
+            // 频率越界
+            ("行吧\txing ba\t9999", "频率越界"),
+            // 非 CJK
+            ("a-b\txing ba\t4600", "非 CJK"),
+        ];
+        for (content, label) in cases {
+            let path = dir.join(label);
+            let file = format!("{content}\n");
+            fs::write(&path, file).expect("写临时表");
+            assert!(
+                load_phrase_overrides(&path).is_err(),
+                "应报错：{label}（{content}）"
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn t147_治理合并_强制拼音频率_覆盖与新增() {
+        let mut merged: HashMap<String, (String, u32, Option<String>)> = HashMap::new();
+        // 已有词：原频（如「你有」4819）+ 原音 niyou；新增词：统计漏收（「我喜欢你吗」）。
+        merged.insert("你有".to_owned(), ("niyou".to_owned(), 4819, None));
+        let overrides: HashMap<String, (String, u32)> = [
+            ("行吧".to_owned(), ("xingba".to_owned(), 4600)),
+            ("你有".to_owned(), ("niyou".to_owned(), 5300)),
+            ("我喜欢你吗".to_owned(), ("woxihuannima".to_owned(), 4300)),
+        ]
+        .into_iter()
+        .collect();
+        let (overwritten, added) = merge_phrase_overrides(&mut merged, &overrides);
+        assert_eq!((overwritten, added), (1, 2));
+        // 已有词强制改频；新词入包；拼音按覆盖写。
+        assert_eq!(merged.get("你有").map(|(_, f, _)| *f), Some(5300));
+        assert_eq!(
+            merged.get("行吧").map(|(p, f, _)| (p.as_str(), *f)),
+            Some(("xingba", 4600))
+        );
+        assert_eq!(
+            merged.get("我喜欢你吗").map(|(p, f, _)| (p.as_str(), *f)),
+            Some(("woxihuannima", 4300))
+        );
+        // 覆盖词拼音组变更：行吧 从 hangba 移到 xingba（键=拼音组）。
+        assert!(!merged.contains_key("hangba"));
     }
 }
