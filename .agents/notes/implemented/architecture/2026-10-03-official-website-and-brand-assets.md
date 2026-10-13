@@ -28,8 +28,9 @@ theme) rather than a pixel copy; Chinese only; logo with a bamboo-leaf motif and
 a **personified bamboo leaf** as mascot (D-64); all brand assets as
 hand-written SVG; zero-build static site; GitHub Pages configuration ready,
 actual deployment deferred. Same-day refinement (D-69): the download page is
-installer-centric with all downloads as GitHub Releases asset direct links (an
-exe installer is planned, explicitly tagged 规划中), and the site ships
+installer-centric with all downloads as GitHub Releases asset direct links — the
+exe installer was a planned item back then, shipped since v0.1.2 (T-097)
+and the page was simplified on 2026-10-14 (T-157); the site also ships
 AI-discovery entry files (llms.txt / agents.txt / robots.txt / sitemap.xml),
 FR-058.
 
@@ -52,10 +53,15 @@ FR-058.
   compatible, ASCII-only comments).
 - Header/footer are copy-maintained across the five pages (design S-14);
   consistency is checked by the acceptance pass, not by a template engine.
-- The download page is **installer-centric** (D-69): a 发行包 table separates
-  the portable zip (current beta artifact) from the planned exe installer
-  (tagged 规划中); every download goes through GitHub Releases asset links —
-  the site never hosts installers and shows no button for a nonexistent asset.
+- Downloads are **GitHub Releases asset direct links only** (D-69) — the site
+  never hosts installers and shows no button for a nonexistent asset. Current
+  form (simplified 2026-10-14, T-157): the home-page primary CTA reads 下载 and
+  points straight at the latest exe installer asset (no hop through the download
+  page); the download page is a version line plus two download cards (exe
+  installer recommended / portable zip) plus compact install, uninstall and
+  checksum/源码 sections. Asset names embed the version
+  (`ai-zhu-ye-ime-setup-<v>.exe`, `zhu-ye-ime-<v>.zip`), so every direct link
+  must be updated on release (S-17 duty, checklist in 发布流程.md).
 - **AI-discovery entry files** at the site root (FR-058, design §5.7/S-18):
   `llms.txt` follows llmstxt.org v2 (H1 + blockquote summary + sectioned file
   lists); `agents.txt` uses a site-owned structure (H1 + summary + 项目事实 /
@@ -98,12 +104,12 @@ initial/fuzzy/sentence input, context suggestions, digit/v-mode/emoji, English
 spelling/email/URL completion, domain boost, contacts, dictionary-pack system
 with signed online updates, settings window, performance benchmarks, offline by
 default) and forbidden claims (macOS, AI cloud services, memorization systems,
-multi-language parallel translations). Planned items (M13 five, the release
-process, the English site, the exe installer) appear only in the home-page
-roadmap block or an explicitly 规划中-tagged cell. The
-shared version-status line ("Windows 内测版 · M1–M12 核心能力已实现（自动化验证
-通过）· 格式候选与设置窗口的真实环境交互验收收尾中") matches the T-061/T-080
-acceptance-owed state. The llms.txt/agents.txt files are site content too and
+multi-language parallel translations). Planned items (roadmap block) are
+currently the English site only; shipped facts (online update source, exe
+installer, Pages) may appear normally. The
+shared version-status line ("Windows 10/11 x64 · v0.1.3 正式版 · 更新源已开通 · exe
+安装包已发布 · Pages 已上线") tracks the released version (S-17). The llms.txt/agents.txt
+files are site content too and
 obey the same vocabulary rules (S-18). Per user directive the site never names
 third parties or competitors (青简, 搜狗, …) on any page; attribution records
 live only in repo docs (设计 §12 借鉴模式清单, docs/竞品和参考.txt). The about
