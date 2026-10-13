@@ -348,6 +348,26 @@ table.docs th { background: var(--tag-bg); font-weight: 600; }
 .doc-toc ul { margin: 0; padding-left: 1.2em; }
 .doc-toc li { margin: 4px 0; }
 
+/* ---------- 下载页 ---------- */
+.download-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin: 28px 0 8px;
+}
+.dl {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+}
+.dl h3 { margin: 0; }
+.dl p { margin: 0; }
+.dl .btn { align-self: flex-start; margin-top: auto; }
+
 /* ---------- 移动端 ---------- */
 @media (max-width: 720px) {
   .site-header .wrap { gap: 10px; }
