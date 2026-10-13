@@ -3,6 +3,8 @@
 本项目版本号遵循语义化版本，变更记录遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 中文格式。
 当前唯一版本主源为根 `Cargo.toml` 的 `workspace.package.version`。
 
+## [Unreleased]
+
 ## [0.1.3] - 2026-10-13
 
 ### 新增
