@@ -126,13 +126,18 @@ if ($sigExit -ne 0) {
 }
 
 Write-Host '== 5/6 app.json（T-154）：check 输出包含应用版本信息 =='
-# app.json 由 assemble-release.ps1 5.5 节写在 release-assets\<version>\ 根（relDir），
-# 与 manifest.json（packs\ 下）不同目录；两者上传到 feed release 根时同级（客户端按
-# manifest URL 前缀推导 {base}/app.json）。
-$appMetaPath = Join-Path (Split-Path -Parent $packsDir) 'app.json'
-if (-not (Test-Path -LiteralPath $appMetaPath -PathType Leaf)) {
-    $failures += "发布资产缺失 app.json：$appMetaPath"
+# 布局说明：assemble-release.ps1 5.5 节把 app.json 写在 release-assets\<version>\ 根
+# （relDir，与 manifest.json 的 packs\ 分置）；publish-updates 上传 feed release 根时
+# 两者同级平铺——客户端按 manifest URL 前缀推导 {base}/app.json。e2e 用 file:// 模拟
+# feed 结构：manifest URL base = packsDir（包所在地），因此把根 app.json 铺到 manifest
+# 同目录后再跑 check；测试后清理副本，发布目录保持 assemble 原布局。
+$appMetaPath = $null
+$appMetaSrc = Join-Path (Split-Path -Parent $packsDir) 'app.json'
+if (-not (Test-Path -LiteralPath $appMetaSrc -PathType Leaf)) {
+    $failures += "发布资产缺失 app.json：$appMetaSrc"
 } else {
+    $appMetaPath = Join-Path $packsDir 'app.json'
+    Copy-Item -LiteralPath $appMetaSrc -Destination $appMetaPath -Force
     $appOut = & $updater check 2>&1
     $appExit = $LASTEXITCODE
     $appText = $appOut -join "`n"
@@ -144,17 +149,22 @@ if (-not (Test-Path -LiteralPath $appMetaPath -PathType Leaf)) {
 }
 
 Write-Host '== 6/6 篡改 app.json：验签失败按降级提示、不阻断检查 =='
-$origApp = Get-Content -LiteralPath $appMetaPath -Raw
-$tamperedApp = $origApp -replace '"app_version": "[^"]+"', '"app_version": "99.0.0"'
-Set-Content -LiteralPath $appMetaPath -Value $tamperedApp -Encoding utf8
-$appTamperOut = & $updater check 2>&1
-$appTamperExit = $LASTEXITCODE
-Set-Content -LiteralPath $appMetaPath -Value $origApp -Encoding utf8
-$appTamperText = $appTamperOut -join "`n"
-if ($appTamperExit -eq 0 -and $appTamperText -match '应用版本信息检查失败') {
-    Assert-Step '篡改 app.json 被降级提示且检查仍完成'
+if ($null -eq $appMetaPath) {
+    $failures += '跳过 6/6：5/6 未取得 app.json（见上）'
 } else {
-    $failures += "篡改 app.json 未按降级处理（exit=$appTamperExit）：`n$appTamperText"
+    $origApp = Get-Content -LiteralPath $appMetaPath -Raw
+    $tamperedApp = $origApp -replace '"app_version": "[^"]+"', '"app_version": "99.0.0"'
+    Set-Content -LiteralPath $appMetaPath -Value $tamperedApp -Encoding utf8
+    $appTamperOut = & $updater check 2>&1
+    $appTamperExit = $LASTEXITCODE
+    Set-Content -LiteralPath $appMetaPath -Value $origApp -Encoding utf8
+    $appTamperText = $appTamperOut -join "`n"
+    if ($appTamperExit -eq 0 -and $appTamperText -match '应用版本信息检查失败') {
+        Assert-Step '篡改 app.json 被降级提示且检查仍完成'
+    } else {
+        $failures += "篡改 app.json 未按降级处理（exit=$appTamperExit）：`n$appTamperText"
+    }
+    Remove-Item -LiteralPath $appMetaPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host ''
