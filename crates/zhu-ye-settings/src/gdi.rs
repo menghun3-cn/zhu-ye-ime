@@ -10,10 +10,11 @@ use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW, CreatePen, CreateSolidBrush,
     DeleteDC, DeleteObject, DrawTextW, FillRect, GetDIBits, GetStockObject, GetTextExtentPoint32W,
-    RoundRect, SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    CLEARTYPE_QUALITY, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DRAW_TEXT_FORMAT,
-    FF_DONTCARE, FW_BOLD, FW_MEDIUM, FW_NORMAL, FW_SEMIBOLD, HBITMAP, HDC, HFONT, HGDIOBJ,
-    LOGFONTW, NULL_BRUSH, PS_NULL, PS_SOLID, TRANSPARENT,
+    GetTextMetricsW, RoundRect, SelectObject, SetBkMode, SetTextColor, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS,
+    DRAW_TEXT_FORMAT, DT_NOCLIP, DT_SINGLELINE, FF_DONTCARE, FW_BOLD, FW_MEDIUM, FW_NORMAL,
+    FW_SEMIBOLD, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW, NULL_BRUSH, PS_NULL, PS_SOLID,
+    TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
@@ -115,7 +116,64 @@ pub(crate) unsafe fn draw_text(
         }
         let _ = SetBkMode(hdc, TRANSPARENT);
         let _ = SetTextColor(hdc, COLORREF(color.to_colorref()));
-        let _ = DrawTextW(hdc, &mut wide, &mut native, format);
+        let _ = DrawTextW(hdc, &mut wide, &mut native, singleline_noclip(format));
+    }
+}
+
+/// 单行文本强制附加 `DT_NOCLIP`（T-152）。
+///
+/// 布局矩形按字体的 em 高（`lfHeight`）布置，但 GDI 实际排版行高
+/// （`tmHeight + tmExternalLeading`，含中文 fallback 字形的上下余量）可能超出；
+/// 不放开裁剪时 `DrawTextW` 会把超出矩形底部的几个像素裁掉，
+/// 表现为"文字下半截被切平"（描述文字下方被遮挡）。
+/// 单行文本垂直方向的少量溢出落在相邻留白里，不会压到别的元素，
+/// 因此对单行一律放开裁剪；多行（`DT_WORDBREAK`）仍保留裁剪以免溢出面板。
+fn singleline_noclip(format: DRAW_TEXT_FORMAT) -> DRAW_TEXT_FORMAT {
+    if format & DT_SINGLELINE != DRAW_TEXT_FORMAT(0) {
+        format | DT_NOCLIP
+    } else {
+        format
+    }
+}
+
+/// 实测字体的排版行高（`tmHeight + tmExternalLeading`）；度量失败返回 `None`。
+/// 字体须已创建，DC 由调用方持有（T-152：行高口径）。
+fn measured_row_height(hdc: HDC, font: HFONT) -> Option<i32> {
+    unsafe {
+        let previous = SelectObject(hdc, font.into());
+        // SelectObject 失败时 previous 为 -1（HGDI_ERROR），原样换回即可。
+        let mut tm = TEXTMETRICW::default();
+        let mut height = None;
+        if GetTextMetricsW(hdc, &mut tm).as_bool() {
+            height = Some(tm.tmHeight + tm.tmExternalLeading);
+        }
+        if !previous.is_invalid() {
+            let _ = SelectObject(hdc, previous);
+        }
+        height
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Graphics::Gdi::{DT_LEFT, DT_WORDBREAK};
+
+    #[test]
+    fn singleline_gains_noclip() {
+        let format = DT_LEFT | DT_SINGLELINE;
+        let fixed = singleline_noclip(format);
+        assert_ne!(fixed & DT_NOCLIP, DRAW_TEXT_FORMAT(0));
+        // 保留原有单行位。
+        assert_ne!(fixed & DT_SINGLELINE, DRAW_TEXT_FORMAT(0));
+        assert_eq!(fixed & DT_WORDBREAK, DRAW_TEXT_FORMAT(0));
+    }
+
+    #[test]
+    fn multiword_keeps_clipping() {
+        let format = DT_LEFT | DT_WORDBREAK;
+        let fixed = singleline_noclip(format);
+        assert_eq!(fixed & DT_NOCLIP, DRAW_TEXT_FORMAT(0));
     }
 }
 
@@ -295,8 +353,22 @@ impl Fonts {
             self.nav_active = CreateFontIndirectW(&nav_active_font);
             self.small_medium = CreateFontIndirectW(&small_medium_font);
             self.small_semibold = CreateFontIndirectW(&small_semibold_font);
+            // T-152：行高改用 `GetTextMetricsW` 实测的 `tmHeight + tmExternalLeading`，
+            // 而非 `lfHeight`（em 高）。GDI 实际排版行高通常大于 em 框（中文 fallback
+            // 字形上下余量 + 外部行距），矩形按 em 高布置时 `DrawTextW` 会裁掉
+            // 文字下半截（"描述文字下方被遮挡"）；用真实行高后矩形足以容纳。
             self.body_height = body_font.lfHeight.abs();
             self.small_height = small_font.lfHeight.abs();
+            let probe = CreateCompatibleDC(None);
+            if !probe.is_invalid() {
+                if let Some(height) = measured_row_height(probe, self.body) {
+                    self.body_height = height;
+                }
+                if let Some(height) = measured_row_height(probe, self.small) {
+                    self.small_height = height;
+                }
+                let _ = DeleteDC(probe);
+            }
             self.dpi = dpi;
         }
     }
