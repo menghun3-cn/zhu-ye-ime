@@ -1,0 +1,8 @@
+# Bilingual-pair consistency record: the git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record with the project's
+# translation-pairing verifier:
+#   git hash-object 2026-10-12-panel-hotkey-search.md
+#   git hash-object 2026-10-12-panel-hotkey-search.zh.md
+2026-10-12-panel-hotkey-search.md: cd698e506c38b87845b24db45e96d55f199067ea
+2026-10-12-panel-hotkey-search.zh.md: d7ea960967e72ecc6a2c55ab1150b4c501bc1484
