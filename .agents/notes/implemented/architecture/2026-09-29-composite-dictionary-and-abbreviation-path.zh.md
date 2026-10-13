@@ -43,15 +43,17 @@ FR-016/FR-017（网络语词与字母串缩写）、FR-022（配置驱动的包�
 
 ### 配置
 
-`zhu_ye_core::pack_config` 解析 `%APPDATA%\ai-zhu-ye-ime\config.json`：
+`zhu_ye_core::pack_config` 解析 `%APPDATA%\zhu-ye-ime\config.json`：
 
 ```json
 { "version": 1, "enabled_packs": ["it","med","slang"],
-  "online_update": false, "last_check": null }
+  "online_update": true, "last_check": null }
 ```
 
-`online_update` 默认 `false`，这正是把"默认关闭"保证（P-03）变成配置层可测事实、
-而不只是更新器内部行为的地方。未知包 id 被过滤进 `unknown` 列表并记日志；损坏或
+`online_update` 自 T-154（2026-10-13）起默认 `true`（原"默认关闭"的 P-03 已反转：
+旧配置缺键按开启，显式 `false` 仍保持零网络门禁）。见
+[2026-10-13-online-update-default-on-app-meta](../../implemented/feature/2026-10-13-online-update-default-on-app-meta.zh.md)。
+未知包 id 被过滤进 `unknown` 列表并记日志；损坏或
 不可读的文件回退默认（仅基础包）并返回诊断。`plan_packs` 解析
 `<packs_dir>/<id>.zyct`，并把"配置了但文件缺失"与"未知 id"分开报告，使两种失败
 在日志中可区分。

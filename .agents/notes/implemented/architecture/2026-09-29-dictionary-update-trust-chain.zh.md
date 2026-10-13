@@ -58,13 +58,18 @@ manifest 携带 ed25519 签名。关键在于，验签使用**编译进客户端
 签名仍针对完整、未修改的 manifest 校验——早先一次"先裁剪 manifest 再调用 `apply_release`"
 的尝试破坏了验签，因为裁剪包列表会改变规范化字节。
 
-### 独立进程、默认关闭
+### 独立进程；**T-154 起默认开启**（2026-10-13）
 
 `zhu-ye-updater` 是独立二进制，也是唯一执行网络 I/O 的组件（S-4）。它在一次操作后退出，
 不留下常驻进程。
 
-默认关闭在配置层强制：`online_update: false` 时，`check` 与 `apply` 在构造任何请求之前
-就返回。验证方式是把 manifest URL 指向不可达地址——命令仍然成功退出且不发起网络尝试，
+本 note 最初的"默认关闭"保证已被 **T-154 反转**：`ConfigFile.online_update`
+改为默认 `true`（serde default；旧配置缺键按开启），装好的系统无需用户动作即会
+自动检查更新。**不变的部分**：显式 `online_update: false` 时，`check` 与 `apply`
+仍在构造任何请求之前返回、不 spawn 进程。反转记录与新签名 `app.json` 见
+[2026-10-13-online-update-default-on-app-meta](../../implemented/feature/2026-10-13-online-update-default-on-app-meta.zh.md)。
+
+验证方式是把 manifest URL 指向不可达地址——命令仍然成功退出且不发起网络尝试，
 若真在建连则不可能如此。
 
 下载通过系统自带 `curl.exe`（Windows 10+ 均存在）完成，而不链接 HTTP/TLS 栈。这使更新器

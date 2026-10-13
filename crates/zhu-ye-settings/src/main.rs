@@ -2,6 +2,11 @@
 //!
 //! 单实例：第二次唤起只激活已有窗口后退出（两次写 `config.json` 会互相覆盖）。
 //! `--shot` / `--shot-panel` 供验收取证：画出真实首帧后写出 BMP 并退出。
+//!
+//! 进程子系统：设置窗口是常驻 GUI，`windows_subsystem = "windows"` 保证
+//! 唤起/提权时不分配控制台（否则每次双击都会闪现 cmd 窗口，T-133）。
+
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -16,8 +21,12 @@ use zhu_ye_settings::window::{self, RunOptions};
 enum Mode {
     /// 打开设置窗口。
     Settings(Box<RunOptions>),
-    /// 画出工具箱面板的一帧并写出 BMP（验收取证）。
-    PanelShot { view: PanelView, path: PathBuf },
+    /// 画出工具箱面板的一帧并写出 BMP（验收取证；`query` 预置搜索查询）。
+    PanelShot {
+        view: PanelView,
+        query: String,
+        path: PathBuf,
+    },
     /// 二级修复：TSF 两棵 HKLM 注册树重注册（由主窗口经 runas 提权拉起）。
     RepairRegistry,
 }
@@ -42,8 +51,8 @@ fn main() -> ExitCode {
 
     // 取证模式不落任何状态，也不与正在运行的设置窗口互斥。
     let options = match mode {
-        Mode::PanelShot { view, path } => {
-            return match panel_window::run_shot(view, &path) {
+        Mode::PanelShot { view, query, path } => {
+            return match panel_window::run_shot(view, &query, &path) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(message) => {
                     eprintln!("zhu-ye-settings: {message}");
@@ -92,6 +101,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
     let mut shot_panel: Option<PanelKind> = None;
     let mut panel_path: Option<PathBuf> = None;
     let mut panel_page = 0usize;
+    let mut panel_query = String::new();
     let mut args = args.peekable();
 
     while let Some(arg) = args.next() {
@@ -120,12 +130,6 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
             }
             "--repair" => {
                 options.shot_repair = true;
-            }
-            "--update" => {
-                options.shot_update = true;
-            }
-            "--diag" => {
-                options.shot_diag = true;
             }
             "--user-words" => {
                 options.shot_user_words = true;
@@ -156,6 +160,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
                     .parse::<usize>()
                     .map_err(|_| "「--panel-page」需要非负整数".to_owned())?;
             }
+            "--panel-query" => {
+                panel_query = next_value(&mut args, "--panel-query")?;
+            }
             "--help" | "-h" => return Ok(None),
             other => return Err(format!("未知参数：{other}")),
         }
@@ -170,6 +177,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
                 kind,
                 page: panel_page,
             },
+            query: panel_query,
             path,
         }));
     }
@@ -177,15 +185,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Mode>, String
         options.shot_packs,
         options.shot_manage,
         options.shot_repair,
-        options.shot_update,
-        options.shot_diag,
         options.shot_user_words,
         options.shot_contacts,
         options.shot_themes,
     ];
     if shots.iter().filter(|on| **on).count() > 1 {
         return Err(
-            "--packs / --manage / --repair / --update / --diag / --user-words / --contacts / --themes 子视图入口互斥，一次最多一个"
+            "--packs / --manage / --repair / --user-words / --contacts / --themes 子视图入口互斥，一次最多一个"
                 .to_owned(),
         );
     }
@@ -220,9 +226,8 @@ fn print_usage() {
     println!("                   [--packs]               截图时进入「添加词库」子视图");
     println!("                   [--manage]              截图时进入「管理输入法」子视图");
     println!("                   [--repair]              截图时进入「修复输入法」子视图");
-    println!("                   [--update]              截图时进入「检查更新」子视图");
-    println!("                   [--diag]                截图时进入「版本与诊断信息」子视图");
     println!("  zhu-ye-settings --shot-panel emoji|symbol <文件.bmp>");
     println!("                   [--panel-page <页码>]  画出工具箱面板一帧并写出 BMP");
+    println!("                   [--panel-query <词>]   预置搜索查询（过滤网格帧，取证）");
     println!("  zhu-ye-settings --repair-registry   重注册 TSF 两棵注册树（提权环境执行）");
 }

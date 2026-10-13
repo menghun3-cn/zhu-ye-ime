@@ -13,7 +13,7 @@ function Write-Line([string]$text) { $script:log += $text }
 function Check([string]$name, [bool]$cond, [string]$detail) {
     if ($cond) { Write-Line "PASS $name $detail" } else { Write-Line "FAIL $name $detail" }
 }
-$appDir = Join-Path $env:ProgramFiles 'ai-zhu-ye-ime'
+$appDir = Join-Path $env:ProgramFiles 'zhu-ye-ime'
 $tipKey = 'HKLM:\SOFTWARE\Microsoft\CTF\TIP\{E54D6682-8650-40E7-A9EE-6FD1137849AE}'
 $profileKey = 'HKLM:\SOFTWARE\Microsoft\CTF\TIP\{E54D6682-8650-40E7-A9EE-6FD1137849AE}\LanguageProfile\0x00000804\{6315FE74-92C3-439B-8CDF-FDB6E43EDAF1}'
 

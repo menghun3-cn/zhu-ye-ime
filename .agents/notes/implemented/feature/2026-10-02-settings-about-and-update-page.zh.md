@@ -11,6 +11,12 @@
 更新默认关闭（P-03）：`online_update=false` 时界面必须禁用检查/应用按钮并说明原因，
 且窗口不得 spawn 任何进程——保证"关闭时零出站连接"可测（验收 13.1 FR-044）。
 
+> **T-154（2026-10-13）反转默认值**——`online_update` 现默认开启（缺键配置
+> 按开启）；下方的"关闭态门禁"不变，仍是"显式关闭时零连接"的验收路径。UI
+> 文案已去掉 (P-03)/(D-44) 编号；关于页现在还从签名 `app.json` 展示输入法
+> 应用版本与更新日志（结果区 3 → 6 行）。见
+> [2026-10-13-online-update-default-on-app-meta](../../implemented/feature/2026-10-13-online-update-default-on-app-meta.zh.md)。
+
 另有两条约束：应用更新会替换本机程序文件，需要二次确认；诊断信息（配置路径、数据目录、
 日志目录、已装包）必须不经 updater 就展示（T-077 本地直读）。
 
@@ -34,15 +40,18 @@ stderr，非零退出码返回 `Err(text)` 以便原样展示失败；`output_li
 
 ### 「启用在线更新」是运行时开关，列于关于页首条
 
-`ChipValue::OnlineUpdate(bool)` 复用二选一 chip 机制（"关闭"/"开启"，关闭在前，
-P-03）。点击即经 `config::save_online_update` 持久化（先重读再写，S-8），与主题/
+`ChipValue::OnlineUpdate(bool)` 复用二选一 chip 机制（"关闭"/"开启"，关闭在前）。
+点击即经 `config::save_online_update` 持久化（先重读再写，S-8），与主题/
 模式同口径。点条目行本身无动作。
 
-### 检查更新子视图
+### 检查更新与诊断信息是页面平铺小节，不是子视图（T-143）
 
-布局：说明区（开关状态 + 禁用原因/更新器路径）、结果区（更新器输出逐行展示，
-**错误如实展示**——例如"未内置发布公钥"失败或清单 URL 的 404，绝不当成"无更新"）、
-底部按钮 [检查更新][应用更新][返回]。
+自 T-143 起"关于与更新"页是单层平铺布局，没有子视图、也没有"← 返回关于与更新"
+按钮：首行为"启用在线更新"开关条目（复用 `item_rows`），其下是更新小节（状态行
+"在线更新：已开启/已关闭" + 禁用原因/更新器路径、结果区逐行如实展示更新器输出、
+再往下 [检查更新][应用更新] 按钮），再往下是"版本与诊断信息"小节标题与诊断逐行。
+切页靠左侧导航；诊断信息首次绘制本页时懒收集。`layout.rs` 的 `about_layout` 把
+诊断行截断在内容区底边内（结果区固定约 3 行）。
 
 ### 后台任务线程 + 消息循环回执
 
@@ -57,16 +66,16 @@ post，消息到达时结果必在 channel 里。`WM_UPDATER_DONE` 的 `wparam` 
 
 应用按钮先弹 `MessageBox`（YESNO，D-44）再 spawn `zhu-ye-updater apply`。
 
-### 诊断子视图只读本地
+### 诊断小节只读本地
 
 `build_diagnostics` 读取 `zhu_ye_core::core_version()`、`config.json` 路径、数据目录、
 验收期日志目录与已装包列表（复用既有本地清单扫描 `list_packs_now`）——不 spawn、
-不联网。格式行按管理/修复子视图的逐行样式绘制。
+不联网。格式行按管理/修复子视图的逐行样式绘制（首行加粗强调）。
 
 ### 取证入口
 
-`--shot --update` / `--shot --diag` 进入两个子视图出 BMP（与 `--packs/--manage/
---repair` 并列）。
+`--shot --page about` 直接截取平铺后的关于页（T-143；原 `--update` / `--diag`
+子视图入口随子视图一并移除）。
 
 ## Alternatives considered
 
@@ -86,13 +95,19 @@ post，消息到达时结果必在 channel 里。`WM_UPDATER_DONE` 的 `wparam` 
 
 - `config.rs` 新增 `load_online_update`/`save_online_update`，含往返与字段保全测试
   （S-8 重读保留 `last_check`）。
-- settings 库测试 95→97（model：关于页三条目 Ready + 开关默认关 + 子视图切换；
+- settings 库测试 95→97（model：关于页三条目 Ready + 开关默认（当时关、T-154 起开）+ 子视图切换；
   layout：更新/诊断几何；updater 桥：行过滤、非零退出码与启动失败路径，用
   `cmd.exe` 实测）。
+- T-143：删除 `Subview::Update/Diagnostics` 与 `ItemControl::OpenUpdate/
+  OpenDiagnostics`；`ABOUT_ITEMS` 只保留开关条目；原两个子视图布局由
+  `about_layout` 取代（库测试 106 个）。
 - 宿主取证（2026-10-02）：三张 BMP（诊断页、更新关闭态、更新开启态）——开/关两态
   隔行采样 3650 像素差异；真实 updater 行为确认：`online_update=false` ⇒ `check`
   零网络立即退出（"未发起任何网络请求"），`true` ⇒ 由更新器进程发起连接，清单 404
   失败原因由窗口如实展示。
+- 宿主取证（2026-10-09，T-143）：96 DPI 平铺后关于页 BMP——开关行、更新小节、
+  诊断小节同页展示，无返回按钮；"关闭时零出站连接"保证不变（`can_run_updater`
+  仍在任何 spawn 之前把关）。
 - 欠账：「显式开启」「检查更新」「二次确认」交互与抓包条款按验收标准 13.5 挂起待 VM。
 
 ## 相关笔记

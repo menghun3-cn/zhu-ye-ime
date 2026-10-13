@@ -17,7 +17,7 @@ FR-045 要求设置窗口能到达干净机：旧 `install.ps1` 从源码树取 
 依赖源码树：
 
 ```
-ai-zhu-ye-ime-<version>-test/
+zhu-ye-ime-<version>-test/
   bin/zhu_ye_ime.dll              TSF 服务 DLL（安装时版本化复制）
   bin/zhu-ye-settings.exe         设置窗口
   bin/zhu-ye-updater.exe          词典更新器（唯一联网组件）
@@ -30,13 +30,13 @@ ai-zhu-ye-ime-<version>-test/
 
 - `install.ps1`：解析 `-PackageRoot`（默认：脚本目录的上级），校验包内容，版本化复制并
   校验 DLL 导出，复制基础词典（`bin/dictionary.zyct`），把两个 exe 装到
-  `%ProgramFiles%\ai-zhu-ye-ime\bin\`，把三个领域包预置到 `%APPDATA%\ai-zhu-ye-ime\packs\`，
+  `%ProgramFiles%\zhu-ye-ime\bin\`，把三个领域包预置到 `%APPDATA%\zhu-ye-ime\packs\`，
   以原有回滚事务写入 TSF 注册树，创建开始菜单快捷方式（D-26 唤起入口）。
   `-SkipBuild` 现为无操作（发行模式从不构建）。新增 `-SkipRegistration` 开关跳过 HKLM
   注册与快捷方式，让复制/预置逻辑无需管理员 shell 或 TSF 写入即可演练。幂等：同哈希
   DLL 覆盖，exe 与领域包同名覆盖。
 - `uninstall.ps1`：新增清理两个 exe（占用时延迟清理）、开始菜单快捷方式与空的
-  `tsf\`/`bin\`/应用根目录。**`%APPDATA%\ai-zhu-ye-ime` 故意保留**——配置、领域包与
+  `tsf\`/`bin\`/应用根目录。**`%APPDATA%\zhu-ye-ime` 故意保留**——配置、领域包与
   用户词库属用户数据；卸载只清程序文件。
 - 基础词典来源变化：旧 `install.ps1` 偏好 `data/artifacts/real.zyct`（开发产物）；发行
   模式改发 `base.zyct`（随安装只读基础包，见 architecture 文档布局）。
@@ -47,7 +47,7 @@ ai-zhu-ye-ime-<version>-test/
 "不依赖源码目录与 cargo"；保留构建路径会让安装器同时存在源码树与发行包两条代码路径，
 验收无法区分。
 
-**卸载时整删 `%APPDATA%\ai-zhu-ye-ime`。** 否决：用户词库与配置是长期积累的用户数据，
+**卸载时整删 `%APPDATA%\zhu-ye-ime`。** 否决：用户词库与配置是长期积累的用户数据，
 卸载即删与一级修复"绝不删除用户数据"（D-41）同原则冲突。手动清理路径已写入
 docs/安装与使用.md。
 
@@ -57,7 +57,7 @@ docs/安装与使用.md。
 ## 后果
 
 - 干净机无需 Rust 工具链：解压后直接 `install.ps1`（验收标准 13.1 FR-045 各行）。
-- 安装器只写确定位置（`Program Files\ai-zhu-ye-ime\{tsf,bin}`、开始菜单、`%APPDATA%`），
+- 安装器只写确定位置（`Program Files\zhu-ye-ime\{tsf,bin}`、开始菜单、`%APPDATA%`），
   设置窗口可在"管理输入法"中复核。
 - D-46 预置领域包使 FR-042 可离线验收；在线更新保留为升级途径（设计 §8）。
 - `-SkipRegistration` 演练钩子：跳过 HKLM 写入与快捷方式，仍演练复制/预置/校验全程；

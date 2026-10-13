@@ -13,9 +13,10 @@
   4. 按输出的 SHA256SUMS.txt 上传 GitHub Releases 资产（zip + 各包 + manifest.json）。
 
 产物布局（release-assets/<version>/）：
-  ai-zhu-ye-ime-<version>.zip   安装/便携包（含 base.zyct、en.zyen、DLL、两个 exe）
+  zhu-ye-ime-<version>.zip     安装/便携包（含 base.zyct、en.zyen、DLL、两个 exe；命名见 T-108）
   packs/it.zyct med.zyct slang.zyct   可分发的领域包（DISTRIBUTABLE_PACK_IDS）
   manifest.json                 签名 manifest（schema 1，ed25519）
+  app.json                      签名应用版本元数据（输入法版本 + 更新日志，T-154）
   SHA256SUMS.txt                上传核对清单
 
 注意：
@@ -68,7 +69,7 @@ if (-not $SkipBuild) {
     try {
         # 强制重编 updater：增量缓存无法感知 option_env! 的公钥变化。
         & cargo clean -p zhu-ye-updater 2>$null
-        & cargo build --release -p zhu-ye-dict -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater
+        & cargo build --release -p zhu-ye-dict -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater -p zhu-ye-tray
         if ($LASTEXITCODE -ne 0) {
             throw 'cargo build 失败，无法生成发布产物。'
         }
@@ -78,7 +79,8 @@ if (-not $SkipBuild) {
 }
 foreach ($artifact in @($dictExe, (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll'),
         (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe'),
-        (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'))) {
+        (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'),
+        (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe'))) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         throw "release 产物缺失：$artifact（请勿使用 -SkipBuild）"
     }
@@ -115,15 +117,49 @@ if (-not $SkipSign) {
 & $dictExe verify-manifest $manifestPath
 if ($LASTEXITCODE -ne 0) { throw 'verify-manifest 失败（内容哈希与 manifest 不一致）。' }
 
+# ---- 5.5 应用版本元数据 app.json（T-154）----
+# 独立签名的应用版本信息（输入法版本 + 更新日志纯文本），供更新器检查时展示
+# "发现新版本 + 更新日志"。为什么独立成文件：manifest 签名按结构体字段序的规范化
+# JSON 计算，若并入 manifest，旧版客户端解析时会丢掉未知字段导致验签失败——全新
+# 文件则天然向后兼容（旧版更新器不读取它）。
+$appMetaPath = Join-Path $relDir 'app.json'
+$notesTmp = Join-Path $relDir 'release-notes.tmp.md'
+& (Join-Path $repoRoot 'scripts\release-notes-from-changelog.ps1') `
+    -Version $Version -NotesFile $notesTmp
+if ($LASTEXITCODE -ne 0) { throw '提取 CHANGELOG 发布说明失败。' }
+& $dictExe build-app $appMetaPath --version $Version --release-notes-file $notesTmp
+if ($LASTEXITCODE -ne 0) { throw 'build-app 失败。' }
+if (-not $SkipSign) {
+    & $dictExe sign-app $appMetaPath
+    if ($LASTEXITCODE -ne 0) { throw 'sign-app 失败。' }
+    & $dictExe verify-app $appMetaPath
+    if ($LASTEXITCODE -ne 0) { throw 'verify-app 失败。' }
+}
+Remove-Item -LiteralPath $notesTmp -Force
+
 # ---- 6. 安装/便携 zip（复用 package-portable，产物已构建则自动跳过构建） ----
 & (Join-Path $repoRoot 'scripts\package-portable.ps1') -Version $Version
 if ($LASTEXITCODE -ne 0) { throw 'package-portable 失败。' }
-$portableZip = Join-Path $repoRoot "target\portable\ai-zhu-ye-ime-$Version-test.zip"
+$portableZip = Join-Path $repoRoot "target\portable\zhu-ye-ime-$Version-test.zip"
 if (-not (Test-Path -LiteralPath $portableZip -PathType Leaf)) {
     throw "便携包未生成：$portableZip"
 }
-$zipDest = Join-Path $relDir "ai-zhu-ye-ime-$Version.zip"
+$zipDest = Join-Path $relDir "zhu-ye-ime-$Version.zip"
 Copy-Item -LiteralPath $portableZip -Destination $zipDest -Force
+# 载荷完整性守卫：zip 必须含基础词典与带调拼音旁挂表（批四）、三个 exe（设置/更新器/
+# 托盘，T-078 + 批六）与 DLL；缺一即中止，避免把缺组件的发布包上传出去。
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zipRead = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zipDest))
+try {
+    $zipNames = @($zipRead.Entries | ForEach-Object { $_.FullName })
+    foreach ($entry in @('bin/zhu-ye-tray.exe', 'bin/zhu-ye-settings.exe', 'bin/zhu-ye-updater.exe', 'bin/zhu_ye_ime.dll', 'bin/dictionary.zyct', 'bin/dictionary.zyct.tones')) {
+        if ($zipNames -notcontains $entry) {
+            throw "发布 zip 缺少组件 $entry —— 发行包组装有缺口，中止发布。"
+        }
+    }
+} finally {
+    $zipRead.Dispose()
+}
 
 # ---- 7. 上传核对清单 ----
 $sums = Join-Path $relDir 'SHA256SUMS.txt'
@@ -143,5 +179,5 @@ Write-Host "  签名: $(if ($SkipSign) { '未签名（dry-run）' } else { 'ed25
 Write-Host "  上传: gh release create v$Version --title 'v$Version' --notes '发布说明（见 CHANGELOG）'"
 $sumsRel = (Join-Path $relDir 'SHA256SUMS.txt').Replace('\', '/')
 Write-Host "        后 gh release upload v$Version $sumsRel"
-Write-Host '        并按 SHA256SUMS.txt 上传 zip、packs/*.zyct 与 manifest.json'
+Write-Host '        并按 SHA256SUMS.txt 上传 zip、packs/*.zyct、manifest.json 与 app.json'
 Write-Host '  验证: ZHU_YE_MANIFEST_URL 指向实际 releases 地址后运行 updater check/apply'

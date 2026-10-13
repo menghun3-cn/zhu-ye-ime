@@ -19,7 +19,7 @@ installed that the settings window could later re-run to fix itself.
 layout, and `install.ps1` reads from it instead of the source tree:
 
 ```
-ai-zhu-ye-ime-<version>-test/
+zhu-ye-ime-<version>-test/
   bin/zhu_ye_ime.dll              TSF service DLL (versioned copy at install)
   bin/zhu-ye-settings.exe         settings window
   bin/zhu-ye-updater.exe          dictionary updater (only networked component)
@@ -33,8 +33,8 @@ ai-zhu-ye-ime-<version>-test/
 - `install.ps1`: resolves `-PackageRoot` (default: parent of the script dir),
   validates the package contents, versioned-copies and export-verifies the DLL,
   copies the base dictionary (`bin/dictionary.zyct`), installs the two exes to
-  `%ProgramFiles%\ai-zhu-ye-ime\bin\`, preseeds the three domain packs to
-  `%APPDATA%\ai-zhu-ye-ime\packs\`, registers the TSF trees with the original
+  `%ProgramFiles%\zhu-ye-ime\bin\`, preseeds the three domain packs to
+  `%APPDATA%\zhu-ye-ime\packs\`, registers the TSF trees with the original
   rollback transaction, and creates the Start Menu shortcut (D-26 launch entry).
   `-SkipBuild` is now a no-op (the package mode never builds). The new
   `-SkipRegistration` switch skips HKLM registration and the shortcut, so the
@@ -42,7 +42,7 @@ ai-zhu-ye-ime-<version>-test/
   Idempotent: same DLL hash overwrites, exes and packs overwrite.
 - `uninstall.ps1`: additionally removes the two exes (delayed cleanup when in
   use), the Start Menu shortcut, and empty `tsf\`/`bin\`/app-root directories.
-  **`%APPDATA%\ai-zhu-ye-ime` is deliberately kept** — configuration, domain
+  **`%APPDATA%\zhu-ye-ime` is deliberately kept** — configuration, domain
   packs and the user dictionary are user data; uninstall removes program files
   only.
 - The base dictionary source changes: `install.ps1` previously preferred
@@ -55,7 +55,7 @@ ai-zhu-ye-ime-<version>-test/
 plus the exes.** Rejected: FR-045 explicitly requires "no dependency on the
 source directory and cargo" on the clean machine; keeping a build path would
 preserve two code paths in the installer (source-tree vs package) that the
-acceptance run cannot distinguish.**Uninstall removes `%APPDATA%\ai-zhu-ye-ime` entirely.** Rejected: the user
+acceptance run cannot distinguish.**Uninstall removes `%APPDATA%\zhu-ye-ime` entirely.** Rejected: the user
 dictionary and configuration are user data accumulated over time; deleting
 them on uninstall would violate the same "never delete user data" principle
 as the level-1 repair (D-41). Manual removal is documented in
@@ -70,7 +70,7 @@ temporary target; the switch groups all system-level side effects.
 - A clean machine needs no Rust toolchain: unzip and run `install.ps1`
   (acceptance 13.1 FR-045 rows).
 - The installer now writes only to deterministic locations
-  (`Program Files\ai-zhu-ye-ime\{tsf,bin}`, Start Menu, `%APPDATA%`), which
+  (`Program Files\zhu-ye-ime\{tsf,bin}`, Start Menu, `%APPDATA%`), which
   the settings window can re-verify in 管理输入法.
 - The D-46 preseeded packs make FR-042 verifiable offline; online updates
   remain as the upgrade path (design §8).

@@ -40,7 +40,7 @@ M6-U（[词典更新信任链](../architecture/2026-09-29-dictionary-update-trus
   `base.zyct` 随安装包只读交付、`en.zyen` 是引擎资产，都不进更新源；
 - `manifest.json`：`build-manifest`（包版本 = 发布日，`min_engine 0.1.1`）→
   `sign-manifest` → `verify-manifest`（发布检查清单 7.4 的逐包哈希/大小复核）；
-- `ai-zhu-ye-ime-<v>.zip`（复用 `package-portable.ps1` 产物改名）；
+- `zhu-ye-ime-<v>.zip`（复用 `package-portable.ps1` 产物改名）；
 - `SHA256SUMS.txt`（上传核对清单，供 `gh release upload`）。
 
 ### `scripts/verify-release-e2e.ps1`：发布前全链验证

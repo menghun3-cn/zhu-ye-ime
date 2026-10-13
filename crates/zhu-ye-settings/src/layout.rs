@@ -11,24 +11,34 @@ use crate::panel::{PANEL_COLUMNS, PANEL_ROWS};
 
 /// 期望客户区逻辑尺寸。
 const LOGICAL_WIDTH: i32 = 880;
-const LOGICAL_HEIGHT: i32 = 620;
+const LOGICAL_HEIGHT: i32 = 700;
 /// 左侧导航列宽。
-const LOGICAL_NAV_WIDTH: i32 = 184;
+const LOGICAL_NAV_WIDTH: i32 = 200;
+/// 导航列顶品牌块高度（T-148 视觉改版，§6.2：竹叶 LOGO + 字标 + 竹节棕细线）。
+const LOGICAL_BRAND: i32 = 64;
+/// 品牌块底到导航首行的间距（对应视觉稿 `.nav` 上内边距）。
+const LOGICAL_NAV_TOP_GAP: i32 = 10;
+/// 品牌块左右内边距（对应视觉稿 `.brand` 的横向 padding）。
+const LOGICAL_BRAND_PADDING: i32 = 20;
+/// 品牌 LOGO 边长（竹叶图形，T-142 嵌入的 zhu.ico 复用为 DrawIconEx 位图）。
+const LOGICAL_BRAND_ICON: i32 = 22;
+/// 品牌 LOGO 与字标间距。
+pub(crate) const LOGICAL_BRAND_TEXT_GAP: i32 = 10;
 /// 导航行高。
-const LOGICAL_NAV_ROW: i32 = 46;
+const LOGICAL_NAV_ROW: i32 = 54;
 /// 页标题区高度。
-const LOGICAL_TITLE: i32 = 60;
+const LOGICAL_TITLE: i32 = 80;
 /// 条目行高。
-const LOGICAL_ITEM: i32 = 62;
+const LOGICAL_ITEM: i32 = 76;
 /// 展开说明区高度。
-const LOGICAL_EXPANDED: i32 = 46;
+const LOGICAL_EXPANDED: i32 = 54;
 /// 内容区内边距。
-const LOGICAL_PADDING: i32 = 22;
+const LOGICAL_PADDING: i32 = 26;
 /// 底部提示条高度。
-const LOGICAL_HINT: i32 = 34;
+const LOGICAL_HINT: i32 = 36;
 /// 二选一控件单块宽高。
-const LOGICAL_CHIP_WIDTH: i32 = 82;
-const LOGICAL_CHIP_HEIGHT: i32 = 30;
+const LOGICAL_CHIP_WIDTH: i32 = 88;
+const LOGICAL_CHIP_HEIGHT: i32 = 32;
 /// 控件块间距与通用小间距。
 const LOGICAL_CHIP_GAP: i32 = 10;
 const LOGICAL_GAP: i32 = 8;
@@ -127,16 +137,44 @@ impl SettingsMetrics {
     }
 }
 
-/// 导航行；按 `Page::ALL` 顺序从上到下排列。
+/// 导航列顶品牌块矩形（宽=导航列，底部 1px 竹节棕细线落在 `bottom-1` 行）。
+#[must_use]
+pub fn brand_rect(metrics: &SettingsMetrics, client: UiRect) -> UiRect {
+    UiRect {
+        left: client.left,
+        top: client.top,
+        right: metrics.nav_width,
+        bottom: client.top + scale(metrics.dpi, LOGICAL_BRAND),
+    }
+}
+
+/// 品牌块 LOGO 矩形（导航列内左上，垂直居中）。
+#[must_use]
+pub fn brand_icon_rect(metrics: &SettingsMetrics, client: UiRect) -> UiRect {
+    let rect = brand_rect(metrics, client);
+    let size = scale(metrics.dpi, LOGICAL_BRAND_ICON);
+    let left = rect.left + scale(metrics.dpi, LOGICAL_BRAND_PADDING);
+    let top = rect.top + (rect.height() - size) / 2;
+    UiRect {
+        left,
+        top,
+        right: left + size,
+        bottom: top + size,
+    }
+}
+
+/// 导航行；按 `Page::ALL` 顺序从上到下排列，整体位于品牌块之下。
 #[must_use]
 pub fn nav_rows(metrics: &SettingsMetrics, client: UiRect) -> Vec<(Page, UiRect)> {
+    let first_top =
+        client.top + scale(metrics.dpi, LOGICAL_BRAND) + scale(metrics.dpi, LOGICAL_NAV_TOP_GAP);
     Page::ALL
         .iter()
         .copied()
         .enumerate()
         .map(|(index, page)| {
             let step = metrics.nav_row_height + metrics.gap;
-            let top = client.top + metrics.padding + index as i32 * step;
+            let top = first_top + index as i32 * step;
             let rect = UiRect {
                 left: metrics.gap,
                 top,
@@ -190,8 +228,10 @@ pub enum ChipValue {
     Theme(ThemeChoice),
     /// 新会话默认中英模式（中文 / 英文，D-32 装配项）。
     Mode(ModeChoice),
-    /// 在线更新开关（关闭 / 开启，P-03 默认关）。
+    /// 在线更新开关（关闭 / 开启，T-154 默认开）。
     OnlineUpdate(bool),
+    /// 候选框拼音行开关（关闭 / 显示，T-127 默认开）。
+    CandidatePin(bool),
 }
 
 /// 二选一控件块：取值决定绘制时的选中状态与点击后的动作。
@@ -251,6 +291,7 @@ pub fn item_rows(
             ItemControl::ThemeChoice => theme_chips(metrics, rect),
             ItemControl::ModeChoice => mode_chips(metrics, rect),
             ItemControl::OnlineUpdate => online_update_chips(metrics, rect),
+            ItemControl::CandidatePin => candidate_pin_chips(metrics, rect),
             _ => Vec::new(),
         };
         rows.push(ItemRow {
@@ -284,13 +325,23 @@ fn mode_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
     )
 }
 
-/// 在线更新二选一控件：关闭在前、开启在后（P-03 默认关，用户须显式开启）。
+/// 在线更新二选一控件：关闭在前、开启在后（T-154 默认开启，显式关闭仍尊重）。
 fn online_update_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
     two_chips(
         metrics,
         row,
         ("关闭", ChipValue::OnlineUpdate(false)),
         ("开启", ChipValue::OnlineUpdate(true)),
+    )
+}
+
+/// 候选框拼音行开关（T-127）：关闭在前、显示在后（默认开，保持历史行为）。
+fn candidate_pin_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
+    two_chips(
+        metrics,
+        row,
+        ("关闭", ChipValue::CandidatePin(false)),
+        ("显示", ChipValue::CandidatePin(true)),
     )
 }
 
@@ -329,16 +380,16 @@ pub fn contains(rect: UiRect, x: i32, y: i32) -> bool {
 // ---------------------------------------------------------------------------
 
 /// 词库行高。
-const LOGICAL_PACK_ROW: i32 = 52;
+const LOGICAL_PACK_ROW: i32 = 56;
 /// "导入不验签"说明区高度。
-const LOGICAL_PACK_NOTE: i32 = 42;
+const LOGICAL_PACK_NOTE: i32 = 44;
 /// 启用开关块宽。
-const LOGICAL_PACK_TOGGLE_WIDTH: i32 = 92;
+const LOGICAL_PACK_TOGGLE_WIDTH: i32 = 96;
 /// 词条数/体积/版本元信息列宽。
-const LOGICAL_PACK_META_WIDTH: i32 = 190;
+const LOGICAL_PACK_META_WIDTH: i32 = 200;
 /// 底部按钮宽高。
-const LOGICAL_PACK_BUTTON_WIDTH: i32 = 172;
-const LOGICAL_PACK_BUTTON_HEIGHT: i32 = 30;
+const LOGICAL_PACK_BUTTON_WIDTH: i32 = 180;
+const LOGICAL_PACK_BUTTON_HEIGHT: i32 = 32;
 
 /// 词库子视图的一行：行矩形供命中整行，分区供绘制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,101 +582,129 @@ pub fn repair_layout(metrics: &SettingsMetrics, client: UiRect, row_count: usize
     RepairLayout { rows, l1, l2, back }
 }
 
-/// 「检查更新」子视图整体布局（T-077 / FR-044）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UpdateLayout {
-    /// 顶部说明区（当前开关状态 + 禁用原因/更新器路径，最多两行）。
-    pub info: UiRect,
-    /// 中部结果区（更新器输出逐行展示，超出截断）。
+/// 「检查更新」与「版本与诊断信息」平铺在「关于与更新」页上的整体布局
+/// （T-143：取消两级子视图，开关行之下依次是指标说明、按钮与结果区、诊断信息小节）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AboutLayout {
+    /// 在线更新状态行（"在线更新：已开启/已关闭"）。
+    pub status: UiRect,
+    /// 状态行下方的提示行（未开启原因或更新器路径）。
+    pub hint: UiRect,
+    /// 检查更新结果区（逐行展示更新器输出，超出截断）。
     pub result: UiRect,
     /// "检查更新"按钮（强调色）。
     pub check: UiRect,
     /// "应用更新"按钮（普通色）。
     pub apply: UiRect,
-    /// "返回关于与更新"按钮。
-    pub back: UiRect,
+    /// "版本与诊断信息"小节标题行。
+    pub diag_title: UiRect,
+    /// 诊断卡片区：标题下方到内容区底边的连续区域，卡片由绘制端动态排布
+    /// （每条信息一张卡，卡高按值换行行数计算），超出该区底部不再绘制。
+    pub diag_cards: UiRect,
 }
 
-/// 计算「检查更新」子视图布局：说明在上、结果居中、三个按钮在底部。
+/// 关于页扁平区块的行高常量（96 DPI 逻辑值；诊断行按 small 字体高度加呼吸留白）。
+const LOGICAL_SECTION_ROW: i32 = 26;
+const LOGICAL_HINT_ROW: i32 = 20;
+const LOGICAL_DIAG_ROW: i32 = 21;
+/// 结果区固定显示行数（更新器输出超出部分截断）。T-154 起 3 → 6：
+/// 发现输入法新版本时结果区展示「版本 + 更新日志」（多行），需更高的固定区。
+const LOGICAL_RESULT_ROWS: i32 = 6;
+/// 诊断卡片内标签列宽（`small` 13px 下 6 个汉字 ≈ 78px，留余量到 88px）。
+const LOGICAL_DIAG_LABEL_W: i32 = 88;
+
+/// 诊断卡片内单行取值行高（96 DPI 逻辑值）。
 #[must_use]
-pub fn update_layout(metrics: &SettingsMetrics, client: UiRect) -> UpdateLayout {
+pub fn diag_row_height(metrics: &SettingsMetrics) -> i32 {
+    scale(metrics.dpi, LOGICAL_DIAG_ROW)
+}
+
+/// 诊断卡片内标签列的固定宽度（96 DPI 逻辑值）。
+#[must_use]
+pub fn diag_label_width(metrics: &SettingsMetrics) -> i32 {
+    scale(metrics.dpi, LOGICAL_DIAG_LABEL_W)
+}
+
+/// 把文本按可用宽度贪心换行成多行：逐字符累积宽度，`width_of` 返回子串宽度
+/// （绘制端注入真实 GDI 测宽；测试注入假宽度）。空串视为一行。
+///
+/// 换行只在整串超宽时发生（短行保持单行）；不含连字/断词优化——值列是路径、
+/// 包名与说明文字，字符级断行即可读。
+#[must_use]
+pub fn wrap_text(text: &str, width_of: impl Fn(&str) -> i32, avail: i32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        let test = format!("{current}{ch}");
+        if !current.is_empty() && width_of(&test) > avail {
+            lines.push(std::mem::take(&mut current));
+        }
+        current.push(ch);
+    }
+    lines.push(current);
+    lines
+}
+
+/// 计算「关于与更新」页扁平布局：开关条目行（调用方用 `item_rows` 绘制）之下，
+/// 依次是更新状态/提示、结果区、检查/应用按钮、诊断信息小节。
+#[must_use]
+pub fn about_layout(metrics: &SettingsMetrics, client: UiRect) -> AboutLayout {
     let content = content_rect(metrics, client);
-    let row_height = metrics.pack_row_height.saturating_sub(metrics.gap);
-    let info = UiRect {
-        left: content.left,
-        top: content.top,
-        right: content.right,
-        bottom: content.top + row_height * 2,
-    };
-    let button_top = content.bottom - metrics.pack_button_height;
     let gap = metrics.gap;
-    let width = (content.width() - gap * 2) / 3;
+    let section = |top: i32, height: i32| UiRect {
+        left: content.left,
+        top,
+        right: content.right,
+        bottom: top + height,
+    };
+    let status_h = scale(metrics.dpi, LOGICAL_SECTION_ROW);
+    let hint_h = scale(metrics.dpi, LOGICAL_HINT_ROW);
+    let diag_row_h = scale(metrics.dpi, LOGICAL_DIAG_ROW);
+    let result_h = scale(metrics.dpi, LOGICAL_RESULT_ROWS) * diag_row_h;
+
+    // 第一行条目（"启用在线更新"）由 `item_rows` 绘制；区块从它下方开始。
+    let mut top = content.top + metrics.item_height + gap;
+    let status = section(top, status_h);
+    top = status.bottom;
+    let hint = section(top, hint_h);
+    top = hint.bottom + gap;
+    let result = section(top, result_h);
+    top = result.bottom + gap;
+
+    let button_h = metrics.pack_button_height;
+    let width = (content.width() - gap) / 2;
     let check = UiRect {
         left: content.left,
-        top: button_top,
+        top,
         right: content.left + width,
-        bottom: button_top + metrics.pack_button_height,
+        bottom: top + button_h,
     };
     let apply = UiRect {
         left: check.right + gap,
-        top: button_top,
-        right: check.right + gap + width,
-        bottom: button_top + metrics.pack_button_height,
-    };
-    let back = UiRect {
-        left: apply.right + gap,
-        top: button_top,
+        top,
         right: content.right,
-        bottom: button_top + metrics.pack_button_height,
+        bottom: top + button_h,
     };
-    let result = UiRect {
+    top = apply.bottom + gap;
+    let diag_title = section(top, status_h);
+    top = diag_title.bottom + gap;
+    // 诊断卡片区：标题下方到内容区底边的连续区域；卡片形状/数量由绘制端
+    // 按内容测宽动态排布（超出该区不再绘制）。
+    let diag_cards = UiRect {
         left: content.left,
-        top: info.bottom + gap,
+        top,
         right: content.right,
-        bottom: button_top - gap,
+        bottom: content.bottom,
     };
-    UpdateLayout {
-        info,
+    AboutLayout {
+        status,
+        hint,
         result,
         check,
         apply,
-        back,
+        diag_title,
+        diag_cards,
     }
-}
-
-/// 「版本与诊断信息」子视图整体布局（T-077 / FR-044）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiagnosticsLayout {
-    /// 信息逐行区；行数由诊断内容决定，超出可用高度截断。
-    pub rows: Vec<UiRect>,
-    /// "返回关于与更新"按钮。
-    pub back: UiRect,
-}
-
-/// 计算「版本与诊断信息」子视图布局：信息行在上、返回按钮在底部。
-#[must_use]
-pub fn diagnostics_layout(
-    metrics: &SettingsMetrics,
-    client: UiRect,
-    row_count: usize,
-) -> DiagnosticsLayout {
-    let content = content_rect(metrics, client);
-    let row_height = metrics.pack_row_height.saturating_sub(metrics.gap);
-    let rows: Vec<UiRect> = (0..row_count)
-        .map(|index| UiRect {
-            left: content.left,
-            top: content.top + index as i32 * row_height,
-            right: content.right,
-            bottom: content.top + (index as i32 + 1) * row_height,
-        })
-        .collect();
-    let back = UiRect {
-        left: content.left,
-        top: content.bottom - metrics.pack_button_height,
-        right: content.left + metrics.pack_button_width,
-        bottom: content.bottom,
-    };
-    DiagnosticsLayout { rows, back }
 }
 
 // ---------------------------------------------------------------------------
@@ -802,16 +881,24 @@ pub fn themes_layout(metrics: &SettingsMetrics, client: UiRect, row_count: usize
 
 /// 面板逻辑尺寸。
 const LOGICAL_PANEL_WIDTH: i32 = 700;
-const LOGICAL_PANEL_PADDING: i32 = 18;
+const LOGICAL_PANEL_PADDING: i32 = 20;
 const LOGICAL_PANEL_GAP: i32 = 6;
-const LOGICAL_PANEL_HEADER: i32 = 46;
-const LOGICAL_PANEL_FOOTER: i32 = 48;
-const LOGICAL_PANEL_CELL_HEIGHT: i32 = 52;
-const LOGICAL_PANEL_CELL_MIN_WIDTH: i32 = 34;
-const LOGICAL_PANEL_BUTTON_WIDTH: i32 = 96;
-const LOGICAL_PANEL_BUTTON_HEIGHT: i32 = 30;
-const LOGICAL_PANEL_PAGE_LABEL_WIDTH: i32 = 72;
-const LOGICAL_PANEL_HINT: i32 = 26;
+/// 页签行高（T-151：emoji/符号双页签）。
+const LOGICAL_PANEL_TAB_HEIGHT: i32 = 32;
+/// 页签宽（T-151）。
+const LOGICAL_PANEL_TAB_WIDTH: i32 = 96;
+/// 搜索框行高（T-151：搜索态输入行）。
+const LOGICAL_PANEL_SEARCH_HEIGHT: i32 = 40;
+/// 标题区总高 = 页签行 + 间距 + 搜索框行（T-151 前为单行 54）。
+const LOGICAL_PANEL_HEADER: i32 =
+    LOGICAL_PANEL_TAB_HEIGHT + LOGICAL_PANEL_GAP + LOGICAL_PANEL_SEARCH_HEIGHT;
+const LOGICAL_PANEL_FOOTER: i32 = 50;
+const LOGICAL_PANEL_CELL_HEIGHT: i32 = 58;
+const LOGICAL_PANEL_CELL_MIN_WIDTH: i32 = 36;
+const LOGICAL_PANEL_BUTTON_WIDTH: i32 = 100;
+const LOGICAL_PANEL_BUTTON_HEIGHT: i32 = 32;
+const LOGICAL_PANEL_PAGE_LABEL_WIDTH: i32 = 76;
+const LOGICAL_PANEL_HINT: i32 = 28;
 
 /// 面板布局尺寸；格子宽度由期望宽度与列数反推，保证一整页刚好铺满一行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -830,8 +917,14 @@ pub struct PanelMetrics {
     pub cell_width: i32,
     /// 格子高。
     pub cell_height: i32,
-    /// 标题区高。
+    /// 标题区高（页签行 + 间距 + 搜索框行）。
     pub header_height: i32,
+    /// 页签行高。
+    pub tab_height: i32,
+    /// 页签宽。
+    pub tab_width: i32,
+    /// 搜索框行高。
+    pub search_height: i32,
     /// 底栏高。
     pub footer_height: i32,
     /// 按钮宽。
@@ -861,6 +954,9 @@ impl PanelMetrics {
         let usable = desired_width - 2 * padding - (columns - 1) * gap;
         let cell_width = (usable / columns).max(scale(dpi, LOGICAL_PANEL_CELL_MIN_WIDTH));
         let cell_height = scale(dpi, LOGICAL_PANEL_CELL_HEIGHT);
+        let tab_height = scale(dpi, LOGICAL_PANEL_TAB_HEIGHT);
+        let tab_width = scale(dpi, LOGICAL_PANEL_TAB_WIDTH);
+        let search_height = scale(dpi, LOGICAL_PANEL_SEARCH_HEIGHT);
         let header_height = scale(dpi, LOGICAL_PANEL_HEADER);
         let footer_height = scale(dpi, LOGICAL_PANEL_FOOTER);
         // 高度由一整页格子加页脚推出，保证整页无需滚动即可放下。
@@ -880,6 +976,9 @@ impl PanelMetrics {
             cell_width,
             cell_height,
             header_height,
+            tab_height,
+            tab_width,
+            search_height,
             footer_height,
             button_width: scale(dpi, LOGICAL_PANEL_BUTTON_WIDTH),
             button_height: scale(dpi, LOGICAL_PANEL_BUTTON_HEIGHT),
@@ -900,8 +999,12 @@ impl PanelMetrics {
 /// 面板布局结果；绘制与命中测试共用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelLayout {
-    /// 标题区。
+    /// 标题区（页签行 + 搜索框行）。
     pub header: UiRect,
+    /// 页签（emoji、symbol 各一个，顺序固定）。
+    pub tabs: Vec<UiRect>,
+    /// 搜索框。
+    pub search: UiRect,
     /// 格子（行优先），数量等于本页条目数。
     pub cells: Vec<UiRect>,
     /// 返回设置。
@@ -924,6 +1027,25 @@ pub fn panel_layout(metrics: &PanelMetrics, client: UiRect, cell_count: usize) -
         top: client.top,
         right: client.right,
         bottom: client.top + metrics.header_height,
+    };
+    // 页签行：两个页签并排于标题区顶部。
+    let tabs: Vec<UiRect> = (0..2i32)
+        .map(|index| {
+            let left = client.left + metrics.padding + index * (metrics.tab_width + metrics.gap);
+            UiRect {
+                left,
+                top: client.top,
+                right: left + metrics.tab_width,
+                bottom: client.top + metrics.tab_height,
+            }
+        })
+        .collect();
+    // 搜索框：页签行下方、左右内边距内通栏。
+    let search = UiRect {
+        left: client.left + metrics.padding,
+        top: client.top + metrics.tab_height + metrics.gap,
+        right: client.right - metrics.padding,
+        bottom: client.top + metrics.tab_height + metrics.gap + metrics.search_height,
     };
     let grid_top = header.bottom + metrics.padding;
     let columns = usize::try_from(metrics.columns).unwrap_or(1).max(1);
@@ -977,6 +1099,8 @@ pub fn panel_layout(metrics: &PanelMetrics, client: UiRect, cell_count: usize) -
     };
     PanelLayout {
         header,
+        tabs,
+        search,
         cells,
         back,
         prev,
@@ -1066,7 +1190,7 @@ mod tests {
         let metrics = SettingsMetrics::new(96);
         let items = Page::Common.items();
         // 「简繁切换」仍是规划中条目：点击可展开。
-        let expand_index = 12;
+        let expand_index = 13;
         let plain = item_rows(&metrics, CLIENT, items, None);
         let expanded = item_rows(&metrics, CLIENT, items, Some(expand_index));
         // 展开项自身多出说明区。
@@ -1169,10 +1293,32 @@ mod tests {
     }
 
     #[test]
-    fn 英文输入法条目有两个中英模式控件块() {
+    fn 候选拼音条目有两个开关控件块且关闭在先显示在后() {
         let metrics = SettingsMetrics::new(96);
         let rows = item_rows(&metrics, CLIENT, Page::Common.items(), None);
         let chips = &rows[2].chips;
+        assert_eq!(chips.len(), 2, "候选拼音是二选一开关（T-127）");
+        assert_eq!(
+            chips[0].value,
+            super::ChipValue::CandidatePin(false),
+            "关闭在前"
+        );
+        assert_eq!(
+            chips[1].value,
+            super::ChipValue::CandidatePin(true),
+            "显示在后"
+        );
+        assert_eq!(chips[0].label, "关闭");
+        assert_eq!(chips[1].label, "显示");
+        assert!(chips[0].rect.right <= chips[1].rect.left);
+        assert_eq!(chips[1].rect.right, rows[2].rect.right - metrics.gap);
+    }
+
+    #[test]
+    fn 英文输入法条目有两个中英模式控件块() {
+        let metrics = SettingsMetrics::new(96);
+        let rows = item_rows(&metrics, CLIENT, Page::Common.items(), None);
+        let chips = &rows[3].chips;
         assert_eq!(chips.len(), 2, "英文输入法是 D-32 装配项二选一");
         assert_eq!(
             chips[0].value,
@@ -1185,7 +1331,7 @@ mod tests {
         assert_eq!(chips[0].label, "中文");
         assert_eq!(chips[1].label, "英文");
         assert!(chips[0].rect.right <= chips[1].rect.left);
-        assert_eq!(chips[1].rect.right, rows[2].rect.right - metrics.gap);
+        assert_eq!(chips[1].rect.right, rows[3].rect.right - metrics.gap);
     }
 
     #[test]
@@ -1194,7 +1340,7 @@ mod tests {
         let metrics = SettingsMetrics::new(96);
         let rows = item_rows(&metrics, CLIENT, Page::About.items(), None);
         let chips = &rows[0].chips;
-        assert_eq!(chips.len(), 2, "在线更新是二选一开关（P-03）");
+        assert_eq!(chips.len(), 2, "在线更新是二选一开关（T-154）");
         assert_eq!(
             chips[0].value,
             super::ChipValue::OnlineUpdate(false),
@@ -1212,44 +1358,118 @@ mod tests {
     }
 
     #[test]
-    fn 检查更新子视图说明结果按钮依次排列() {
+    fn 关于页扁平布局各区块依次排列且不重叠() {
         let metrics = SettingsMetrics::new(96);
-        let layout = super::update_layout(&metrics, CLIENT);
         let content = content_rect(&metrics, CLIENT);
-        // 三列按钮依次相接（隔一个 gap）、不重叠，覆盖整个内容区宽度。
-        assert_eq!(layout.check.right + metrics.gap, layout.apply.left);
-        assert_eq!(layout.apply.right + metrics.gap, layout.back.left);
-        assert_eq!(layout.back.right, content.right);
-        assert_eq!(layout.check.bottom, content.bottom);
-        // 说明区在顶部，结果区在说明区与按钮之间，互不重叠。
-        assert_eq!(layout.info.top, content.top);
-        assert!(layout.info.bottom <= content.bottom);
-        assert_eq!(layout.result.top, layout.info.bottom + metrics.gap);
+        let layout = super::about_layout(&metrics, CLIENT);
+        // 状态行紧接开关条目行（条目行由 item_rows 绘制，高为 item_height）。
+        assert_eq!(
+            layout.status.top,
+            content.top + metrics.item_height + metrics.gap
+        );
+        assert_eq!(layout.status.left, content.left);
+        assert_eq!(layout.status.right, content.right);
+        // 提示行紧随状态行，结果区在提示行与按钮之间，互不重叠。
+        assert_eq!(layout.hint.top, layout.status.bottom);
+        assert!(layout.result.top >= layout.hint.bottom + metrics.gap);
+        assert!(layout.result.height() >= 2 * super::scale(96, super::LOGICAL_DIAG_ROW));
         assert!(layout.result.bottom <= layout.check.top);
+        // 两按钮等宽相接（隔一个 gap）且左右覆盖整个内容区宽度。
+        assert_eq!(layout.check.height(), metrics.pack_button_height);
+        assert_eq!(layout.check.width(), layout.apply.width());
+        assert_eq!(layout.check.right + metrics.gap, layout.apply.left);
+        assert_eq!(layout.apply.right, content.right);
+        assert_eq!(layout.check.bottom, layout.apply.bottom);
+        // 诊断小节标题在按钮之下，卡片区从标题下方一直延伸到内容区底边：
+        // 卡片数量/形状由绘制端按内容测宽动态排布，几何层只提供边界。
+        assert_eq!(layout.diag_title.top, layout.apply.bottom + metrics.gap);
+        assert_eq!(
+            layout.diag_cards.top,
+            layout.diag_title.bottom + metrics.gap
+        );
+        assert_eq!(layout.diag_cards.bottom, content.bottom);
+        assert_eq!(layout.diag_cards.left, content.left);
+        assert_eq!(layout.diag_cards.right, content.right);
         assert!(
-            layout.result.height() >= metrics.pack_row_height,
-            "结果区至少一行高"
+            layout.diag_cards.height() >= 2 * super::scale(96, super::LOGICAL_DIAG_ROW),
+            "常规窗口下卡片区至少容得下两行诊断的高度"
+        );
+        // 卡片区与按钮、结果区互不重叠。
+        assert!(layout.diag_cards.top >= layout.apply.bottom + metrics.gap);
+    }
+
+    #[test]
+    fn 关于页卡片区在矮窗口下仍贯穿到内容区底且不与上方区块重叠() {
+        let metrics = SettingsMetrics::new(96);
+        // 620 高矮窗口：区块压缩但卡片区边界依旧成立（绘制端自行截断卡片）。
+        let short_client = UiRect {
+            top: 0,
+            bottom: 620,
+            ..CLIENT
+        };
+        let short_content = content_rect(&metrics, short_client);
+        let layout = super::about_layout(&metrics, short_client);
+        assert_eq!(layout.diag_cards.bottom, short_content.bottom);
+        assert!(
+            layout.diag_cards.top >= layout.apply.bottom + metrics.gap,
+            "卡片区不得侵入按钮"
+        );
+        // 极端情况（高度极小）下卡片区允许为空但不 panic，且水平范围仍贴内容区。
+        let tiny_client = UiRect {
+            top: 0,
+            bottom: 120,
+            ..CLIENT
+        };
+        let tiny_content = content_rect(&metrics, tiny_client);
+        let tiny = super::about_layout(&metrics, tiny_client);
+        assert_eq!(tiny.diag_cards.left, tiny_content.left);
+        assert_eq!(tiny.diag_cards.right, tiny_content.right);
+    }
+
+    #[test]
+    fn 诊断标签列宽与行高常量可换算() {
+        let metrics = SettingsMetrics::new(96);
+        assert_eq!(
+            super::diag_label_width(&metrics),
+            super::scale(96, super::LOGICAL_DIAG_LABEL_W)
+        );
+        assert_eq!(
+            super::diag_row_height(&metrics),
+            super::scale(96, super::LOGICAL_DIAG_ROW)
         );
     }
 
     #[test]
-    fn 诊断子视图信息行在上返回按钮在底部() {
-        let metrics = SettingsMetrics::new(96);
-        let content = content_rect(&metrics, CLIENT);
-        let layout = super::diagnostics_layout(&metrics, CLIENT, 5);
-        assert_eq!(layout.rows.len(), 5);
-        assert_eq!(layout.rows[0].top, content.top);
-        for pair in layout.rows.windows(2) {
-            assert!(pair[0].bottom <= pair[1].top);
-        }
-        assert_eq!(layout.back.bottom, content.bottom);
-        assert_eq!(layout.back.top, content.bottom - metrics.pack_button_height);
-        assert!(
-            layout
-                .rows
-                .last()
-                .is_none_or(|row| row.bottom <= layout.back.top),
-            "信息行不得压住返回按钮"
+    fn 文本换行按可用宽度贪心断行且短文本保持单行() {
+        // 假测宽：每字符 7px；可用 35px → 每行 5 字符。
+        let width_of = |s: &str| s.chars().count() as i32 * 7;
+        assert_eq!(
+            super::wrap_text("ABCDEFGHIJ", width_of, 35),
+            vec!["ABCDE".to_owned(), "FGHIJ".to_owned()]
+        );
+        // 恰好等于可用宽度不换行（严格大于才断）。
+        assert_eq!(
+            super::wrap_text("ABCDE", width_of, 35),
+            vec!["ABCDE".to_owned()]
+        );
+        // 短文本保持单行；空串为一行。
+        assert_eq!(
+            super::wrap_text("配置", width_of, 35),
+            vec!["配置".to_owned()]
+        );
+        assert_eq!(super::wrap_text("", width_of, 35), vec![String::new()]);
+        // 单字符宽度超过可用宽度时不 panic，逐字符成行。
+        let wide = super::wrap_text("中文长字", |_| 99, 35);
+        assert_eq!(wide, vec!["中", "文", "长", "字"]);
+        // 已断行后继续累积不受前一宽影响。
+        let two = super::wrap_text("一二三四五六七八九", |s| s.chars().count() as i32 * 10, 30);
+        assert_eq!(
+            two,
+            vec![
+                "一二三".to_owned(),
+                "四五六".to_owned(),
+                "七八九".to_owned()
+            ]
         );
     }
 
@@ -1432,5 +1652,57 @@ mod tests {
         for cell in &layout.cells {
             assert!(cell.bottom <= layout.hint.top);
         }
+    }
+
+    #[test]
+    fn 页签与搜索框位于标题区内且互不重叠() {
+        // T-151：标题区 = 页签行 + 搜索框行；搜索框通栏于页签下。
+        let metrics = PanelMetrics::new(96);
+        let client = panel_client(&metrics);
+        let layout = panel_layout(&metrics, client, 10);
+        assert_eq!(layout.tabs.len(), 2, "emoji/符号两个页签");
+        for (index, tab) in layout.tabs.iter().enumerate() {
+            assert!(tab.top >= layout.header.top);
+            assert!(tab.bottom <= layout.header.bottom, "页签在标题区内");
+            assert_eq!(tab.height(), metrics.tab_height);
+            if index > 0 {
+                assert!(tab.left >= layout.tabs[index - 1].right, "页签互不重叠");
+            }
+        }
+        let search = layout.search;
+        assert_eq!(search.height(), metrics.search_height);
+        assert!(search.top >= layout.tabs[0].bottom, "搜索框在页签行下方");
+        assert!(search.bottom <= layout.header.bottom, "搜索框在标题区内");
+        assert_eq!(search.left, client.left + metrics.padding);
+        assert_eq!(search.right, client.right - metrics.padding);
+        // 标题区总高与页签+间距+搜索框匹配（布局推位可预测）。
+        assert_eq!(
+            layout.header.height(),
+            metrics.tab_height + metrics.gap + metrics.search_height
+        );
+        // 网格区整体低于标题区（既有口径回归）。
+        let grid_top = layout.header.bottom + metrics.padding;
+        for cell in &layout.cells {
+            assert!(cell.top >= grid_top, "格子不得压到标题区");
+        }
+    }
+
+    #[test]
+    fn 默认窗口高度下常用设置页至少显示八行() {
+        // T-125：窗口 880×700、条目行 76 —— 常用设置 15 项至少可见 8 行（顶部标题区与
+        // 底部提示条之外的可见行数），保证列表排版大气且核心功能全部可达。
+        let metrics = SettingsMetrics::new(96);
+        let client = UiRect {
+            left: 0,
+            top: 0,
+            right: metrics.desired_width,
+            bottom: metrics.desired_height,
+        };
+        let rows = item_rows(&metrics, client, Page::Common.items(), None);
+        let visible = rows
+            .iter()
+            .filter(|row| row.rect.bottom <= content_rect(&metrics, client).bottom)
+            .count();
+        assert!(visible >= 7, "常用设置页可见行不足 7 行：{visible}");
     }
 }

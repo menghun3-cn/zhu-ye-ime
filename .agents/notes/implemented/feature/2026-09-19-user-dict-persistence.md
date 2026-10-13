@@ -17,7 +17,7 @@ failure semantics) for the IME and CLI to share.
 
 `zhu-ye-core::user_store::UserDictStore` owns the on-disk contract. Callers
 inject the JSON file path: the TSF host uses
-`%APPDATA%\ai-zhu-ye-ime\user_words.json`, while CLI and tests use their own
+`%APPDATA%\zhu-ye-ime\user_words.json`, while CLI and tests use their own
 paths, keeping the core platform-independent.
 
 The file is versioned JSON: `{"version": 1, "entries": [{"word", "pinyin",

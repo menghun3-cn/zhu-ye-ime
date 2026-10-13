@@ -4,6 +4,7 @@
 //! 后续输入法 DLL/CLI 全部通过这里的纯数据接口取结果。
 
 pub mod ai;
+pub mod app_meta;
 pub mod bigram;
 pub mod candidate;
 pub mod char_pinyin;
@@ -22,6 +23,7 @@ pub mod en_words;
 pub mod error;
 pub mod file_log;
 pub mod format;
+pub mod hotkey;
 pub mod identity;
 pub mod log_level;
 pub mod manifest;
@@ -33,7 +35,9 @@ pub mod suggestion;
 pub mod symbols;
 pub mod theme_file;
 pub mod time;
+pub mod tone;
 pub mod translate;
+pub mod tray_state;
 pub mod units;
 pub mod update;
 pub mod update_status;
@@ -43,15 +47,20 @@ pub mod user_words_exchange;
 pub mod vcard;
 
 pub use ai::{AiService, OfflineAiService};
+pub use app_meta::{
+    app_update_available, parse_app_meta, sign_app_meta, AppMeta, AppMetaSignature,
+    APP_META_FILE_NAME, APP_META_FORMAT, APP_META_VERSION,
+};
 pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
 pub use candidate::{
-    abbreviation_candidates, append_abbreviation_group, corrected_candidates, en_word_candidates,
-    en_word_candidates_from, generate_candidates, generate_prefix_candidates, initial_candidates,
-    is_abbreviation_input, merge_candidate_groups, prefix_expand_candidates, sentence_candidates,
-    Candidate, CandidateSorter, PrefixCandidateGroups, RankingConfig, RankingContext, RankingModel,
+    abbreviation_candidates, append_abbreviation_group, constrained_segment_candidates,
+    corrected_candidates, en_word_candidates, en_word_candidates_from, generate_candidates,
+    generate_prefix_candidates, initial_candidates, is_abbreviation_input, merge_candidate_groups,
+    prefix_expand_candidates, sentence_candidates, transposed_candidates, Candidate,
+    CandidateSorter, PrefixCandidateGroups, RankingConfig, RankingContext, RankingModel,
     StaticRankingModel, ABBREVIATION_MIN_LEN, BEAM_WIDTH, BEAM_WORD_CAP, CORRECTION_VARIANT_CAP,
     INITIAL_COMPLETION_CAP, INITIAL_MAX_LEN, INITIAL_MIN_LEN, SENTENCE_MAX_WORD_CHARS,
-    SENTENCE_TOP_N,
+    SENTENCE_TOP_N, TRANSPOSITION_VARIANT_CAP,
 };
 pub use char_pinyin::{char_pinyin, CharPinyinEntry, CHAR_PINYIN};
 pub use composite::{any_exists, pack_path, CompositeDictionary};

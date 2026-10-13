@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
 生成发行包 staging 目录（zip 便携包与 Inno exe 安装包共用载荷，T-097）。
@@ -10,7 +10,9 @@ staging 布局（与便携 zip 完全一致，保证 zip/exe 同源同哈希）�
       bin/zhu_ye_ime.dll             TSF 服务 DLL
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
+      bin/zhu-ye-tray.exe            托盘常驻进程（批六，中英状态图标）
       bin/dictionary.zyct            基础词典（data/artifacts/base.zyct，随安装只读）
+      bin/dictionary.zyct.tones      带调拼音旁挂表（base.zyct.tones，批四候选声调显示）
       bin/en.zyen                    英文词表（T-085，data/artifacts/en.zyen，随安装只读）
       packs/it.zyct med.zyct slang.zyct  预置领域包（D-46，可离线验收）
       scripts/ime-identity.ps1 install.ps1 uninstall.ps1 verify-tsf-dll.ps1 verify-tsf-identity.ps1
@@ -35,17 +37,22 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $needed = @(
     (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll'),
     (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe'),
-    (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe')
+    (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'),
+    (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe')
 )
 foreach ($artifact in $needed) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
-        throw "release 产物缺失：$artifact（先运行 cargo build --release -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater）"
+        throw "release 产物缺失：$artifact（先运行 cargo build --release -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater -p zhu-ye-tray）"
     }
 }
 
 $baseDictionary = Join-Path $repoRoot 'data\artifacts\base.zyct'
 if (-not (Test-Path -LiteralPath $baseDictionary -PathType Leaf)) {
     throw "基础词典缺失：$baseDictionary（先运行 zhu-ye-dict build-base）"
+}
+$toneSource = Join-Path $repoRoot 'data\artifacts\base.zyct.tones'
+if (-not (Test-Path -LiteralPath $toneSource -PathType Leaf)) {
+    throw "带调拼音旁挂表缺失：$toneSource（先运行 zhu-ye-dict build-base）"
 }
 $enWordbook = Join-Path $repoRoot 'data\artifacts\en.zyen'
 if (-not (Test-Path -LiteralPath $enWordbook -PathType Leaf)) {
@@ -79,11 +86,13 @@ foreach ($script in @(
     )
 }
 
-# ---- bin：DLL、设置窗口、更新器、基础词典 ----
+# ---- bin：DLL、设置窗口、更新器、托盘、基础词典 ----
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll') -Destination $binDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe') -Destination $binDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe') -Destination $binDir
+Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe') -Destination $binDir
 Copy-Item -LiteralPath $baseDictionary -Destination (Join-Path $binDir 'dictionary.zyct')
+Copy-Item -LiteralPath $toneSource -Destination (Join-Path $binDir 'dictionary.zyct.tones')
 Copy-Item -LiteralPath $enWordbook -Destination (Join-Path $binDir 'en.zyen')
 
 # ---- packs：三个领域包（D-46，可离线验收） ----
@@ -112,14 +121,16 @@ $testGuide = @'
     bin/zhu_ye_ime.dll             TSF 服务 DLL
     bin/zhu-ye-settings.exe        设置窗口
     bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
+    bin/zhu-ye-tray.exe            托盘常驻进程（中英状态图标，批六）
     bin/dictionary.zyct            基础词典
+    bin/dictionary.zyct.tones      带调拼音旁挂表（候选拼音声调，批四）
     bin/en.zyen                    英文词表（英文前缀候选，T-085）
     packs/                         三个领域包（安装时预置到 %APPDATA%）
     scripts/                       安装/卸载/校验脚本
 
 ## 测试步骤
 
-1. 解压本包到测试机，例如 `C:\ai-zhu-ye-ime-0.1.0-test`。
+1. 解压本包到测试机，例如 `C:\zhu-ye-ime-0.1.0-test`。
 2. 推荐先创建系统还原点或虚拟机快照，便于反复执行安装/卸载。
 3. 以管理员身份打开 PowerShell。
 4. 执行安装：`.\scripts\install.ps1`
@@ -137,7 +148,7 @@ $testGuide = @'
 - DLL 导出由 `.\scripts\verify-tsf-dll.ps1 -DllPath .\bin\zhu_ye_ime.dll` 校验。
 - 标识常量由 `.\scripts\verify-tsf-identity.ps1` 交叉比对（7 项）。
 - 安装器会把 `bin\dictionary.zyct` 与 `bin\en.zyen` 复制到 DLL 同目录，并把三个领域包预置到
-  `%APPDATA%\ai-zhu-ye-ime\packs\`；卸载清理程序文件但保留用户数据目录。
+  `%APPDATA%\zhu-ye-ime\packs\`；卸载清理程序文件但保留用户数据目录。
 - 本包不包含 Rust 工具链；请勿在包内运行 cargo 类命令。
 - 词典数据来源与许可证见包内 `docs/licenses.md` 与 `docs/数据清单.md`。
 '@

@@ -83,15 +83,21 @@ impl UiRect {
     }
 }
 
-/// 估算文本像素宽度：ASCII 约为 0.55 倍字高，CJK 与其他字符约 1 倍字高。
+/// 估算文本像素宽度：ASCII 约 0.58 倍字高，CJK 与其他字符约 1.06 倍字高。
+///
+/// 系数刻意**略大于**常规字形宽度（多为 0.55×em / 1.0×em）：T-126 后候选
+/// 窗/页眉主文本使用 `FW_SEMIBOLD`，宋体无真粗体、由 GDI 合成假粗，绘制时
+/// 墨迹向两侧外扩约 1px/字，若矩形恰好等于常规 advance 宽，`DT_END_ELLIPSIS`
+/// 会把最右字截成省略号（T-126 回归"你好"→"你…"）。估算偏宽是"保证矩形
+/// 放得下真实字形"的保守语义，各消费方（面板/行/页眉/拼音）统一受益。
 #[must_use]
 pub fn estimate_text_width(text: &str, font_height: i32) -> f32 {
     let mut width = 0.0f32;
     for ch in text.chars() {
         if ch.is_ascii() {
-            width += font_height.max(1) as f32 * 0.55;
+            width += font_height.max(1) as f32 * 0.58;
         } else {
-            width += font_height.max(1) as f32;
+            width += font_height.max(1) as f32 * 1.06;
         }
     }
     width
@@ -109,9 +115,9 @@ pub fn fit_text(text: &str, max_width: i32, font_height: i32) -> String {
     let mut fit = String::new();
     for ch in text.chars() {
         let char_width = if ch.is_ascii() {
-            font_height.max(1) as f32 * 0.55
+            font_height.max(1) as f32 * 0.58
         } else {
-            font_height.max(1) as f32
+            font_height.max(1) as f32 * 1.06
         };
         if width + char_width > max_width {
             fit.push('…');
@@ -181,12 +187,17 @@ mod tests {
     #[test]
     fn 文本宽度按字符估算() {
         let height = 16;
-        // ASCII 每字符 0.55 字高，CJK 每字符 1 字高。
-        assert!((estimate_text_width("ab", height) - 0.55 * 2.0 * height as f32).abs() < 0.001);
-        assert_eq!(estimate_text_width("你好", height), 2.0 * height as f32);
+        // ASCII 每字符 0.58 字高（T-126 后含假粗墨迹外扩缓冲），CJK 每字符
+        // 1.06 字高——估算刻意略大于常规字形宽度，保证 `DT_END_ELLIPSIS`
+        // 不会把加粗文本的最右字截成省略号。
+        assert!((estimate_text_width("ab", height) - 0.58 * 2.0 * height as f32).abs() < 0.001);
+        assert_eq!(
+            estimate_text_width("你好", height),
+            2.0 * 1.06 * height as f32
+        );
         assert_eq!(estimate_text_width("", height), 0.0);
         // 高度为 0 或负数时按 1px 计量，不 panic。
-        assert_eq!(estimate_text_width("a", 0), 0.55);
+        assert_eq!(estimate_text_width("a", 0), 0.58);
     }
 
     #[test]

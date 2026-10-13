@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-10-02-distribution-package-layout-and-installer.md
 #   git hash-object 2026-10-02-distribution-package-layout-and-installer.zh.md
-2026-10-02-distribution-package-layout-and-installer.md: e700bc0729e637e3d3a9310d52cf292c94650f7d
-2026-10-02-distribution-package-layout-and-installer.zh.md: f7b820d1bc8ffb762dee452d2c389f4dc22df002
+2026-10-02-distribution-package-layout-and-installer.md: ce9583108513adeda9b2e006c02894a00570251d
+2026-10-02-distribution-package-layout-and-installer.zh.md: bf6907af933d982735b97265f8dee9c1c4daea10

@@ -9,6 +9,25 @@
 /// `fit_text` 无生产代码消费者（仅测试使用），由 `zhu_ye_ui` 直接承接，不复转发。
 pub use zhu_ye_ui::{estimate_text_width, SystemColors, UiColor, UiRect, UiThemeKind, BASE_DPI};
 
+/// 音节分隔符的**显示**字符（T-134）：英文弯撇 `'`（U+2019，RIGHT SINGLE
+/// QUOTATION MARK，英文排版正式撇号）。
+///
+/// 定义在此而非 `input`，是因为候选窗模块（`candidate_window`）会被
+/// `candidate-demo` 以 `#[path]` 独立编译（无 `crate::input`），依赖必须
+/// 落在 demo 同样 include 的 `candidate_ui`。
+///
+/// T-128 初版显示用键盘直撇 `'`（U+0027），但页眉主字体为宋体（SimSun）
+/// 粗体，其 U+0027 字形是"顶部带钩的竖线"——在粗体下观感像"上逗号"
+/// （用户 2026-10-09 反馈）。T-134 换 U+2019 后宋体下为标准 9 形弯撇，
+/// 但用户目视后仍反馈"音标还是看起来是上逗号"（T-139）——宋体/雅黑的
+/// 弯引区字形本质都是逗点形状。T-139 起**绘制层**把页眉组成串里的该字符
+/// 分离出来用西文 Segoe UI 的 U+0027 直撇单独渲染（candidate_window
+/// `draw_header_mixed`），页眉观感为清晰直撇号；本字符仅作数据标记，
+/// 不作为宋体字形直接绘制。仅影响 `composing_display` 输出（显示层）；
+/// 查询键 `composing` 不含分隔符（去噪），手动边界以 `manual_seps` 存
+/// 字符下标，与显示字符无关。
+pub const SYLLABLE_SEP_DISPLAY: char = '\u{2019}';
+
 use zhu_ye_core::candidate::CandidateSource;
 
 /// 单页默认候选项数，与 1-9 数字选择保持一致。
@@ -21,6 +40,11 @@ pub struct CandidateUiItem {
     pub text: String,
     /// 译文；无译文时为空字符串。
     pub translation: String,
+    /// 拼音串（T-115 后续：候选窗按字展示"词（音节）"用；无拼音时为空）。
+    pub pinyin: String,
+    /// 空格分隔的带调拼音（T-112 后续批四：候选窗上方拼音行显示声调；
+    /// 如 `生成` → `shēng chéng`）。为空时回退 `pinyin` 的无调拼注。
+    pub pinyin_tone: String,
     /// 候选来源，用于 UI 弱化标识。
     pub source: CandidateSource,
 }
@@ -114,8 +138,10 @@ pub struct CandidateUiTheme {
     pub background: UiColor,
     /// 主文本。
     pub foreground: UiColor,
-    /// 弱化文本（译文、提示、拼音）。
+    /// 弱化文本（译文、提示、序号）。
     pub secondary: UiColor,
+    /// 拼音行小字专用色（T-122：加深灰独立于译文/序号，保证小字对比度）。
+    pub pin: UiColor,
     /// 边框。
     pub border: UiColor,
     /// 选中行背景。
@@ -135,6 +161,11 @@ pub fn theme(kind: UiThemeKind) -> CandidateUiTheme {
             background: UiColor::rgb(0xFF, 0xFF, 0xFF),
             foreground: UiColor::rgb(0x1E, 0x88, 0xE5),
             secondary: UiColor::rgb(0x99, 0x99, 0x99),
+            // T-122：拼音行深灰（对比度 ≈7:1，小字清晰；仍弱于主文本蓝色）。
+            // T-126 用户指令：拼音作辅助提示，改为较淡灰 #888888
+            //（对比度 ≈3.4:1，弱于译文/序号 #999999，视觉层级：汉字 > 译文 >
+            // 序号 ≈ 拼音 > 背景；声调可读性由 Segoe UI 字体保障）。
+            pin: UiColor::rgb(0x88, 0x88, 0x88),
             border: UiColor::rgb(0x1E, 0x88, 0xE5),
             highlight_background: UiColor::rgb(0xE6, 0xF2, 0xFE),
             highlight_foreground: UiColor::rgb(0xD3, 0x2F, 0x2F),
@@ -145,6 +176,8 @@ pub fn theme(kind: UiThemeKind) -> CandidateUiTheme {
             background: UiColor::rgb(0x20, 0x20, 0x20),
             foreground: UiColor::rgb(0x64, 0xB5, 0xF6),
             secondary: UiColor::rgb(0x9E, 0x9E, 0x9E),
+            // T-122：拼音行亮灰（比译文/序号更亮一档，深底上保持可读）。
+            pin: UiColor::rgb(0xC9, 0xC9, 0xC9),
             border: UiColor::rgb(0x42, 0xA5, 0xF5),
             highlight_background: UiColor::rgb(0x3A, 0x4A, 0x5C),
             highlight_foreground: UiColor::rgb(0xFF, 0x8A, 0x80),
@@ -168,6 +201,9 @@ pub fn theme_from_system_colors(colors: SystemColors) -> CandidateUiTheme {
         background: UiColor(bgr_to_rgb(colors.window)),
         foreground: UiColor(bgr_to_rgb(colors.window_text)),
         secondary: UiColor(bgr_to_rgb(colors.gray_text)),
+        // T-122：高对比度下拼音行沿用系统 gray_text（与译文/序号同色），
+        // 不另起对比度——系统高对比方案本身保证前景可辨。
+        pin: UiColor(bgr_to_rgb(colors.gray_text)),
         border: UiColor(bgr_to_rgb(colors.btn_face)),
         highlight_background: UiColor(bgr_to_rgb(colors.highlight)),
         highlight_foreground: UiColor(bgr_to_rgb(colors.highlight_text)),
@@ -189,6 +225,7 @@ pub fn theme_with_candidate(
         background: overlay(base.background, palette.background),
         foreground: overlay(base.foreground, palette.foreground),
         secondary: overlay(base.secondary, palette.secondary),
+        pin: overlay(base.pin, palette.pin),
         border: overlay(base.border, palette.border),
         highlight_background: overlay(base.highlight_background, palette.highlight_background),
         highlight_foreground: overlay(base.highlight_foreground, palette.highlight_foreground),
@@ -205,16 +242,28 @@ pub struct CandidateMetrics {
     pub panel_width: i32,
     /// 面板水平内边距。
     pub padding_x: i32,
-    /// 面板垂直线内边距。
+    /// 面板垂直内边距。
     pub padding_y: i32,
+    /// 页眉区顶边相对窗口顶部的距离（T-140：用户"候选框输入的最上边留白
+    /// 改为距离最上面 1px"——页眉贴顶 1dp，不再从 `padding_y` 缩进；
+    /// T-144：用户"候选框最上面的拼音距离上面从1px改为2px" → 1dp→2dp；
+    /// T-146：用户"候选框用户输入拼音距离顶部边缘改为3px" → 2dp→3dp）。
+    pub header_top: i32,
     /// 页眉高度。
     pub header_height: i32,
     /// 单行高度。
     pub row_height: i32,
     /// 行间距。
     pub row_gap: i32,
-    /// 数字标记列宽。
+    /// 序号列左缘相对面板左缘的距离（T-137：用户要求"序号离左边缘 2px 即可"
+    /// ——列整体贴边，不再从 `padding_x` 缩进；高亮块内缩 1px + 边框 1px 后
+    /// 序号从 2px 处起）。
+    pub marker_left: i32,
+    /// 数字标记列宽（= 序号列起点到主文本左对齐起点的偏移）。
     pub marker_width: i32,
+    /// 数字与候选词的固定间距（T-122：序号右对齐到列右缘后与词的间距；
+    /// T-137：用户"距离2px即可" → 6→2，序号与词贴紧）。
+    pub marker_text_gap: i32,
     /// 主文本与译文分栏间距。
     pub translation_gap: i32,
     /// 选中块相对面板左右边框的内缩量（T-043）。
@@ -229,6 +278,11 @@ pub struct CandidateMetrics {
     pub corner_radius: i32,
     /// 字体像素高度。
     pub font_height: i32,
+    /// 拼音行小字体像素高度（T-115 后续：候选词上方拼音小字，仿微软拼音布局）。
+    pub pin_font_height: i32,
+    /// 拼音行与主文本的垂直间距（T-115 后续；T-126 定稿 4dp——用户要求
+    /// "拼音和中文距离减少一半"，原 8dp 减半）。
+    pub pin_line_gap: i32,
 }
 
 impl CandidateMetrics {
@@ -242,12 +296,36 @@ impl CandidateMetrics {
             dpi,
             panel_width: dp(360.0),
             padding_x: dp(12.0),
-            padding_y: dp(10.0),
-            header_height: dp(38.0),
-            row_height: dp(36.0),
-            row_gap: dp(2.0),
+            // T-126：垂直内边距 10→12（面板上下留白更舒展）。
+            padding_y: dp(12.0),
+            // T-140：页眉贴顶 1dp（用户"候选框输入的最上边留白还是太多，
+            // 改为距离最上面 1px"），顶部不再受 `padding_y` 影响。
+            // T-144：1dp→2dp（用户"候选框最上面的拼音距离上面从1px改为2px"）
+            // ——页眉及整条候选内容带整体下移 1dp，字形带顶距窗口顶 2dp。
+            // T-146：2dp→3dp（用户"候选框用户输入拼音距离顶部边缘改为3px"）。
+            header_top: dp(3.0),
+            // T-126：页眉 38→48（顶部输入缓冲区更舒展）；T-136：48→34
+            // （用户反馈候选框顶部留白过多、重心偏下——页眉压缩 30%，
+            // 拼音区收窄，首行候选随之上移紧贴，垂直"呼吸感"收紧）。
+            // T-140：34→25（用户要求最上边留白 1px）——1dp 顶距 + 16px
+            // 字带 + ≈8dp 下缓冲；组合串字形带顶对齐窗口顶（不再垂直居中）。
+            header_height: dp(25.0),
+            // T-126：候选行 36→48（拼音带 + 主文本 + 每侧 ≈4-5px 呼吸内边距）。
+            row_height: dp(48.0),
+            // T-126：行间距 2→4（候选行之间留白加大）。
+            // T-140：4→0（用户"候选词卡片内已经有内边距，外边距直接改为0"
+            // ——行内已有上下内边距，卡片之间不再留额外间距）。
+            row_gap: 0,
             // T-037：序号列收窄使候选词更贴近序号；译文紧随主文本间距减小。
-            marker_width: dp(26.0),
+            // T-122：列宽 26→22（词起点左移 4px）并让序号右对齐、词起点固定
+            // 留 `marker_text_gap` 间距（4-8px 档），消除数字后多余留白。
+            // T-137：用户要求"序号离左边缘还是太远，缩小到 2px；序号容器能
+            // 容下 2 位数即可"——新增 `marker_left` 2（列贴面板左边，不再
+            // 从 padding_x 缩进）、列宽 22→20（恰好容双位数字 + 右对齐余量）、
+            // 间距 6→2（序号与候选词贴紧）。
+            marker_left: dp(2.0),
+            marker_width: dp(20.0),
+            marker_text_gap: dp(2.0),
             translation_gap: dp(8.0),
             // T-043：选中块贴面板左右边框（仅保留 1px 边框线内缩）。
             highlight_inset_x: 1,
@@ -255,7 +333,23 @@ impl CandidateMetrics {
             footer_height: dp(20.0),
             corner_radius: dp(8.0),
             font_height: dp(16.0),
+            // T-122：拼音行字 11→13、与主文本间距 3→4（小尺寸下更清晰、留出呼吸感）。
+            // T-126：拼音-主文本间距取用户 4-8px 档上限 8px；用户此后要求
+            // "拼音和中文距离减少一半"，定稿 4px（档内偏紧凑，拼音贴近汉字）。
+            // 字号保持 13dp（用户 12/13px 档）。
+            pin_font_height: dp(13.0),
+            pin_line_gap: dp(4.0),
         }
+    }
+
+    /// 以给定面板宽度布局（T-124 长拼音自适应）：候选窗宽度随页眉内容
+    /// 扩展后，本帧所有矩形（页眉/行/页脚）按实际客户区宽度计算。
+    /// 其余尺寸（字高/内边距/行高）保持不变。
+    #[must_use]
+    pub fn with_panel_width(&self, panel_width: i32) -> Self {
+        let mut layout = *self;
+        layout.panel_width = panel_width.max(1);
+        layout
     }
 
     /// 面板总尺寸；`rows` 为页面预留行数，0 表示无候选（只显示页眉条）。
@@ -267,7 +361,9 @@ impl CandidateMetrics {
         let footer = if rows > 0 { self.footer_height } else { 0 };
         (
             self.panel_width,
-            self.header_height + rows_height + footer + self.padding_y * 2,
+            // T-140：顶部不再计 `padding_y`（页眉贴顶 `header_top`），
+            // 底部内边距保持 `padding_y`。
+            self.header_top + self.header_height + rows_height + footer + self.padding_y,
         )
     }
 
@@ -285,14 +381,14 @@ impl CandidateMetrics {
         }
     }
 
-    /// 页眉矩形。
+    /// 页眉矩形（T-140 起：顶边 = `header_top` 贴窗口顶；T-144：2dp；T-146：3dp）。
     #[must_use]
     pub fn header_rect(&self) -> UiRect {
         UiRect {
             left: self.padding_x,
-            top: self.padding_y,
+            top: self.header_top,
             right: self.panel_width - self.padding_x,
-            bottom: self.padding_y + self.header_height,
+            bottom: self.header_top + self.header_height,
         }
     }
 
@@ -313,6 +409,88 @@ impl CandidateMetrics {
         }
     }
 
+    /// 页眉两栏宽度分配（T-124 长拼音自适应）：返回 (输入串宽, 提示宽)。
+    ///
+    /// 输入串完整优先：短输入（估算总宽仍在固定面板宽内）时不扩面板，
+    /// 提示按其内容宽度完整分配；长输入（超出固定宽）时面板按内容扩展，
+    /// 输入串完整容纳，提示最多占两者总和的 2/3（输入串至少保底 1/3，
+    /// 提示超限截断——提示是辅助信息，用户输入串不可省略）。
+    /// 提示为空或与输入串相同时提示宽返回 0（输入串单独占整行）。
+    #[must_use]
+    pub fn header_widths(&self, composition: &str, hint: &str) -> (i32, i32) {
+        let main_w = estimate_text_width(composition, self.font_height)
+            .ceil()
+            .max(1.0) as i32;
+        if hint.is_empty() || hint == composition {
+            return (main_w, 0);
+        }
+        let hint_w = estimate_text_width(hint, self.font_height).ceil().max(1.0) as i32;
+        let gap = self.translation_gap.max(1);
+        let need = main_w + gap + hint_w + self.padding_x * 2;
+        let hint_alloc = if need > self.panel_width {
+            // 超固定宽：输入串完整，提示最多占 (输入+间距+提示) 的 2/3。
+            hint_w.min(((main_w + gap + hint_w) * 2 / 3).max(1))
+        } else {
+            hint_w
+        };
+        (main_w, hint_alloc)
+    }
+
+    /// 按 `hint_alloc`（见 [`Self::header_widths`]）布局页眉输入串矩形；
+    /// 提示不显示时（alloc=0）输入串占满页眉整行。
+    #[must_use]
+    pub fn header_text_rect_with(&self, hint_alloc: i32) -> UiRect {
+        let header = self.header_rect();
+        let right = if hint_alloc > 0 {
+            header
+                .right
+                .saturating_sub(hint_alloc)
+                .saturating_sub(self.translation_gap.max(1))
+                .max(header.left + 1)
+        } else {
+            header.right
+        };
+        UiRect {
+            left: header.left,
+            top: header.top,
+            right,
+            bottom: header.bottom,
+        }
+    }
+
+    /// 按 `hint_alloc` 布局页眉右侧提示矩形（右对齐）；`hint_alloc<=0`
+    /// 时返回零宽矩形（左侧输入串占满整行）。
+    #[must_use]
+    pub fn header_hint_rect_with(&self, hint_alloc: i32) -> UiRect {
+        let header = self.header_rect();
+        let hint_width = hint_alloc.clamp(1, header.width());
+        UiRect {
+            left: header.right - hint_width,
+            top: header.top,
+            right: header.right,
+            bottom: header.bottom,
+        }
+    }
+
+    /// 面板总尺寸（内容自适应宽，T-124）；`rows` 为页面预留行数，
+    /// 0 表示无候选（只显示页眉条）。宽度按页眉输入串/提示内容扩展，
+    /// 不低于固定 `panel_width`（保底 360dp）；高度与 [`Self::panel_size`]
+    /// 一致（有候选行时底部追加页脚条，T-040）。
+    #[must_use]
+    pub fn panel_size_for(&self, rows: usize, composition: &str, hint: &str) -> (i32, i32) {
+        let (_, height) = self.panel_size(rows);
+        let (main_w, hint_alloc) = self.header_widths(composition, hint);
+        let gap = if hint_alloc > 0 {
+            self.translation_gap.max(1)
+        } else {
+            0
+        };
+        let width = self
+            .panel_width
+            .max(main_w + gap + hint_alloc + self.padding_x * 2);
+        (width, height)
+    }
+
     /// 页眉右侧拼音提示矩形。
     #[must_use]
     pub fn header_hint_rect(&self) -> UiRect {
@@ -330,7 +508,7 @@ impl CandidateMetrics {
     #[must_use]
     pub fn row_rect(&self, index: usize) -> UiRect {
         let index = i32::try_from(index).unwrap_or(i32::MAX);
-        let top = self.padding_y + self.header_height + index * (self.row_height + self.row_gap);
+        let top = self.header_top + self.header_height + index * (self.row_height + self.row_gap);
         UiRect {
             left: self.padding_x,
             top,
@@ -355,14 +533,63 @@ impl CandidateMetrics {
         }
     }
 
-    /// 行内数字标记矩形。
+    /// 行内数字标记矩形（T-137：列起点 `marker_left` 贴面板左缘，不再随
+    /// `padding_x` 缩进）。
     #[must_use]
     pub fn marker_rect(&self, row: UiRect) -> UiRect {
         UiRect {
-            left: row.left,
+            left: self.marker_left,
             top: row.top,
-            right: row.left + self.marker_width,
+            right: (self.marker_left + self.marker_width).min(row.right),
             bottom: row.bottom,
+        }
+    }
+
+    /// 行内拼音行矩形（T-126）。
+    ///
+    /// 左缘与主文本列严格对齐（序号、拼音、汉字同一左缘，上下对齐关系
+    /// 稳定）；宽度取「主文本列宽」与「拼音内容估算宽」的较大者（不超行
+    /// 右缘）——拼音比汉字窄时与汉字同宽，拼音比汉字宽时完整容纳不截断，
+    /// 拼音因此不会"乱跑"。顶边=行顶，底边=顶边+拼音字高（**纯字形区**，
+    /// 不含间距：拼音-汉字视觉间距由主文本区顶边 = 本矩形底 + `pin_line_gap`
+    /// 提供，`DT_VCENTER` 不会被带高吸收，间距精确可测）。
+    #[must_use]
+    pub fn pin_row_rect(&self, row: UiRect, main_col: UiRect, pin: &str) -> UiRect {
+        let pin_width = estimate_text_width(pin, self.pin_font_height)
+            .ceil()
+            .max(1.0) as i32;
+        let right = main_col
+            .left
+            .saturating_add(pin_width)
+            .max(main_col.right)
+            .min(row.right)
+            .max(main_col.left + 1);
+        let glyph_bottom = row.top.saturating_add(self.pin_font_height);
+        UiRect {
+            left: main_col.left,
+            top: row.top,
+            right,
+            bottom: glyph_bottom.min(row.bottom).max(row.top + 1),
+        }
+    }
+
+    /// 拼音行内容带在行内的垂直起点（T-131 行内垂直居中 / T-138 改为上对齐）。
+    ///
+    /// 内容带 = 拼音字形带（真实行高 `pin_tm_height`，T-130）+
+    /// `pin_line_gap` + 主文本带（`font_height`）。T-132 前内容带贴行顶、
+    /// 底部悬空约 12px（行高 48 减内容带 36），用户反馈"候选行内部下留白
+    /// 过多"→ 本函数改为整带垂直居中（上/下各 6px）；T-138 用户再反馈
+    /// "音标上方的内边距再减少到只剩下1px" → 顶边距固定 1dp（上 1/下 11，
+    /// 内容重心上移，与 T-136 顶部紧凑同一审美；下留白随之增大，若用户
+    /// 目视不适可再调行高/间距）。内容带高于行高时贴行顶。
+    #[must_use]
+    pub fn pin_band_top(&self, row: UiRect, pin_tm_height: i32) -> i32 {
+        let pin_band = pin_tm_height.max(self.pin_font_height);
+        let content = pin_band + self.pin_line_gap + self.font_height;
+        if row.height() > content {
+            row.top.saturating_add(1)
+        } else {
+            row.top
         }
     }
 
@@ -375,8 +602,10 @@ impl CandidateMetrics {
     /// 可占满行。
     #[must_use]
     pub fn row_split(&self, row: UiRect, main: &str, translation: &str) -> (UiRect, UiRect) {
-        let marker_right = (row.left + self.marker_width).min(row.right);
-        let usable = (row.width() - self.marker_width).max(0);
+        // T-137：词起点 = 序号列右缘（`marker_left + marker_width`），与
+        // `marker_rect` 同源；序号列贴边后主文本也整体左移。
+        let marker_right = (self.marker_left + self.marker_width).min(row.right);
+        let usable = (row.right - marker_right).max(0);
         let min_translation = if translation.is_empty() {
             1
         } else {
@@ -431,7 +660,7 @@ mod tests {
     use super::{
         display_main_text, estimate_text_width, index_marker, page_footer_label, theme,
         theme_from_system_colors, theme_with_candidate, CandidateMetrics, CandidateUiItem,
-        CandidateUiView, SystemColors, UiColor, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE,
+        CandidateUiView, SystemColors, UiColor, UiRect, UiThemeKind, BASE_DPI, DEFAULT_PAGE_SIZE,
         SLANG_LABEL,
     };
     use zhu_ye_core::candidate::CandidateSource;
@@ -454,6 +683,8 @@ mod tests {
                     } else {
                         String::new()
                     },
+                    pinyin: String::new(),
+                    pinyin_tone: String::new(),
                     source: CandidateSource::Static,
                 })
                 .collect(),
@@ -464,6 +695,8 @@ mod tests {
         CandidateUiItem {
             text: text.to_owned(),
             translation: translation.to_owned(),
+            pinyin: String::new(),
+            pinyin_tone: String::new(),
             source: CandidateSource::Slang,
         }
     }
@@ -482,6 +715,8 @@ mod tests {
         let item = CandidateUiItem {
             text: "你好".to_owned(),
             translation: "hello".to_owned(),
+            pinyin: "nihao".to_owned(),
+            pinyin_tone: "nǐ hǎo".to_owned(),
             source: CandidateSource::Static,
         };
         assert_eq!(display_main_text(&item, false), "你好");
@@ -601,12 +836,22 @@ mod tests {
         let metrics = CandidateMetrics::new(BASE_DPI);
         let (width, height) = metrics.panel_size(0);
         assert_eq!(width, metrics.panel_width);
-        assert_eq!(height, metrics.header_height + metrics.padding_y * 2);
+        // T-140：顶部贴边 `header_top`，底部内边距 `padding_y`（顶部不再×2）。
+        assert_eq!(
+            height,
+            metrics.header_top + metrics.header_height + metrics.padding_y
+        );
         // 一行面板比零行面板多一个整行 + 页脚条（有候选行才显示页脚，T-040）。
         let (_, one) = metrics.panel_size(1);
         assert_eq!(one - height, metrics.row_height + metrics.footer_height);
         // 与既有九行尺寸一致（回归保护）；T-040 起含页脚条。
-        assert_eq!(metrics.panel_size(9).1, 398 + metrics.footer_height);
+        // T-126：页眉 38→48、行高 36→48、行距 2→4、内边距 10→12
+        // → 九行面板 398 → 536（+138dp：输入缓冲区与候选行呼吸空间）。
+        // T-136：页眉 48→34（顶部压缩 30%）→ 九行面板 536 → 522（-14dp）。
+        // T-140：页眉 34→25 + 行距 4→0 + 顶距 12→1 → 九行面板 522 → 490（-32dp）。
+        // T-144：顶距 1→2（页眉贴顶 2px）→ 九行面板 490 → 491（+1dp）。
+        // T-146：顶距 2→3（页眉贴顶 3px）→ 九行面板 491 → 492（+1dp）。
+        assert_eq!(metrics.panel_size(9).1, 492);
         assert_eq!(metrics.panel_size(9).0, 360);
         // 零行面板不占页脚空间（T-031 页眉条行为保持）。
         assert_eq!(
@@ -626,14 +871,14 @@ mod tests {
             assert!(rect.height() == metrics.row_height);
             previous_bottom = rect.bottom;
             let (text, translation) = metrics.row_split(rect, "你好", "hello");
-            assert!(text.left == rect.left + metrics.marker_width);
+            assert!(text.left == metrics.marker_left + metrics.marker_width);
             assert!(text.right <= translation.left);
             assert!(translation.right == rect.right);
         }
     }
 
     #[test]
-    fn 选中块贴面板左右边框且序号留内边距() {
+    fn 选中块贴面板左右边框且序号列贴左边缘() {
         let metrics = CandidateMetrics::new(96);
         for index in 0..DEFAULT_PAGE_SIZE {
             let row = metrics.row_rect(index);
@@ -655,12 +900,15 @@ mod tests {
                 highlight.right > row.right,
                 "高亮块右缘应比内容行右缘更靠边框"
             );
-            // 序号列相对高亮块左缘保留足量内边距（不再贴高亮块边缘）。
+            // 序号列贴面板左缘（T-137：用户要求"序号离左边缘 2px"——列起点
+            // 仅比高亮块内缩（1px 边框线）多 1px）。
             let marker = metrics.marker_rect(row);
-            assert!(
-                marker.left - highlight.left >= 10,
-                "序号列起点相对高亮块左缘应至少留 10px"
+            assert_eq!(
+                marker.left - highlight.left,
+                metrics.marker_left - metrics.highlight_inset_x,
+                "序号列起点 = marker_left（贴边），仅比高亮块左缘多边框内缩"
             );
+            assert_eq!(metrics.marker_left, 2, "T-137 定稿：序号距左边缘 2px");
         }
     }
 
@@ -672,21 +920,80 @@ mod tests {
         assert!(text.right <= hint.left);
         assert!(text.left < text.right);
         assert!(hint.left < hint.right);
-
         let row = metrics.row_rect(0);
         let (main, translation) = metrics.row_split(row, "你好", "hello world");
         // 译文紧跟主文本（恰为间距，而非旧的固定 1/3 右列）。
         assert_eq!(translation.left - main.right, metrics.translation_gap);
-        assert!(main.left - row.left == metrics.marker_width);
+        assert!(main.left == metrics.marker_left + metrics.marker_width);
         // 序号列收窄于旧值（T-037 回归保护：候选词更贴近序号）。
         assert!(metrics.marker_width < 34);
+    }
+
+    #[test]
+    fn 长拼音输入时窗口自适应扩展且输入串完整() {
+        // T-124：固定 360dp 面板下，长拼音输入串 + 带调提示并存时输入串区
+        // 被提示区挤压（约 141dp），17 字符 ASCII 拼音（估算 ≈150px @16px
+        // 字高）放不下 → `DT_END_ELLIPSIS` 右侧省略号；此后窗口按内容扩展。
+        let metrics = CandidateMetrics::new(96);
+        let long = "youmeiyoushenmeren";
+        let long_hint = "yǒu méi yǒu shén me rén";
+        let est = estimate_text_width(long, metrics.font_height).ceil() as i32;
+        let (main_w, hint_alloc) = metrics.header_widths(long, long_hint);
+        assert!(hint_alloc >= 1, "提示应分配非零宽度");
+        let (width, _) = metrics.panel_size_for(1, long, long_hint);
+        assert!(width > metrics.panel_width, "长输入+提示应扩展面板宽度");
+        // 与 paint 一致：布局按实际客户区宽度（with_panel_width）。
+        let layout = metrics.with_panel_width(width);
+        let main_rect = layout.header_text_rect_with(hint_alloc);
+        assert!(main_rect.width() >= est, "输入串区应容纳完整拼音");
+        assert!(main_w == est);
+        let hint_rect = layout.header_hint_rect_with(hint_alloc);
+        assert!(main_rect.right <= hint_rect.left, "输入串与提示不得重叠");
+        assert!(hint_rect.left < hint_rect.right);
+    }
+
+    #[test]
+    fn 页眉提示按内容分配且输入串完整优先() {
+        let metrics = CandidateMetrics::new(96);
+        let long = "youmeiyoushenmeren";
+        let long_hint = "yǒu méi yǒu shén me rén";
+        let hint_full = estimate_text_width(long_hint, metrics.font_height).ceil() as i32;
+        let gap = metrics.translation_gap.max(1);
+        let (main_w, hint_alloc) = metrics.header_widths(long, long_hint);
+        assert!(hint_alloc >= 1, "提示应分配非零宽度");
+        assert!(
+            hint_alloc <= (main_w + gap + hint_full) * 2 / 3,
+            "提示不得挤占输入串至 1/3 以下"
+        );
+        // 提示未超上限时按内容完整分配（不无故压缩提示）。
+        assert!(
+            hint_alloc >= hint_full.min(main_w + gap + hint_full),
+            "未超限的提示应完整分配"
+        );
+        let (width, _) = metrics.panel_size_for(1, long, long_hint);
+        let layout = metrics.with_panel_width(width);
+        let text = layout.header_text_rect_with(hint_alloc);
+        assert!(
+            text.width() >= estimate_text_width(long, metrics.font_height) as i32,
+            "输入串完整容纳"
+        );
+        let hint = layout.header_hint_rect_with(hint_alloc);
+        assert!(text.right <= hint.left, "输入串与提示不得重叠");
+        assert!(hint.left < hint.right);
+        // 短输入 + 短提示：保持固定面板宽，提示完整分配。
+        let (main2, hint2) = metrics.header_widths("你好", "nǐ hǎo");
+        let need2 = main2 + gap + hint2 + metrics.padding_x * 2;
+        let (width, _) = metrics.panel_size_for(1, "你好", "nǐ hǎo");
+        assert_eq!(width, metrics.panel_width, "短输入保持固定宽");
+        assert!(need2 <= metrics.panel_width, "短输入提示完整放得下");
     }
 
     #[test]
     fn 动态分栏译文紧跟主文本且保底宽度() {
         let metrics = CandidateMetrics::new(96);
         let row = metrics.row_rect(0);
-        let usable = row.width() - metrics.marker_width;
+        let marker_right = metrics.marker_left + metrics.marker_width;
+        let usable = row.right - marker_right;
         let min_translation = usable / 3;
         let max_main = usable - min_translation - metrics.translation_gap;
 
@@ -783,5 +1090,161 @@ mod tests {
         assert_eq!(dark.highlight_foreground, UiColor::rgb(0xFF, 0x8A, 0x80));
         assert_eq!(dark.marker, dark.secondary);
         assert_ne!(dark.marker, dark.foreground);
+        // T-126：浅色主题拼音行 = 用户指定辅助提示淡灰 #888888。
+        assert_eq!(light.pin, UiColor::rgb(0x88, 0x88, 0x88));
+    }
+
+    #[test]
+    fn 拼音行色独立于序号译文且对比更强() {
+        // T-122：拼音行用专用加深灰——浅色底下比 secondary 更暗、深色底下更亮，
+        // 保证小字可读；高对比度沿用系统 gray_text（与译文同源）。
+        let light = theme(UiThemeKind::Light);
+        let dark = theme(UiThemeKind::Dark);
+        assert_ne!(light.pin, light.secondary, "拼音行不得沿用译文浅灰");
+        assert_ne!(dark.pin, dark.secondary, "拼音行不得沿用译文浅灰");
+        // 浅色底：pin 应比 secondary 更暗（灰度分量更低）。
+        assert!((light.pin.0 >> 16) < (light.secondary.0 >> 16));
+        assert!((light.pin.0 & 0xFF) < (light.secondary.0 & 0xFF));
+        // 深色底：pin 应比 secondary 更亮。
+        assert!(
+            (dark.pin.0 & 0xFF) > (dark.secondary.0 & 0xFF),
+            "深色底拼音行应亮于译文/序号"
+        );
+    }
+
+    #[test]
+    fn 序号与候选词间距稳定在二像素且序号列贴边() {
+        // T-122：数字右对齐于标记列右缘并让出 marker_text_gap（4-8px 档）；
+        // T-137：用户"序号离左边缘还是太远，希望缩小，距离2px即可；序号
+        // 容器能容下2位数的宽度即可" → 列起点 marker_left=2（贴边）、列宽
+        // 22→20（恰好双位数字 + 右对齐余量）、间距 6→2（序号与词贴紧）。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        assert_eq!(metrics.marker_left, 2, "T-137 定稿：序号距左边缘 2px");
+        assert_eq!(metrics.marker_text_gap, 2, "T-137 定稿：序号-词间距 2px");
+        // 列宽须容双位数字（10-18）右对齐：数字全宽 ≤ 列宽 - 间距。
+        assert!(
+            metrics.marker_width - metrics.marker_text_gap >= 16,
+            "双位数字可容下"
+        );
+        // 词起点比旧值（26px）明显左移，且标记列仍留有双位数字空间。
+        assert!(metrics.marker_width < 26, "词起点应比旧版更靠左");
+        // 拼音行字号提升且仍小于主文本（层级：主文本 > 拼音）。
+        assert!(metrics.pin_font_height > 12, "拼音行应大于 12px");
+        assert!(metrics.pin_font_height < metrics.font_height);
+        // T-126：拼音与汉字垂直间距先取 4-8px 档上限 8px，用户随后要求
+        // "拼音和中文距离减少一半"→ 定稿 4px（档内偏紧凑）。
+        assert!(
+            (4..=8).contains(&metrics.pin_line_gap),
+            "拼音行与主文本间距应在 4-8px，实际 {}",
+            metrics.pin_line_gap
+        );
+        assert_eq!(metrics.pin_line_gap, 4, "用户要求间距减半，定稿 4px");
+        // 拼音带（字号+行距）不应挤占主文本区：行高 48 ≥ 拼音带 + 16px 主字。
+        let pin_band = metrics.pin_font_height + metrics.pin_line_gap;
+        assert!(metrics.row_height - pin_band >= metrics.font_height);
+    }
+
+    #[test]
+    fn 拼音与主文本对齐且行内留呼吸空间() {
+        // T-126 ①④：拼音字形区从行顶开始、高度=字高（不含间距），主文本区
+        // 顶边 = 拼音字形区底 + pin_line_gap —— 视觉间距精确等于 pin_line_gap
+        // （`DT_VCENTER` 无居中余量可吸收）；行内剩余高度作为主文本下方留白，
+        // 让候选项不拥挤。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        let row = metrics.row_rect(0);
+        let (main_col, _) = metrics.row_split(row, "你好", "");
+        let pin_rect = metrics.pin_row_rect(row, main_col, "nǐ hǎo");
+        // 拼音行与汉字列同左缘（上下严格对齐）。
+        assert_eq!(pin_rect.left, main_col.left);
+        // 拼音字形区底 = 行顶 + 字高（间距不含在拼音矩形内）。
+        assert_eq!(pin_rect.bottom, row.top + metrics.pin_font_height);
+        // 拼音宽于汉字时右缘 = 内容估算宽（按内容放宽、不截断），
+        // 左缘保持与汉字列对齐（上下严格对齐关系）。
+        let est = estimate_text_width("nǐ hǎo", metrics.pin_font_height).ceil() as i32;
+        assert_eq!(pin_rect.right, main_col.left + est);
+        assert!(pin_rect.right >= main_col.right, "拼音更宽时完整容纳");
+        // 拼音窄于汉字时与汉字列同宽（宽度对齐，拼音不乱跑）。
+        let short = metrics.pin_row_rect(row, main_col, "ni");
+        assert_eq!(short.right, main_col.right);
+        // 主文本区顶边 = 拼音字形区底 + pin_line_gap（视觉间距精确 = 4px）。
+        let main_top = pin_rect.bottom + metrics.pin_line_gap;
+        assert!(main_top - row.top >= metrics.pin_font_height + 4);
+        assert_eq!(
+            main_top - row.top,
+            metrics.pin_font_height + metrics.pin_line_gap
+        );
+        // 行内呼吸：主文本字形带下方仍留有 ≥ 主字号 + 4px 的行内空间。
+        let main_zone = row.bottom - main_top;
+        assert!(main_zone >= metrics.font_height + 4, "行内应留呼吸空间");
+        // 整个拼音字形区不越出行底。
+        assert!(pin_rect.bottom <= row.bottom);
+    }
+
+    #[test]
+    fn 长拼音超出汉字宽度时完整容纳不截断() {
+        // T-126 ④：拼音宽度取 max(汉字列宽, 拼音估算宽)——"zhang hao" 比
+        // 两个汉字宽时按拼音内容放宽（不截断），且不越过行右缘。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        let row = metrics.row_rect(0);
+        let (main_col, _) = metrics.row_split(row, "你好", "");
+        let pin_rect = metrics.pin_row_rect(row, main_col, "zhang hao");
+        assert_eq!(pin_rect.left, main_col.left);
+        assert!(pin_rect.right > main_col.right, "长拼音应按内容放宽");
+        assert!(pin_rect.right <= row.right, "拼音不得越出行右缘");
+        // 行右缘边界：超行宽时收缩到行右缘（不溢出窗口）。
+        let (wide_main, _) = metrics.row_split(row, "这是一个特别长的词条用于测试", "");
+        let edge = metrics.pin_row_rect(row, wide_main, "zhang hao shi yin");
+        assert!(edge.right <= row.right);
+        assert!(edge.right >= edge.left);
+    }
+
+    #[test]
+    fn 拼音行内容带顶边距行顶1px() {
+        // T-131：内容带（拼音字形带 + pin_line_gap + 主文本带）此前在行内
+        // 居中（上/下各 6px）；T-138 用户"音标上方的内边距再减少到只剩下
+        // 1px" → 顶边固定 = 行顶 + 1（上 1/下 11，重心上移）。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        let row = metrics.row_rect(0);
+        let tm = metrics.pin_font_height + 3; // T-130 真实行高（Segoe UI 13px）
+        let top = metrics.pin_band_top(row, tm);
+        // 常规行：顶边 = 行顶 + 1dp。
+        assert_eq!(top, row.top + 1);
+        // 拼音字形带底 = 内容带顶 + 拼音带；主文本顶 = 字形带底 + pin_line_gap；
+        // 主文本带底距行底 = 行高 - (1 + 内容带 36) = 48 - 37 = 11（T-138：
+        // 留白由上 6/下 6 变为上 1/下 11）。
+        let pin_band = tm.max(metrics.pin_font_height);
+        assert_eq!(
+            top + pin_band + metrics.pin_line_gap + metrics.font_height,
+            row.bottom - 11
+        );
+        // 内容带高于行高时贴行顶（不越出行）。
+        let tiny = UiRect {
+            top: 40,
+            left: 0,
+            right: 100,
+            bottom: 60,
+        };
+        assert_eq!(metrics.pin_band_top(tiny, tm), tiny.top);
+    }
+
+    #[test]
+    fn 页眉贴顶距离为3px且整条候选带随之下移() {
+        // T-144：用户"候选框最上面的拼音距离上面从1px改为2px"——页眉矩形
+        // 顶边 = 2dp；首候选行、面板高度等全部从 `header_top` 派生，整体 +1。
+        // T-146：2dp→3dp（用户"候选框用户输入拼音距离顶部边缘改为3px"）——+1。
+        let metrics = CandidateMetrics::new(BASE_DPI);
+        assert_eq!(metrics.header_top, 3);
+        assert_eq!(metrics.header_rect().top, 3);
+        assert_eq!(metrics.header_rect().bottom, 3 + metrics.header_height);
+        assert_eq!(
+            metrics.row_rect(0).top,
+            metrics.header_top + metrics.header_height
+        );
+        // 零行（仅页眉条）与九行面板同步 +1（T-140 基准 490 → 491 → T-146 492）。
+        assert_eq!(
+            metrics.panel_size(0).1,
+            metrics.header_top + metrics.header_height + metrics.padding_y
+        );
+        assert_eq!(metrics.panel_size(9).1, 492);
     }
 }

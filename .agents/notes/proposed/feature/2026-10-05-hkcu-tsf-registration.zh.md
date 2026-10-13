@@ -16,9 +16,9 @@ Status: proposed
 
 TSF 文本输入处理器同样支持 per-user 注册：把 HKLM 布局镜像到 HKCU（无需提权）。
 
-- DLL 与词典放用户目录：`%LOCALAPPDATA%\ai-zhu-ye-ime\tsf\`（版本化
+- DLL 与词典放用户目录：`%LOCALAPPDATA%\zhu-ye-ime\tsf\`（版本化
   `zhu-ye-ime-<sha8>.dll` + `dictionary.zyct`）；基础包目录解析
-  （`tsf.rs resolve_base_dir`）会回退到 `%APPDATA%\ai-zhu-ye-ime`，故 `en.zyen`
+  （`tsf.rs resolve_base_dir`）会回退到 `%APPDATA%\zhu-ye-ime`，故 `en.zyen`
   等包放那里。
 - `HKCU\SOFTWARE\Microsoft\CTF\TIP\{TipClsid}` 与 HKLM 同构子树：
   `Category\Category\{KeyboardCategoryGuid}\{TipClsid}`（空键）、
@@ -27,8 +27,8 @@ TSF 文本输入处理器同样支持 per-user 注册：把 HKLM 布局镜像到
   `Enable`(DWORD 1)/`IconFile`=DLL/`IconIndex`(DWORD 0)）。
 - `HKCU\SOFTWARE\Classes\CLSID\{TipClsid}`（默认值=显示名）+ `\InprocServer32`
   （默认值=DLL 路径，`ThreadingModel`=`Apartment`）。
-- 免 admin 取证：`%APPDATA%\ai-zhu-ye-ime\config.json` 设 `log_level: "debug"` 开启
-  产品轨日志（`%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`）——`C:\zhu-ye-test`
+- 免 admin 取证：`%APPDATA%\zhu-ye-ime\config.json` 设 `log_level: "debug"` 开启
+  产品轨日志（`%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log`）——`C:\zhu-ye-test`
   哨兵路径需要 admin 可写根目录。
 - 不经窗口焦点、直接证明系统接受了注册：`msctf.dll!TF_CreateInputProcessorProfiles`
   （导出函数，无需 COM 类 GUID）拿到 profiles 对象，按 `ITfInputProcessorProfiles`

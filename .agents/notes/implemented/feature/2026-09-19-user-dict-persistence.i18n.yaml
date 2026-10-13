@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-09-19-user-dict-persistence.md
 #   git hash-object 2026-09-19-user-dict-persistence.zh.md
-2026-09-19-user-dict-persistence.md: dc9e79802156a9d3a754305abfda044d5770cc2d
-2026-09-19-user-dict-persistence.zh.md: c9279f17578fd5b851758182464ad3c6ff30052e
+2026-09-19-user-dict-persistence.md: d2afed521a043f7c24b3e790b0f52555b2779e24
+2026-09-19-user-dict-persistence.zh.md: 19cf65697af7e6c0ddd40d094803cd1fa9baf70a

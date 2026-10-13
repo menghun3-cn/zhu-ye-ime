@@ -27,8 +27,8 @@
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
-use windows::core::{implement, ComObject, IUnknown, Interface, Result, GUID, HRESULT};
-use windows::Win32::Foundation::{E_NOINTERFACE, E_NOTIMPL, E_POINTER, POINT, RECT};
+use windows::core::{implement, ComObject, IUnknown, Interface, Result, GUID, HRESULT, PCWSTR};
+use windows::Win32::Foundation::{E_NOINTERFACE, E_POINTER, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW, DeleteDC,
     DeleteObject, DrawTextW, GetDC, GetStockObject, ReleaseDC, SelectObject, SetBkMode,
@@ -37,12 +37,15 @@ use windows::Win32::Graphics::Gdi::{
     DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, HBITMAP, HFONT, LOGFONTW, OUT_DEFAULT_PRECIS,
     TRANSPARENT,
 };
+use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::TextServices::{
     ITfLangBarItem, ITfLangBarItemButton, ITfLangBarItemButton_Impl, ITfLangBarItemMgr,
-    ITfLangBarItemSink, ITfLangBarItem_Impl, ITfThreadMgr, TfLBIClick, TF_LANGBARITEMINFO,
-    TF_LBI_DESC_MAXLEN, TF_LBI_ICON, TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_SHOWNINTRAY,
+    ITfLangBarItemSink, ITfLangBarItem_Impl, ITfMenu, ITfThreadMgr, TfLBIClick, TF_LANGBARITEMINFO,
+    TF_LBI_DESC_MAXLEN, TF_LBI_ICON, TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_BTN_MENU,
+    TF_LBI_STYLE_SHOWNINTRAY,
 };
-use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
+use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO, SW_SHOWNORMAL};
 
 use crate::input::InputMode;
 use crate::tsf::CLSID_ZHU_YE_TIP;
@@ -58,6 +61,46 @@ const TF_LBI_CLK_LEFT: u32 = 1;
 const BG_COLOR_CHINESE: u32 = 0xFFE5_881E;
 /// 英文模式图标底色（中性灰 #757575；同上，alpha=0xFF 不透明）。
 const BG_COLOR_ENGLISH: u32 = 0xFF75_7575;
+
+/// 语言栏右击菜单中"设置"项的菜单 ID（T-114）。
+const SETTINGS_MENU_ID: u32 = 1;
+
+/// 查找设置窗口可执行文件：优先 DLL 同目录，其次上级 bin\ 子目录（发行包布局）。
+/// 纯函数便于单测（DLL 路径由调用方注入）。
+fn find_settings_exe(dll_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidates = [
+        dll_dir.join("zhu-ye-settings.exe"),
+        dll_dir.join("bin").join("zhu-ye-settings.exe"),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// 打开竹叶输入法设置窗口（D-26 已规划的 ITfFnConfigure 拉起逻辑，T-114）。
+/// 定位不到设置程序时只记日志，不做 UI 报错（DLL 热路径禁止打扰输入）。
+pub(crate) fn launch_settings() {
+    let mut buf = [0u16; 1024];
+    let len = unsafe { GetModuleFileNameW(None, &mut buf) };
+    if len == 0 {
+        return;
+    }
+    let dll_path = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]));
+    let Some(dll_dir) = dll_path.parent() else {
+        return;
+    };
+    let Some(exe) = find_settings_exe(dll_dir) else {
+        crate::tsf::debug_log("zhu-ye: settings exe not found beside dll");
+        return;
+    };
+    let wide = to_utf16_null(&exe.to_string_lossy());
+    unsafe {
+        ShellExecuteW(None, None, PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL);
+    }
+}
+
+/// 中文文本转以空字符结尾的 UTF-16（供 PCWSTR 类 API 使用）。
+fn to_utf16_null(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
 
 // ---------------------------------------------------------------------------
 // ITfSource 胶水接口（windows 0.61 未绑定，按 crate 惯例补定义）
@@ -419,6 +462,9 @@ impl ITfLangBarItem_Impl for LangBarModeButton_Impl {
             return Err(E_POINTER.into());
         }
         // szDescription 是定长数组：逐元素拷贝 + 空终止，不做定长转换。
+        // 完整品牌名：Win11 任务栏输入法指示器取 TIP 语言档注册的 IconFile
+        // 图标资源（T-112b 嵌入 DLL 的"竹"字 ICO）；本字段在语言栏/回退
+        // 场景显示完整名称，不再用单字占位（单字"竹"仅用于图标本身）。
         let mut desc = [0u16; TF_LBI_DESC_MAXLEN as usize];
         for (slot, unit) in desc
             .iter_mut()
@@ -429,8 +475,9 @@ impl ITfLangBarItem_Impl for LangBarModeButton_Impl {
         let info = TF_LANGBARITEMINFO {
             clsidService: CLSID_ZHU_YE_TIP,
             guidItem: LANG_BAR_ITEM_GUID,
-            // 普通按钮 + 允许在系统托盘/任务栏指示器显示（Win10；Win11 忽略）。
-            dwStyle: TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_SHOWNINTRAY,
+            // 普通按钮 + 允许在系统托盘/任务栏指示器显示（Win10；Win11 忽略）
+            // + 支持右击菜单（T-114 设置入口）。
+            dwStyle: TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_SHOWNINTRAY | TF_LBI_STYLE_BTN_MENU,
             ulSort: 0,
             szDescription: desc,
         };
@@ -469,7 +516,7 @@ unsafe fn write_lang_bar_info(pinfo: *mut TF_LANGBARITEMINFO, info: TF_LANGBARIT
 impl ITfLangBarItemButton_Impl for LangBarModeButton_Impl {
     fn OnClick(&self, click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
         // TF_LBI_CLK_LEFT（1）：切换中英模式并刷新图标（T-046）。
-        // 其他点击（如右击弹出菜单）当前不处理，返回成功避免语言栏报错。
+        // 右击由语言栏经 InitMenu/OnMenuSelect 走菜单（T-114 设置项）。
         if click == TfLBIClick(TF_LBI_CLK_LEFT as i32) {
             if let Some(mode) = (self.click_handler)() {
                 self.set_mode(mode);
@@ -478,15 +525,30 @@ impl ITfLangBarItemButton_Impl for LangBarModeButton_Impl {
         Ok(())
     }
 
-    fn InitMenu(
-        &self,
-        _pmenu: windows::core::Ref<'_, windows::Win32::UI::TextServices::ITfMenu>,
-    ) -> Result<()> {
-        Err(E_NOTIMPL.into())
+    fn InitMenu(&self, pmenu: windows::core::Ref<'_, ITfMenu>) -> Result<()> {
+        // T-114：语言栏右击菜单提供"设置"入口（D-26）。
+        let Some(menu) = pmenu.cloned() else {
+            return Err(E_POINTER.into());
+        };
+        let label = to_utf16_null("设置(&S)…");
+        unsafe {
+            menu.AddMenuItem(
+                SETTINGS_MENU_ID,
+                0,
+                HBITMAP::default(),
+                HBITMAP::default(),
+                &label[..label.len() - 1],
+                std::ptr::null_mut(),
+            )?;
+        }
+        Ok(())
     }
 
-    fn OnMenuSelect(&self, _wid: u32) -> Result<()> {
-        Err(E_NOTIMPL.into())
+    fn OnMenuSelect(&self, wid: u32) -> Result<()> {
+        if wid == SETTINGS_MENU_ID {
+            launch_settings();
+        }
+        Ok(())
     }
 
     fn GetIcon(&self) -> Result<HICON> {
@@ -579,6 +641,26 @@ mod tests {
     use windows::Win32::Graphics::Gdi::GetDIBits;
     use windows::Win32::UI::TextServices::ITfLangBarItemSink_Impl;
     use windows::Win32::UI::WindowsAndMessaging::GetIconInfo;
+
+    /// T-114：设置可执行文件定位——同目录优先、发行包 bin\ 备选、缺失返回 None。
+    #[test]
+    fn find设置可执行文件路径() {
+        let base = std::env::temp_dir().join("zhu-ye-langbar-test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("tsf")).unwrap();
+        std::fs::create_dir_all(base.join("bin")).unwrap();
+        std::fs::write(base.join("tsf").join("zhu-ye-settings.exe"), b"x").unwrap();
+        std::fs::write(base.join("bin").join("zhu-ye-settings.exe"), b"x").unwrap();
+        // 同目录命中优先于 bin\。
+        let found = find_settings_exe(&base.join("tsf")).unwrap();
+        assert_eq!(found, base.join("tsf").join("zhu-ye-settings.exe"));
+        // 同目录无、bin\ 有 → 取 bin\。
+        let found = find_settings_exe(&base.join("bin")).unwrap();
+        assert_eq!(found, base.join("bin").join("zhu-ye-settings.exe"));
+        // 均缺失 → None。
+        assert!(find_settings_exe(&base.join("missing")).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
     /// 桩 sink：记录收到的 OnUpdate 标志位。
     #[implement(ITfLangBarItemSink)]
     struct FakeSink {
@@ -749,6 +831,13 @@ mod tests {
         assert_ne!(info.dwStyle & TF_LBI_STYLE_BTN_BUTTON, 0);
         assert_ne!(info.dwStyle & TF_LBI_STYLE_SHOWNINTRAY, 0);
         assert_eq!(info.szDescription[0], '竹' as u16);
+        // 完整品牌名（图标由 DLL 资源提供"竹"字，"竹叶输入法"是正式名称）：
+        // 首字"竹"、名称逐字就位、末尾空终止。
+        let name = "竹叶输入法（中英切换）";
+        for (i, unit) in name.encode_utf16().enumerate() {
+            assert_eq!(info.szDescription[i], unit);
+        }
+        assert_eq!(info.szDescription[name.encode_utf16().count()], 0);
     }
 
     /// 图标可渲染：中/英两枚图标创建成功，且像素级校验——底色

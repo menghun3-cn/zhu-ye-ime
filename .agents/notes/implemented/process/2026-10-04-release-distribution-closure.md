@@ -50,7 +50,7 @@ exactly that). Assembles `target/release-assets/<v>/`:
 - `manifest.json`: `build-manifest` (pack version = publish date, `min_engine
   0.1.1`) -> `sign-manifest` -> `verify-manifest` (the per-pack hash/size recheck
   item 7.4 of the release checklist);
-- `ai-zhu-ye-ime-<v>.zip` (renamed copy of the `package-portable.ps1` output);
+- `zhu-ye-ime-<v>.zip` (renamed copy of the `package-portable.ps1` output);
 - `SHA256SUMS.txt` (upload checklist for `gh release upload`).
 
 ### `scripts/verify-release-e2e.ps1`: full-chain preflight

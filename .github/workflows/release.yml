@@ -89,7 +89,7 @@ jobs:
             -OutputDir (Join-Path (Get-Location) $dir) `
             -Sha256File (Join-Path (Get-Location) "$dir/SHA256SUMS.txt")
 
-      - name: 端到端验证（apply 落地 / 哈希一致 / 篡改自愈 / 篡改 manifest 拒绝）
+      - name: 端到端验证（apply 落地 / 哈希一致 / 篡改自愈 / 篡改 manifest 拒绝 / app.json 良性展示与篡改降级）
         shell: pwsh
         run: ./scripts/verify-release-e2e.ps1
 
@@ -99,20 +99,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = "${{ github.ref_name }}"
-          if ($version -like 'v*') { $version = $version.Substring(1) }
+          # 版本唯一源 = Cargo.toml workspace.package.version（与构建步骤一致）；
+          # 不能用 github.ref_name——workflow_dispatch 时 ref_name 是 default 分支名。
+          $match = Select-String -LiteralPath 'Cargo.toml' -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if ($null -eq $match) { throw '无法读取 Cargo.toml version。' }
+          $version = $match.Matches[0].Groups[1].Value
           $dir = "target/release-assets/$version"
           if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
             throw "发布资产目录缺失: $dir"
           }
           $assets = @(
             "$dir/SHA256SUMS.txt",
-            "$dir/ai-zhu-ye-ime-$version.zip",
+            "$dir/zhu-ye-ime-$version.zip",
             "$dir/ai-zhu-ye-ime-setup-$version.exe",
             "$dir/packs/it.zyct",
             "$dir/packs/med.zyct",
             "$dir/packs/slang.zyct",
-            "$dir/packs/manifest.json"
+            "$dir/packs/manifest.json",
+            "$dir/app.json"
           )
           $tag = "v$version"
           $prerelease = if ($version -match '-') { '--prerelease' } else { '' }
@@ -121,6 +125,11 @@ jobs:
           & ./scripts/release-notes-from-changelog.ps1 -Version $version -NotesFile $notesFile
           if ($LASTEXITCODE -ne 0) { throw "生成发布说明失败" }
           # Release 可能已存在（重跑幂等）；失败忽略后走 upload --clobber。
+          # 坑（2026-10-05 实测）：删除 tag 重打会使已发布的 release 被 GitHub
+          # 置为 untagged + draft（tag 删除行为），create 幂等失败不会自动恢复——
+          # 重打 tag 后必须手动 PATCH 恢复关联与发布状态：
+          #   gh api -X PATCH repos/<owner>/<repo>/releases/<id> \
+          #     -f tag_name=<tag> -F draft=false -F prerelease=false
           gh release create $tag --title $tag --notes-file $notesFile $prerelease --latest 2>$null
           gh release upload $tag @assets --clobber
 
@@ -130,11 +139,17 @@ jobs:
         env:
           ZHU_YE_UPDATES_TOKEN: ${{ secrets.ZHU_YE_UPDATES_TOKEN }}
         run: |
-          $version = "${{ github.ref_name }}"
-          if ($version -like 'v*') { $version = $version.Substring(1) }
+          # 版本统一读 Cargo.toml（同上传步骤；dispatch 时 ref_name 是分支名）。
+          $match = Select-String -LiteralPath 'Cargo.toml' -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          if ($null -eq $match) { throw '无法读取 Cargo.toml version。' }
+          $version = $match.Matches[0].Groups[1].Value
           $packsDir = "target/release-assets/$version/packs"
           if (-not (Test-Path -LiteralPath "$packsDir\manifest.json" -PathType Leaf)) {
             throw "feed 文件缺失: $packsDir\manifest.json"
+          }
+          $appJsonPath = "target/release-assets/$version/app.json"
+          if (-not (Test-Path -LiteralPath $appJsonPath -PathType Leaf)) {
+            throw "feed 文件缺失: $appJsonPath"
           }
           $token = $env:ZHU_YE_UPDATES_TOKEN
           if (-not $token) {
@@ -144,8 +159,9 @@ jobs:
           }
           $env:GH_TOKEN = $token
           $feedTag = "feed-v$version"
-          $sha = "${{ github.sha }}"
-          gh release create $feedTag --repo menghun3-cn/zhu-ye-updates --title $feedTag --notes "竹叶输入法更新源 feed v$version (commit $sha)" --target $sha 2>$null
+          # 不带 --target：主仓 commit 不是镜像仓对象，create 会 404 且被吞导致
+          # upload 报 release not found（2026-10-05 修复）；默认落到镜像仓 main tip。
+          gh release create $feedTag --repo menghun3-cn/zhu-ye-updates --title $feedTag --notes "竹叶输入法更新源 feed v$version (commit ${{ github.sha }})" 2>$null
           gh release upload $feedTag --repo menghun3-cn/zhu-ye-updates `
-            "$packsDir\manifest.json" "$packsDir\it.zyct" "$packsDir\med.zyct" "$packsDir\slang.zyct" --clobber
+            "$packsDir\manifest.json" "$packsDir\it.zyct" "$packsDir\med.zyct" "$packsDir\slang.zyct" "$appJsonPath" --clobber
           Write-Host "更新源镜像已发布: https://github.com/menghun3-cn/zhu-ye-updates/releases/tag/$feedTag"

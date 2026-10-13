@@ -10,19 +10,22 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
     CreateFontIndirectW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
     FillRect, GetCurrentObject, GetDC, GetDIBits, GetMonitorInfoW, GetObjectW, GetStockObject,
-    GetSysColor, InvalidateRect, MonitorFromWindow, ReleaseDC, RoundRect, SelectObject, SetBkMode,
-    SetTextColor, UpdateWindow, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_GRAYTEXT,
-    COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET,
-    DEFAULT_GUI_FONT, DEFAULT_PITCH, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
-    DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW,
-    MONITORINFO, MONITOR_DEFAULTTONEAREST, OBJ_FONT, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL,
-    PS_SOLID, SRCCOPY, TRANSPARENT,
+    GetSysColor, GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, MonitorFromWindow,
+    ReleaseDC, RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, AC_SRC_ALPHA,
+    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CLEARTYPE_QUALITY,
+    CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
+    COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DEFAULT_PITCH,
+    DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE,
+    FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, OBJ_FONT, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_NULL, PS_SOLID,
+    SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -41,11 +44,41 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::candidate_ui::SYLLABLE_SEP_DISPLAY;
 use crate::candidate_ui::{
     display_main_text, index_marker, theme, theme_from_system_colors, theme_with_candidate,
     CandidateMetrics, CandidateUiTheme, CandidateUiView, SystemColors, UiColor, UiRect,
     UiThemeKind, BASE_DPI,
 };
+
+/// 拼音拼注（T-115 后续）：把"词"切分音节并按空格拼接，供候选词**上方**的
+/// 小号拼音行显示，如 `生成` + `shengcheng` → `sheng cheng`。
+/// 输入非 CJK、拼音为空、无法按标准音节表切分或音节数与字数不符时原样返回。
+#[must_use]
+fn spell_pinyin(word: &str, pinyin: &str) -> String {
+    if word.is_empty() || pinyin.is_empty() || !pinyin.is_ascii() {
+        return word.to_owned();
+    }
+    let word_chars: Vec<char> = word.chars().collect();
+    if word_chars.is_empty()
+        || word_chars
+            .iter()
+            .any(|ch| !('一'..='\u{9fff}').contains(ch))
+    {
+        return word.to_owned();
+    }
+    let Some(syllables) =
+        zhu_ye_core::pinyin::segment_all(&zhu_ye_core::pinyin::SyllableTable::standard(), pinyin)
+            .into_iter()
+            .next()
+    else {
+        return word.to_owned();
+    };
+    if syllables.len() != word_chars.len() {
+        return word.to_owned();
+    }
+    syllables.join(" ")
+}
 
 /// 窗口主题偏好；`Auto` 跟随系统深浅色与高对比度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -68,6 +101,9 @@ pub struct CandidateWindowOptions {
     pub shot_path: Option<PathBuf>,
     /// 自定义主题文件（T-088 / FR-048）；`Some` 时叠加 `candidate` 节配色。
     pub custom_theme: Option<zhu_ye_core::ThemeFile>,
+    /// 是否显示拼音行及声调（T-127）；TSF 侧由 `config.json` 的
+    /// `candidate_show_pin` 决定，演示工具默认 `true`。
+    pub show_pin: bool,
 }
 
 /// 候选窗放置点：`anchor` 为组成区屏幕坐标左边界/底部，窗口显示在其下方。
@@ -87,6 +123,9 @@ pub struct CandidateWindow {
     theme_pref: ThemePreference,
     /// 自定义主题文件（T-088 / FR-048）；`Some` 时解析配色叠加 `candidate` 节。
     custom_theme: Option<zhu_ye_core::ThemeFile>,
+    /// 是否显示拼音行及声调（T-127）；`false` 时候选行回到无拼音形态
+    /// （主文本与序号整行垂直居中）。
+    show_pin: bool,
 }
 
 impl CandidateWindow {
@@ -102,11 +141,18 @@ impl CandidateWindow {
     /// （P-12，设置窗口的"主题"条目即通过重写 `config.json` 达成）。
     #[must_use]
     pub fn with_theme(theme_pref: ThemePreference) -> Self {
+        Self::with_theme_and_show_pin(theme_pref, true)
+    }
+
+    /// 按指定主题偏好与拼音行开关创建控制器（T-127）。
+    #[must_use]
+    pub fn with_theme_and_show_pin(theme_pref: ThemePreference, show_pin: bool) -> Self {
         Self {
             hwnd: HWND::default(),
             state_ptr: std::ptr::null_mut(),
             theme_pref,
             custom_theme: None,
+            show_pin,
         }
     }
 
@@ -116,11 +162,18 @@ impl CandidateWindow {
     /// 主题文件的 `candidate` 节在解析时叠加：缺键回退基础预设。
     #[must_use]
     pub fn with_custom_theme(file: zhu_ye_core::ThemeFile) -> Self {
+        Self::with_custom_theme_and_show_pin(file, true)
+    }
+
+    /// 按自定义主题文件与拼音行开关创建控制器（T-127）。
+    #[must_use]
+    pub fn with_custom_theme_and_show_pin(file: zhu_ye_core::ThemeFile, show_pin: bool) -> Self {
         Self {
             hwnd: HWND::default(),
             state_ptr: std::ptr::null_mut(),
             theme_pref: ThemePreference::Auto,
             custom_theme: Some(file),
+            show_pin,
         }
     }
 
@@ -146,11 +199,14 @@ impl CandidateWindow {
         }
         unsafe {
             if let Some(state) = state_mut(self.hwnd) {
-                state.view = view;
-                let rows = state.view.panel_rows();
-                let (width, height) = state.metrics.panel_size(rows);
+                let rows = view.panel_rows();
+                let (width, height) =
+                    state
+                        .metrics
+                        .panel_size_for(rows, &view.composition, &view.pinyin_hint);
                 let width = width.max(1);
                 let height = height.max(1);
+                state.view = view;
                 if let Some(placement) = placement {
                     place_at(self.hwnd, placement.anchor, width, height);
                 } else {
@@ -196,6 +252,7 @@ impl CandidateWindow {
                 seconds: None,
                 shot_path: None,
                 custom_theme: self.custom_theme.clone(),
+                show_pin: self.show_pin,
             };
             let state = Box::new(CandidateWindowState::new_with_quit(
                 view.clone(),
@@ -206,7 +263,11 @@ impl CandidateWindow {
             if state.view.composition.is_empty() {
                 return;
             }
-            let (width, height) = state.metrics.panel_size(state.view.panel_rows());
+            let (width, height) = state.metrics.panel_size_for(
+                state.view.panel_rows(),
+                &state.view.composition,
+                &state.view.pinyin_hint,
+            );
             let state_ptr = Box::into_raw(state);
             let Ok(hwnd) = CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -301,9 +362,24 @@ struct CandidateWindowState {
     theme: CandidateUiTheme,
     font: HFONT,
     font_is_stock: bool,
+    /// 拼音行小号字体（T-115 后续：候选词上方拼音小字）。
+    pin_font: HFONT,
+    pin_font_is_stock: bool,
+    /// 拼音字体真实行高 tmHeight（T-129B：`lfHeight` 负值=字符高 13px，而
+    /// Segoe UI 13px 的 tmHeight≈16px——拼音 rect 若按 13px 绘制，glyph 底部
+    /// descender 会被 `DrawTextW` 裁掉；字形带按真实 tmHeight 铺高后拼音完整）。
+    pin_tm_height: i32,
+    /// 页眉音节分隔符专用字体（T-139）：宋体（SimSun）的弯引号/撇号字形
+    /// （U+0027、U+2019）观感都是"上逗号"，用户要求"看起来只是撇号"；页眉
+    /// 组合串里的分隔符改用西文 Segoe UI 的 U+0027 直撇单独绘制（分段渲染，
+    /// 见 `draw_header_mixed`），其余字母/中文仍用宋体主字体。
+    sep_font: HFONT,
+    sep_font_is_stock: bool,
     theme_pref: ThemePreference,
     forced_dpi: Option<u32>,
     quit_on_destroy: bool,
+    /// 是否显示拼音行及声调（T-127）；关闭时 `paint` 的拼音分支被短路。
+    show_pin: bool,
 }
 
 impl CandidateWindowState {
@@ -319,16 +395,29 @@ impl CandidateWindowState {
         quit_on_destroy: bool,
     ) -> Self {
         let metrics = CandidateMetrics::new(initial_dpi.max(BASE_DPI));
-        let (font, font_is_stock) = create_font(metrics.font_height);
+        // T-126：主文本 16px 加粗（视觉焦点），拼音行 Segoe UI 13px 常规。
+        let (font, font_is_stock) =
+            create_font(metrics.font_height, FW_SEMIBOLD.0 as i32, "SimSun");
+        let (pin_font, pin_font_is_stock) =
+            create_font(metrics.pin_font_height, FW_NORMAL.0 as i32, "Segoe UI");
+        let pin_tm_height = query_font_tm_height(pin_font);
+        let (sep_font, sep_font_is_stock) =
+            create_font(metrics.font_height, FW_NORMAL.0 as i32, "Segoe UI");
         Self {
             view,
             theme: resolve_with_custom(options.theme, options.custom_theme.as_ref()),
             metrics,
             font,
             font_is_stock,
+            pin_font,
+            pin_font_is_stock,
+            pin_tm_height,
+            sep_font,
+            sep_font_is_stock,
             theme_pref: options.theme,
             forced_dpi: options.dpi,
             quit_on_destroy,
+            show_pin: options.show_pin,
         }
     }
 
@@ -344,9 +433,31 @@ impl CandidateWindowState {
                 let _ = DeleteObject(old_font.into());
             }
         }
-        let (font, font_is_stock) = create_font(metrics.font_height);
+        let (font, font_is_stock) =
+            create_font(metrics.font_height, FW_SEMIBOLD.0 as i32, "SimSun");
         self.font = font;
         self.font_is_stock = font_is_stock;
+        let old_pin_font = mem::take(&mut self.pin_font);
+        if !self.pin_font_is_stock {
+            unsafe {
+                let _ = DeleteObject(old_pin_font.into());
+            }
+        }
+        let (pin_font, pin_font_is_stock) =
+            create_font(metrics.pin_font_height, FW_NORMAL.0 as i32, "Segoe UI");
+        self.pin_font = pin_font;
+        self.pin_font_is_stock = pin_font_is_stock;
+        self.pin_tm_height = query_font_tm_height(pin_font);
+        let old_sep_font = mem::take(&mut self.sep_font);
+        if !self.sep_font_is_stock {
+            unsafe {
+                let _ = DeleteObject(old_sep_font.into());
+            }
+        }
+        let (sep_font, sep_font_is_stock) =
+            create_font(metrics.font_height, FW_NORMAL.0 as i32, "Segoe UI");
+        self.sep_font = sep_font;
+        self.sep_font_is_stock = sep_font_is_stock;
         self.metrics = metrics;
     }
 
@@ -359,6 +470,9 @@ impl CandidateWindowState {
         // 关键修复（T-034）：此前创建了 `create_font` 的 HFONT 却从未
         // `SelectObject` 进绘制 DC，所有 DrawTextW 都用了 DC 默认字体
         // （现代中文 Windows 上为微软雅黑），字体名改动因此不生效。
+        // T-124：长拼音输入时面板宽按内容扩展，本帧全部矩形按实际
+        // 客户区宽度布局（页眉输入串/提示不再按固定 360dp 面板截断）。
+        let metrics = self.metrics.with_panel_width(width);
         let old_font = unsafe { SelectObject(hdc, self.font.into()) };
         let selected = self.view.selected_on_page();
         let page_rows = self.view.panel_rows();
@@ -368,7 +482,7 @@ impl CandidateWindowState {
             hdc,
             width,
             height,
-            self.metrics.corner_radius,
+            metrics.corner_radius,
             self.theme.background,
             self.theme.border,
         );
@@ -381,42 +495,50 @@ impl CandidateWindowState {
                 // 布局，摆脱"序号贴高亮块左缘"的局促观感。
                 fill_round_rect(
                     hdc,
-                    to_win_rect(self.metrics.highlight_rect(index)),
+                    to_win_rect(metrics.highlight_rect(index)),
                     self.theme.highlight_background,
-                    self.metrics.corner_radius,
+                    metrics.corner_radius,
                 );
             }
             let Some(item) = visible.get(index) else {
                 continue;
             };
 
-            let row_ui = self.metrics.row_rect(index);
+            let row_ui = metrics.row_rect(index);
             let marker_color = if is_selected {
                 self.theme.highlight_foreground
             } else {
                 self.theme.marker
             };
-            draw_text(
-                hdc,
-                &index_marker(index),
-                self.metrics.marker_rect(row_ui),
-                marker_color,
-            );
-
             // M6-R：网络语缩写候选在主文本后追加 `[网络]` 标注；
             // 标注并入主文本，宽度估算（row_split）自然把它计入。
-            let main_owned = display_main_text(item, self.view.translation_mode);
-            let (main, secondary) = if self.view.translation_mode && !item.translation.is_empty() {
-                (
-                    main_owned.as_str(),
-                    if item.text == item.translation {
-                        ""
-                    } else {
-                        item.text.as_str()
-                    },
-                )
+            let base = display_main_text(item, self.view.translation_mode);
+            // T-115 后续：候选词拼音行——拼音改到词汇**上方**、小一号字体
+            // （仿微软拼音布局，用户点名）；错序纠错候选借此展示正确拼音
+            // （如输入 zhagnh 显示 账号 上方 "zhang hao"）。译文层主文本是
+            // 英文，拼音行不适用；切分失败（拼音行与原文本相同）不显示。
+            // 主文本不再采用内联"词（音节）"拼注，保持纯词汇。
+            let pin_text = if self.view.translation_mode {
+                String::new()
+            } else if !item.pinyin_tone.is_empty() {
+                // T-112 后续批四：带调拼音优先（`生成` → `shēng chéng`）；
+                // 词级/字级带调表齐备时不再回退无调拼注。
+                item.pinyin_tone.clone()
             } else {
-                (main_owned.as_str(), item.translation.as_str())
+                spell_pinyin(&base, &item.pinyin)
+            };
+            // T-127：设置开关 `candidate_show_pin`（装配项）关闭后短路——
+            // 候选行整体回到无拼音形态（主文本/序号整行垂直居中）。
+            let show_pin = self.show_pin && !pin_text.is_empty() && pin_text != base;
+            let main = base.as_str();
+            let secondary = if self.view.translation_mode && !item.translation.is_empty() {
+                if item.text == item.translation {
+                    ""
+                } else {
+                    item.text.as_str()
+                }
+            } else {
+                item.translation.as_str()
             };
             let text_color = if is_selected {
                 self.theme.highlight_foreground
@@ -425,7 +547,80 @@ impl CandidateWindowState {
             };
             // T-037：动态分栏——译文紧跟主文本（不再固定右侧 1/3 列），
             // 英文译文更靠左、可用宽度更大。
-            let (main_rect, translation_rect) = self.metrics.row_split(row_ui, main, secondary);
+            let (main_col, translation_col) = metrics.row_split(row_ui, main, secondary);
+            let pin_rect = if show_pin {
+                Some(metrics.pin_row_rect(row_ui, main_col, &pin_text))
+            } else {
+                None
+            };
+            let (main_rect, translation_rect) = if let Some(pin_rect) = pin_rect {
+                // 拼音行占行首上方字形区（小字体），主文本与译文区从
+                // 「拼音字形区底 + pin_line_gap」起（视觉间距精确 = 4px，
+                // `DT_VCENTER` 不会吃掉间距——矩形高=字高，无居中余量）；
+                // 主文本矩形高度=字高，顶/底均锚定字形带（汉字与序号
+                // 同带垂直居中）。无拼音行保持原样（整行垂直居中）。
+                // T-126：拼音矩形由 `pin_row_rect` 计算——左缘与汉字列严格
+                // 对齐、宽度容纳拼音内容（超出汉字宽时不截断）。
+                // T-129B：拼音字形带高度 = 真实 tmHeight（`pin_row_rect`
+                // 的 13px 字符高 < Segoe UI 13px 的 tmHeight≈16px，glyph
+                // 底部 descender 会被 `DrawTextW` 裁掉——这里把绘制矩形
+                // 与主文本顶边一起按 tmHeight 展开，拼音完整可见）。
+                // T-131：内容带（拼音字形带 + pin_line_gap + 主文本带）在
+                // 行内**垂直居中**（`pin_band_top`）——此前贴行顶、底部悬空
+                // 约 12px（行高 48 减内容带 36），用户反馈"候选行内部的下
+                // 留白过多"；居中后上下留白各约 6px，行内紧凑均衡（panel
+                // 尺寸/分页不变）。
+                let pin_band = self.pin_tm_height.max(metrics.pin_font_height);
+                let band_top = metrics.pin_band_top(row_ui, self.pin_tm_height);
+                let pin_bottom = band_top.saturating_add(pin_band);
+                let pin_draw_rect = UiRect {
+                    top: band_top,
+                    bottom: pin_bottom,
+                    ..pin_rect
+                };
+                let main_top = pin_bottom.saturating_add(metrics.pin_line_gap);
+                let main_bottom = main_top.saturating_add(metrics.font_height);
+                let _ = unsafe { SelectObject(hdc, self.pin_font.into()) };
+                // T-122：拼音行颜色独立为 `theme.pin`；
+                // T-126：浅色主题下为辅助提示淡灰 #888888（Segoe UI 渲染声调）。
+                draw_text(hdc, &pin_text, pin_draw_rect, self.theme.pin);
+                let _ = unsafe { SelectObject(hdc, self.font.into()) };
+                (
+                    UiRect {
+                        left: main_col.left,
+                        top: main_top,
+                        right: main_col.right,
+                        bottom: main_bottom,
+                    },
+                    UiRect {
+                        left: translation_col.left,
+                        top: main_top,
+                        right: translation_col.right,
+                        bottom: main_bottom,
+                    },
+                )
+            } else {
+                (main_col, translation_col)
+            };
+            // T-122：序号右对齐到标记列右缘（再让出 `marker_text_gap` 间距），
+            // 单/双位数字都紧贴候选词、留白稳定在 4-8px 档，不再随数字宽度漂移。
+            // T-126 用户后续指令："序号和中文那行对齐，不要和拼音对齐"——
+            // 有拼音行时序号随主文本带移动，与汉字同竖直中心；无拼音行
+            // （译文模式）仍整行垂直居中。
+            let mut marker_rect = metrics.marker_rect(row_ui);
+            if pin_rect.is_some() {
+                // T-131：与主文本带同源的行内垂直居中（内容带下移后序号跟
+                // 随汉字带同步下移，序号/汉字依然严格同竖直中心）。
+                let pin_band = self.pin_tm_height.max(metrics.pin_font_height);
+                let band_top = metrics.pin_band_top(row_ui, self.pin_tm_height);
+                let main_top = band_top
+                    .saturating_add(pin_band)
+                    .saturating_add(metrics.pin_line_gap);
+                marker_rect.top = main_top;
+                marker_rect.bottom = main_top.saturating_add(metrics.font_height);
+            }
+            marker_rect.right -= metrics.marker_text_gap;
+            draw_text_right(hdc, &index_marker(index), marker_rect, marker_color);
             draw_text(hdc, main, main_rect, text_color);
             draw_text(hdc, secondary, translation_rect, self.theme.secondary);
         }
@@ -435,28 +630,46 @@ impl CandidateWindowState {
         } else {
             self.view.pinyin_hint.as_str()
         };
+        // T-124：页眉提示区按内容分配宽度（长拼音输入时输入串完整优先，
+        // 面板随内容扩宽；提示为空/与输入串相同时为 0，输入串占整行）。
+        let (_, hint_alloc) = metrics.header_widths(header_text, &self.view.pinyin_hint);
         // T-040：页脚 m/n 翻页指示（总页数 >1 时在面板底部右端显示）。
         if page_rows > 0 {
             if let Some(label) = self.view.footer_label() {
                 draw_text_right(
                     hdc,
                     &label,
-                    self.metrics.footer_rect(page_rows),
+                    metrics.footer_rect(page_rows),
                     self.theme.secondary,
                 );
             }
         }
-        draw_text(
-            hdc,
-            header_text,
-            self.metrics.header_text_rect(),
-            self.theme.foreground,
-        );
+        // T-139：分隔符（U+2019）在宋体下观感仍是"上逗号"，页眉组合串改为
+        // 分段绘制——分隔符段用 Segoe UI 直撇渲染（`draw_header_mixed`），
+        // 其余（字母/中文）仍用宋体主字体；含分隔符才走混合路径。
+        // T-140：页眉贴顶——两条路径都顶对齐（`draw_text_top`）。
+        if header_text.contains(SYLLABLE_SEP_DISPLAY) {
+            draw_header_mixed(
+                hdc,
+                header_text,
+                metrics.header_text_rect_with(hint_alloc),
+                self.theme.foreground,
+                self.font,
+                self.sep_font,
+            );
+        } else {
+            draw_text_top(
+                hdc,
+                header_text,
+                metrics.header_text_rect_with(hint_alloc),
+                self.theme.foreground,
+            );
+        }
         if !self.view.pinyin_hint.is_empty() && self.view.pinyin_hint != header_text {
-            draw_text(
+            draw_text_top(
                 hdc,
                 &self.view.pinyin_hint,
-                self.metrics.header_hint_rect(),
+                metrics.header_hint_rect_with(hint_alloc),
                 self.theme.secondary,
             );
         }
@@ -472,6 +685,16 @@ impl Drop for CandidateWindowState {
         if !self.font_is_stock && !self.font.is_invalid() {
             unsafe {
                 let _ = DeleteObject(self.font.into());
+            }
+        }
+        if !self.pin_font_is_stock && !self.pin_font.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(self.pin_font.into());
+            }
+        }
+        if !self.sep_font_is_stock && !self.sep_font.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(self.sep_font.into());
             }
         }
     }
@@ -491,7 +714,11 @@ pub fn run_candidate_demo(
 
         let initial_dpi = options.dpi.unwrap_or_else(|| GetDpiForSystem());
         let state = CandidateWindowState::new(view, options, initial_dpi);
-        let (width, height) = state.metrics.panel_size(state.view.panel_rows());
+        let (width, height) = state.metrics.panel_size_for(
+            state.view.panel_rows(),
+            &state.view.composition,
+            &state.view.pinyin_hint,
+        );
         let state_ptr = Box::into_raw(Box::new(state));
 
         let hwnd = match CreateWindowExW(
@@ -858,8 +1085,176 @@ fn draw_text(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
     }
 }
 
-/// 读取绘制 DC 当前字体逻辑尺寸（GDI 负 lfHeight ≈ 字符单元高，直接当
-/// DirectWrite 字号用；取不到时退 15px 保全路径）。
+/// 页眉直撇分隔符的**绘制**字符（T-139）：西文键盘撇号 U+0027（ASCII
+/// apostrophe）——在 Segoe UI 下是清晰的直撇（竖直微斜、无圆头），
+/// 区别于 U+2019 弯引号/逗号形的"上逗号"观感。数据层分隔符仍是
+/// `SYLLABLE_SEP_DISPLAY`（U+2019），仅绘制层替换为直撇。
+const SYLLABLE_SEP_APOSTROPHE: char = '\u{0027}';
+
+/// 顶对齐文本绘制（T-140）：字形带顶 = `rect.top`（基线 = rect.top +
+/// 当前字体 tmAscent），供页眉贴顶使用——与 `draw_text` 的区别仅在于
+/// GDI 侧的垂直起点（无 `DT_VCENTER` 即 `DT_TOP`）。emoji 彩色路径与
+/// `draw_text` 相同。
+fn draw_text_top(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
+    if text.is_empty() || rect.width() <= 0 || rect.height() <= 0 {
+        return;
+    }
+    if crate::color_text::contains_color_glyph(text) {
+        let font_size = current_font_size(hdc);
+        if let Some(bmp) = crate::color_text::render_color_text(
+            text,
+            rect.width(),
+            rect.height(),
+            font_size,
+            color,
+        ) {
+            alpha_blend_bitmap(hdc, &to_win_rect(rect), &bmp);
+            return;
+        }
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = to_win_rect(rect);
+    unsafe {
+        let mut tm = TEXTMETRICW::default();
+        if GetTextMetricsW(hdc, &mut tm).as_bool() {
+            // 绘制矩形收窄为当前字体的字形带（含 descent），避免把整行高
+            // 一并交给 `DrawTextW` 产生位置歧义；顶边保持 `rect.top`。
+            rect.bottom = rect.top.saturating_add(tm.tmHeight).min(rect.bottom);
+        }
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(color.to_colorref()));
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut rect,
+            DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
+}
+
+/// 页眉组合串分段绘制（T-139）：音节分隔符 U+2019 在宋体下仍是"上逗号"
+/// 观感（用户两轮反馈），改用西文 Segoe UI **直撇**（U+0027）单独绘制；
+/// 其余字母/中文段仍用宋体主字体，段间按实测宽度推进、共享同一基线。
+///
+/// 基线统一：两种字体的 `tmHeight`/`tmAscent` 不同（Segoe UI 16px 的
+/// tmHeight≈19 高于宋体 16px 的 ≈16），不能直接各自 `DT_VCENTER`；以主字体
+/// ascent 把字形带**顶对齐到 `rect.top`**（T-140：页眉贴顶；T-144：顶距
+/// 2dp，不再垂直
+/// 居中），再按各自 ascent 回推段顶。取不到字体度量时回退整串
+/// `draw_text_top`。
+fn draw_header_mixed(
+    hdc: HDC,
+    text: &str,
+    rect: UiRect,
+    color: UiColor,
+    main_font: HFONT,
+    sep_font: HFONT,
+) {
+    if text.is_empty() || rect.width() <= 0 || rect.height() <= 0 {
+        return;
+    }
+    unsafe {
+        let old = SelectObject(hdc, main_font.into());
+        let mut main_tm = TEXTMETRICW::default();
+        if !GetTextMetricsW(hdc, &mut main_tm).as_bool() {
+            SelectObject(hdc, old);
+            draw_text_top(hdc, text, rect, color);
+            return;
+        }
+        let _ = SelectObject(hdc, sep_font.into());
+        let mut sep_tm = TEXTMETRICW::default();
+        if !GetTextMetricsW(hdc, &mut sep_tm).as_bool() {
+            SelectObject(hdc, old);
+            draw_text(hdc, text, rect, color);
+            return;
+        }
+        // 主字体字形带顶对齐 `rect.top`（T-140 贴顶）的基线；分隔段/主段
+        // 都对准它（各段顶 = 基线 − 各自字体 ascent）。
+        let (m_h, m_a) = (main_tm.tmHeight, main_tm.tmAscent);
+        let (s_h, s_a) = (sep_tm.tmHeight, sep_tm.tmAscent);
+        let baseline = rect.top + m_a;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(color.to_colorref()));
+        let mut x = rect.left;
+        let mut rest = text;
+        while !rest.is_empty() {
+            // 主段到下一个分隔符为止；随后（若存在）取一个分隔符字符。
+            let sep_idx = rest.find(SYLLABLE_SEP_DISPLAY);
+            let main_seg = match sep_idx {
+                Some(idx) => &rest[..idx],
+                None => rest,
+            };
+            let sep: Option<String> = match sep_idx {
+                Some(idx) => rest[idx..].chars().next().map(|ch| ch.to_string()),
+                None => None,
+            };
+            let consumed = match sep_idx {
+                Some(idx) => {
+                    idx + sep
+                        .as_ref()
+                        .map_or(0, |s| s.chars().next().unwrap_or_default().len_utf8())
+                }
+                None => main_seg.len(),
+            };
+            rest = &rest[consumed..];
+            if !main_seg.is_empty() {
+                let w = text_extent(hdc, main_font, main_seg);
+                draw_seg(hdc, main_font, main_seg, x, baseline - m_a, w, m_h);
+                x += w;
+            }
+            if sep.is_some() {
+                // T-139 核心：分隔符显示字符从 U+2019（宋体/西文都是弯"上逗号"
+                // 形）替换为西文键盘直撇 U+0027，配 Segoe UI 字体绘制。
+                let sep_ascii = SYLLABLE_SEP_APOSTROPHE.to_string();
+                let w = text_extent(hdc, sep_font, &sep_ascii);
+                draw_seg(hdc, sep_font, &sep_ascii, x, baseline - s_a, w, s_h);
+                x += w;
+            }
+        }
+        SelectObject(hdc, old);
+    }
+}
+
+/// 选中段字体后测量段文本像素宽（`GetTextExtentPoint32W`）。
+unsafe fn text_extent(hdc: HDC, font: HFONT, seg: &str) -> i32 {
+    let old = SelectObject(hdc, font.into());
+    let mut size = SIZE::default();
+    let wide: Vec<u16> = seg.encode_utf16().collect();
+    let w = if GetTextExtentPoint32W(hdc, &wide, &mut size).as_bool() {
+        size.cx
+    } else {
+        1
+    };
+    SelectObject(hdc, old);
+    w
+}
+
+/// 在公共基线上绘制一个段（显式选中段字体）：`y` 为段顶（基线 − 该字体
+/// ascent），段高 `height` 为该字体 tmHeight。返回 `DrawTextW` 绘制的行数。
+unsafe fn draw_seg(
+    hdc: HDC,
+    font: HFONT,
+    seg: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> i32 {
+    let old = SelectObject(hdc, font.into());
+    let mut wide: Vec<u16> = seg.encode_utf16().collect();
+    // 右缘 +8 缓冲：`GetTextExtentPoint32W` 返回的是 advance 宽（含默认
+    // 字距），而部分字形（如直撇 `'`）笔画偏右、会被精确右缘裁掉主体。
+    let mut seg_rect = RECT {
+        left: x,
+        top: y,
+        right: x + width + 8,
+        bottom: y + height,
+    };
+    let ret = DrawTextW(hdc, &mut wide, &mut seg_rect, DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(hdc, old);
+    ret
+}
+
 fn current_font_size(hdc: HDC) -> f32 {
     unsafe {
         let hfont = GetCurrentObject(hdc, OBJ_FONT);
@@ -958,23 +1353,50 @@ fn draw_text_right(hdc: HDC, text: &str, rect: UiRect, color: UiColor) {
     }
 }
 
-fn create_font(height: i32) -> (HFONT, bool) {
+/// 查字体的真实行高 tmHeight（T-129B）：`lfHeight` 负值只是字符高（em），
+/// 多数西文字体 ascent+descent 更大（Segoe UI 13px ≈ 16px）；拼音字形带按
+/// tmHeight 铺高避免 descender 被 `DrawTextW` 裁剪。取不到时回退字符高。
+fn query_font_tm_height(font: HFONT) -> i32 {
     unsafe {
-        let mut face = [0u16; 32];
-        // T-034：候选框字体为宋体（SimSun）。此前字体名虽设为雅黑却从未
+        let hdc = CreateCompatibleDC(None);
+        if hdc.is_invalid() {
+            return 0;
+        }
+        let old = SelectObject(hdc, font.into());
+        let mut tm = TEXTMETRICW::default();
+        let ok = GetTextMetricsW(hdc, &mut tm);
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteDC(hdc);
+        if ok.as_bool() {
+            tm.tmHeight
+        } else {
+            0
+        }
+    }
+}
+
+fn create_font(height: i32, weight: i32, face: &str) -> (HFONT, bool) {
+    unsafe {
+        let mut face_name = [0u16; 32];
+        // T-034：候选主文本字体为宋体（SimSun）。此前字体名虽设为雅黑却从未
         // SelectObject，实际渲染的一直是 DC 默认字体；paint() 已修复选择。
-        for (slot, unit) in face.iter_mut().zip("SimSun".encode_utf16().chain(Some(0))) {
+        // T-126：拼音行改用 Segoe UI——对 precomposed/组合声调字符（ǐ/ǎ 等）
+        // 提供平滑的组合字形，修掉宋体下声调符号偏移割裂的观感。
+        for (slot, unit) in face_name.iter_mut().zip(face.encode_utf16().chain(Some(0))) {
             *slot = unit;
         }
         let metrics = LOGFONTW {
             lfHeight: -height,
-            lfWeight: FW_NORMAL.0 as i32,
+            // T-122：拼音行半粗（FW_SEMIBOLD）提升小字可读性；主文本保持常规。
+            // T-126：主文本常规→ FW_SEMIBOLD（汉字作为视觉焦点加粗）；拼音行
+            // 半粗→常规（辅助提示，配合浅灰 #888 与声调字体）。
+            lfWeight: weight,
             lfCharSet: DEFAULT_CHARSET,
             lfOutPrecision: OUT_DEFAULT_PRECIS,
             lfClipPrecision: CLIP_DEFAULT_PRECIS,
             lfQuality: CLEARTYPE_QUALITY,
             lfPitchAndFamily: FF_DONTCARE.0 | DEFAULT_PITCH.0,
-            lfFaceName: face,
+            lfFaceName: face_name,
             ..Default::default()
         };
         let font = CreateFontIndirectW(&metrics);
@@ -1185,9 +1607,29 @@ fn system_colors() -> SystemColors {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bmp, resolve_theme, resolve_with_custom, system_high_contrast_on, to_utf16_null,
-        CandidateWindow, ThemePreference,
+        build_bmp, create_font, query_font_tm_height, resolve_theme, resolve_with_custom,
+        spell_pinyin, system_high_contrast_on, to_utf16_null, CandidateWindow, ThemePreference,
     };
+    use windows::Win32::Graphics::Gdi::FW_NORMAL;
+
+    #[test]
+    fn 拼音拼注逐字插音节() {
+        // T-115 后续：全拼候选行展示"词（音节）"，错序纠错候选借此显示正确拼音。
+        assert_eq!(spell_pinyin("生成", "shengcheng"), "sheng cheng");
+        assert_eq!(spell_pinyin("账号", "zhanghao"), "zhang hao");
+        assert_eq!(spell_pinyin("的", "de"), "de");
+    }
+
+    #[test]
+    fn 拼音拼注异常输入原样返回() {
+        // T-115 后续：无拼音/无法切分/字数与音节数不符时不拼注，避免噪声。
+        assert_eq!(spell_pinyin("abc", ""), "abc");
+        assert_eq!(spell_pinyin("你好", ""), "你好");
+        assert_eq!(spell_pinyin("账号", "zhanghaoX"), "账号");
+        assert_eq!(spell_pinyin("", "nihao"), "");
+        // 非 CJK 主文本不拼注（网络语缩写标注场景）。
+        assert_eq!(spell_pinyin("yyds", "yyds"), "yyds");
+    }
 
     #[test]
     fn 主题偏好由构造参数决定且默认自动() {
@@ -1202,6 +1644,18 @@ mod tests {
         assert_eq!(
             CandidateWindow::with_theme(ThemePreference::Dark).theme_preference(),
             ThemePreference::Dark
+        );
+    }
+
+    /// T-129B：拼音字体真实行高 tmHeight 必须大于"字符高"（`lfHeight` 负值），
+    /// 否则拼音 rect 按字符高绘制时 glyph 底部 descender 会被 `DrawTextW` 裁掉。
+    #[test]
+    fn 拼音字体真实行高超字符高() {
+        let (font, _) = create_font(13, FW_NORMAL.0 as i32, "Segoe UI");
+        let tm = query_font_tm_height(font);
+        assert!(
+            tm > 13,
+            "Segoe UI 13px 的 tmHeight 应大于字符高 13（实际 {tm}）"
         );
     }
 

@@ -217,6 +217,35 @@ pub fn segment_all(table: &SyllableTable, input: &str) -> Vec<Vec<String>> {
     std::mem::take(&mut dp[length])
 }
 
+/// 将输入串切分为完整音节，且 `hard` 中列出的字符边界必须为音节切分点
+/// （T-128，音节分隔符）：`xian` 在硬边界 `[2]` 下仅剩 `[xi, an]` 一种方案。
+///
+/// `hard` 语义：ASCII 字符下标（等价字节偏移）；`0` 与 `len` 恒成立、
+/// 不影响过滤结果，可安全传入；硬边界无法被任何切分方案满足
+/// （如 `xian` 强制在 `[1]`）时返回空列表。内部实现为 [`segment_all`]
+/// 的结果过滤，方案顺序与确定性保持不变。空 `hard` 直接返回空
+/// （调用方仅在存在手动分隔符时才应调用）。
+#[must_use]
+pub fn segment_constrained(table: &SyllableTable, input: &str, hard: &[usize]) -> Vec<Vec<String>> {
+    if hard.is_empty() || !input.is_ascii() {
+        return Vec::new();
+    }
+    segment_all(table, input)
+        .into_iter()
+        .filter(|segments| {
+            let mut ends = Vec::with_capacity(segments.len());
+            let mut pos = 0usize;
+            for syllable in segments {
+                pos = pos.saturating_add(syllable.len());
+                ends.push(pos);
+            }
+            // 边界 0（串首）恒成立；其余边界须落在某音节终点上。
+            hard.iter()
+                .all(|&boundary| boundary == 0 || ends.contains(&boundary))
+        })
+        .collect()
+}
+
 /// 简拼展开用的静态常用音节表（M7，方案设计 12.2.2）。
 ///
 /// 每个 ASCII 小写字母对应 4-6 个**最常用**音节，按口语常用度人工排序。
@@ -301,8 +330,8 @@ pub fn fuzzy_variants(syllable: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        fuzzy_variants, initial_syllables, segment_all, valid_prefix, FullPinyinScheme,
-        PinyinScheme, SyllableTable, INITIAL_SYLLABLE_TABLE, STANDARD_SYLLABLES,
+        fuzzy_variants, initial_syllables, segment_all, segment_constrained, valid_prefix,
+        FullPinyinScheme, PinyinScheme, SyllableTable, INITIAL_SYLLABLE_TABLE, STANDARD_SYLLABLES,
     };
     use std::collections::HashSet;
 
@@ -401,6 +430,53 @@ mod tests {
         assert!(segment_all(&table, "zzzz").is_empty());
         assert!(segment_all(&table, "a1").is_empty());
         assert!(segment_all(&table, "你好").is_empty());
+    }
+
+    #[test]
+    fn 硬边界切分只保留满足的方案() {
+        let table = table();
+        // xian 两方案：xian / xi,an；硬边界 2（xi|an）只留后者。
+        let constrained = segment_constrained(&table, "xian", &[2]);
+        assert_eq!(constrained, vec![vec!["xi".to_owned(), "an".to_owned()]]);
+        // 无硬边界时约束函数返回空（调用方仅在手动分隔时使用）。
+        assert!(segment_constrained(&table, "xian", &[]).is_empty());
+        // 硬边界 4（xian|）恒成立：两个方案都满足。
+        let at_end = segment_constrained(&table, "xian", &[4]);
+        assert_eq!(at_end.len(), 2);
+        // 不满足任何方案的硬边界返回空：xian 在 1 处不可能切分。
+        assert!(segment_constrained(&table, "xian", &[1]).is_empty());
+        // nihao 两方案（hao 与 ha,o 都合法）：边界 2 两者都满足。
+        let ni_hao = segment_constrained(&table, "nihao", &[2]);
+        assert_eq!(
+            ni_hao,
+            vec![
+                vec!["ni".to_owned(), "hao".to_owned()],
+                vec!["ni".to_owned(), "ha".to_owned(), "o".to_owned()]
+            ]
+        );
+        let nihao_at_end = segment_constrained(&table, "nihao", &[5]);
+        assert_eq!(nihao_at_end, ni_hao.clone());
+        // 组合硬边界：xiange 强制 xi|an|ge。
+        let xi_an_ge = segment_constrained(&table, "xiange", &[2, 4]);
+        assert_eq!(
+            xi_an_ge,
+            vec![vec!["xi".to_owned(), "an".to_owned(), "ge".to_owned()]]
+        );
+    }
+
+    #[test]
+    fn 硬边界忽略零与恒成立边界() {
+        let table = table();
+        // 0 / len 恒成立，不影响过滤：与无约束段结果一致（两个方案都在）。
+        let raw = segment_all(&table, "xian");
+        assert_eq!(segment_constrained(&table, "xian", &[0]), raw);
+        assert_eq!(segment_constrained(&table, "xian", &[4]), raw);
+        // 越界值（99）无法满足 → 空；与其它边界混合时同样使方案全灭。
+        assert!(segment_constrained(&table, "xian", &[99]).is_empty());
+        assert!(segment_constrained(&table, "xian", &[2, 99]).is_empty());
+        // 混合恒成立边界（0）：不干扰有效边界 2。
+        let mixed = segment_constrained(&table, "xian", &[2, 0]);
+        assert_eq!(mixed, vec![vec!["xi".to_owned(), "an".to_owned()]]);
     }
 
     #[test]

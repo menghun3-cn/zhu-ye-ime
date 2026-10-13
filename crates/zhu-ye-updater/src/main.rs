@@ -11,9 +11,13 @@
 //! - `check-once`：启动异步检查一次（T-088 / FR-048）：无 UI、无 stdout，结果只写
 //!   `update_status.json` 并记录 `config.json` 的 `last_check`
 //!
-//! **默认关闭**（P-03）：`config.json` 的 `online_update` 为 `false` 时，
-//! `check`/`apply` 直接退出且不发起任何网络请求；`check-once` 同样直接退出
-//! （TSF 侧也只在开关开启时才会 spawn 本程序，验收"默认关闭零 spawn/零网络"）。
+//! **默认开启**（T-154 反转 P-03）：`config.json` 的 `online_update` 缺失或为
+//! `true` 时检查/应用可用；显式置 `false` 时 `check`/`apply` 直接退出且不发起
+//! 任何网络请求，`check-once` 同样直接退出（TSF 侧也只会在开关开启时 spawn）。
+//!
+//! 除词典包 manifest 外，检查还会拉取**独立签名**的 `app.json`（T-154）：
+//! 镜像仓库随发布附带输入法应用版本与更新日志，验签后用于"发现新版本 +
+//! 更新日志"展示；该文件缺失或损坏只降级应用信息，不阻断词典包检查/应用。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,7 +28,7 @@ use zhu_ye_core::manifest::{
 };
 use zhu_ye_core::pack_config::{load_config, plan_packs, ConfigFile, PACKS_DIR_NAME};
 use zhu_ye_core::update::{apply_release, find_outdated};
-use zhu_ye_core::UpdateStatus;
+use zhu_ye_core::{AppMeta, UpdateStatus};
 
 /// 发布清单默认 URL（T-098：镜像分发仓库 menghun3-cn/zhu-ye-updates；
 /// 该仓库 feed release 不带 prerelease 标记 → `releases/latest` 语义可用，
@@ -72,10 +76,10 @@ fn print_usage() {
     println!("  zhu-ye-updater check-once   启动时静默检查一次（结果写 update_status.json）");
 }
 
-/// `%APPDATA%\ai-zhu-ye-ime`。
+/// `%APPDATA%\zhu-ye-ime`。
 fn appdata_root() -> Result<PathBuf, String> {
     std::env::var_os("APPDATA")
-        .map(|root| PathBuf::from(root).join("ai-zhu-ye-ime"))
+        .map(|root| PathBuf::from(root).join("zhu-ye-ime"))
         .ok_or_else(|| "未设置 APPDATA，无法定位配置目录".to_owned())
 }
 
@@ -164,10 +168,10 @@ fn check_command(apply: bool) -> Result<(), String> {
         eprintln!("配置警告: {diagnostic}");
     }
 
-    // 默认关闭原则（P-03）：未显式开启时不发起任何网络请求。
+    // 关闭原则（T-154）：显式关闭时不发起任何网络请求。
     if !config.online_update {
         println!("在线更新已关闭（online_update=false），未发起任何网络请求。");
-        println!("如需检查更新，请把 config.json 的 online_update 设为 true。");
+        println!("如需检查更新，请在设置「关于与更新」中启用在线更新。");
         return Ok(());
     }
 
@@ -189,6 +193,29 @@ fn check_command(apply: bool) -> Result<(), String> {
     println!("签名校验: 通过（内置公钥）");
 
     let engine_version = zhu_ye_core::core_version();
+
+    // 输入法应用版本信息（T-154）：独立签名的 app.json，仅展示用途；
+    // 缺失/损坏/验签失败只降级，不阻断词典包检查与应用。
+    let app_base = url.rsplit_once('/').map(|(prefix, _)| prefix).unwrap_or("");
+    match fetch_app_meta(app_base, &key) {
+        Ok(Some(meta)) if zhu_ye_core::app_update_available(&meta.app_version, engine_version) => {
+            println!(
+                "发现输入法应用新版本: {}（当前 {engine_version}）",
+                meta.app_version
+            );
+            println!("更新日志:");
+            for line in meta.release_notes.lines() {
+                println!("  {line}");
+            }
+            println!("（输入法主程序升级请到官网或更新页下载新版安装包）");
+        }
+        Ok(Some(_)) => {
+            println!("输入法应用已是最新版本（{engine_version}）。");
+        }
+        Ok(None) => println!("（发布源未提供应用版本信息）"),
+        Err(error) => println!("应用版本信息检查失败: {error}（不影响词典包检查）"),
+    }
+
     let packs_dir = packs_dir()?;
     // 只考虑可分发包：基础包随安装只读交付，real/seed 是开发产物，都不在更新范围。
     let outdated: Vec<String> = find_outdated(&manifest, &packs_dir)
@@ -253,17 +280,18 @@ fn check_command(apply: bool) -> Result<(), String> {
     if let Err(error) = zhu_ye_core::pack_config::save_config(&config_path, &updated) {
         eprintln!("警告: 写入配置失败: {error}");
     }
-    println!("更新完成。重启输入法后生效（P-12）。");
+    println!("更新完成。重启输入法后生效。");
     Ok(())
 }
 
 /// 启动时静默检查一次（T-088 / FR-048，方案设计 §14.5.4）。
 ///
 /// - `online_update=false` → 直接退出：不联网、不写状态文件（配合 TSF 侧开关判断，
-///   达成验收"默认关闭零 spawn/零网络"）；
+///   达成验收"显式关闭时零 spawn/零网络"）；
 /// - 距上次检查不足 [`zhu_ye_core::CHECK_INTERVAL_DAYS`] 天 → 直接退出（保留旧状态）；
-/// - 否则联网拉取并验签 manifest，把结果原子写入 `update_status.json`，并回写
-///   `config.json` 的 `last_check`（S-8：以进入本命令时重读的配置为基线，保存前不再整体覆盖）；
+/// - 否则联网拉取并验签 manifest 与应用版本元数据（T-154），把结果原子写入
+///   `update_status.json`，并回写 `config.json` 的 `last_check`（S-8：以进入本命令时
+///   重读的配置为基线，保存前不再整体覆盖）；
 /// - 网络/验签失败也写状态文件（含错误摘要，关于页可见），`last_check` 照记，避免故障期
 ///   每次启动都重试；
 /// - 全程无 stdout（无 UI、无打扰）。
@@ -292,9 +320,6 @@ fn check_once_command() -> Result<(), String> {
             .into_iter()
             .filter(|id| zhu_ye_core::is_distributable_pack(id))
             .collect();
-        if outdated.is_empty() {
-            return Ok(UpdateStatus::up_to_date(now));
-        }
         // 可更新包中的最大版本号（比较口径同 `version_at_least`）。
         let latest = manifest
             .packs
@@ -312,6 +337,28 @@ fn check_once_command() -> Result<(), String> {
             })
             .unwrap_or_default()
             .to_owned();
+        // 输入法应用版本信息（T-154）：缺失/失败降级为"无应用信息"，不影响包状态。
+        let app_base = url.rsplit_once('/').map(|(prefix, _)| prefix).unwrap_or("");
+        let app_meta = fetch_app_meta(app_base, &key).ok().flatten();
+        if let Some(meta) = app_meta.as_ref().filter(|meta| {
+            zhu_ye_core::app_update_available(&meta.app_version, zhu_ye_core::core_version())
+        }) {
+            // 应用新版本优先作为"有更新"状态展示（词典包信息一并携带）。
+            return Ok(UpdateStatus::available_app(
+                now,
+                meta.app_version.clone(),
+                meta.release_notes.clone(),
+                if outdated.is_empty() {
+                    Vec::new()
+                } else {
+                    outdated
+                },
+                (!latest.is_empty()).then_some(latest),
+            ));
+        }
+        if outdated.is_empty() {
+            return Ok(UpdateStatus::up_to_date(now));
+        }
         Ok(UpdateStatus::available(now, outdated, latest))
     })();
     let status = outcome.unwrap_or_else(|error| UpdateStatus::failed(now, error));
@@ -354,7 +401,27 @@ fn http_get_text(url: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|error| format!("响应不是有效 UTF-8: {error}"))
 }
 
-/// 供自检：确认更新器不会在关闭状态下联网（验收标准 FR-020「默认关闭」）。
+/// 拉取并验签输入法应用版本元数据（`app.json`，T-154）。
+///
+/// `app_base` 是与 manifest 同目录的 URL 前缀（如 `…/releases/latest/download`）。
+/// - 拉取失败（旧发布源没有该资产、网络故障）→ `Ok(None)`：降级为"无应用信息"，
+///   不阻断词典包检查/应用（应用信息仅供展示）；
+/// - 拉取成功但格式/验签失败 → `Err` 摘要（调用方决定如何提示）。
+fn fetch_app_meta(
+    app_base: &str,
+    key: &ed25519_dalek::VerifyingKey,
+) -> Result<Option<AppMeta>, String> {
+    let url = format!("{app_base}/{}", zhu_ye_core::APP_META_FILE_NAME);
+    let text = match http_get_text(&url) {
+        Ok(text) => text,
+        Err(_) => return Ok(None),
+    };
+    let meta = zhu_ye_core::parse_app_meta(&text)?;
+    meta.verify(key).map_err(|error| error.to_string())?;
+    Ok(Some(meta))
+}
+
+/// 供自检：确认更新器在显式关闭时不会联网（验收标准 FR-020「关闭零网络」）。
 #[must_use]
 pub fn network_required(config: &ConfigFile) -> bool {
     config.online_update
@@ -366,16 +433,17 @@ mod tests {
     use zhu_ye_core::pack_config::ConfigFile;
 
     #[test]
-    fn 默认配置不要求网络() {
-        assert!(!network_required(&ConfigFile::default()));
+    fn 默认配置要求网络() {
+        // T-154 反转 P-03：在线更新默认开启。
+        assert!(network_required(&ConfigFile::default()));
     }
 
     #[test]
-    fn 显式开启后才要求网络() {
+    fn 显式关闭后不要求网络() {
         let config = ConfigFile {
-            online_update: true,
+            online_update: false,
             ..ConfigFile::default()
         };
-        assert!(network_required(&config));
+        assert!(!network_required(&config));
     }
 }

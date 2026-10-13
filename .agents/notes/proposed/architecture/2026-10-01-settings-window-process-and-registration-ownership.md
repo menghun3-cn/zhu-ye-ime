@@ -378,7 +378,7 @@ what happens when the version is too high. Deleting or corrupting it must degrad
 version shown", never to a failed start.
 
 **Concurrent writes to the application data directory.** The settings window, the updater,
-and the input method's read path all touch `%APPDATA%\ai-zhu-ye-ime`. Two processes writing
+and the input method's read path all touch `%APPDATA%\zhu-ye-ime`. Two processes writing
 `config.json` can clobber each other — most concretely, a window save can discard the
 updater's `last_check`. Atomic writes alone do not close this window; whatever re-read or
 single-writer rule the design adopts must be honoured by both writers.

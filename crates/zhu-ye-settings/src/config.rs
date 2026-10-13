@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use zhu_ye_core::{load_config, save_config, ConfigFile, ModeChoice, ThemeChoice};
 
 /// `%APPDATA%` 下的数据目录名。
-const APPDATA_DIR: &str = "ai-zhu-ye-ime";
+const APPDATA_DIR: &str = "zhu-ye-ime";
 /// 配置文件名。
 const CONFIG_FILE: &str = "config.json";
 
-/// 用户数据目录：`%APPDATA%\ai-zhu-ye-ime`（与 TSF 侧、更新器同口径）。
+/// 用户数据目录：`%APPDATA%\zhu-ye-ime`（与 TSF 侧、更新器同口径）。
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|root| PathBuf::from(root).join(APPDATA_DIR))
@@ -25,7 +25,14 @@ pub fn config_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join(CONFIG_FILE))
 }
 
-/// 产品日志目录（FR-060，T-091）：`%LOCALAPPDATA%\ai-zhu-ye-ime\logs`。
+/// 工具箱面板状态文件路径（T-151 位置/页签记忆，S-33）：
+/// `%APPDATA%\zhu-ye-ime\panel.json`，托盘与设置窗口进程共用（S-8 原子写口径）。
+#[must_use]
+pub fn panel_state_path() -> Option<PathBuf> {
+    data_dir().map(|dir| dir.join(crate::panel_window::PANEL_POSITION_FILE))
+}
+
+/// 产品日志目录（FR-060，T-091）：`%LOCALAPPDATA%\zhu-ye-ime\logs`。
 ///
 /// TSF 侧产品模式把文件日志写到该目录（`ime.log`，默认 warn 级别，1 MiB
 /// 轮转；见 `crates/zhu-ye-ime/src/tsf.rs` 的 `product_log`）。设置窗口独立
@@ -82,7 +89,7 @@ pub fn save_packs(path: &Path, enabled_packs: &[String]) -> Result<(), String> {
     save_config(path, &config)
 }
 
-/// 只更新在线更新开关并原子保存（S-8 同口径，P-03 默认关）。
+/// 只更新在线更新开关并原子保存（S-8 同口径；T-154 默认开启）。
 ///
 /// 勾选即写：`online_update` 是运行时开关（设置状态三分），由更新器进程读取；
 /// 保存前重读避免覆盖其他写入方的字段。
@@ -92,11 +99,28 @@ pub fn save_online_update(path: &Path, online_update: bool) -> Result<(), String
     save_config(path, &config)
 }
 
-/// 读取在线更新开关；缺失或损坏回退关闭（P-03）。
+/// 读取在线更新开关；缺失或损坏回退开启（T-154 反转 P-03；显式关闭仍尊重）。
 #[must_use]
 pub fn load_online_update(path: &Path) -> (bool, Option<String>) {
     let (config, diagnostic) = load_config(path);
     (config.online_update, diagnostic)
+}
+
+/// 读取候选框拼音行开关；缺失或损坏回退显示（T-127 默认开，历史行为）。
+#[must_use]
+pub fn load_candidate_show_pin(path: &Path) -> (bool, Option<String>) {
+    let (config, diagnostic) = load_config(path);
+    (config.candidate_show_pin, diagnostic)
+}
+
+/// 只更新候选框拼音行开关并原子保存（T-127，S-8 同口径）。
+///
+/// 装配项：写进 `config.json` 后由 TSF DLL 下次装配读取；保存前重读避免
+/// 覆盖其他写入方（更新器 `last_check` 等）的字段。
+pub fn save_candidate_show_pin(path: &Path, show_pin: bool) -> Result<(), String> {
+    let (mut config, _) = load_config(path);
+    config.candidate_show_pin = show_pin;
+    save_config(path, &config)
 }
 
 /// 读取通讯录 vCard 路径列表；缺失或损坏回退空（附件为会话期收集，不作为默认配置）。
@@ -178,7 +202,7 @@ mod tests {
         );
         assert!(
             config.online_update,
-            "在线更新开关不得被重置（P-03 默认关）"
+            "在线更新开关不得被重置（T-154 默认开）"
         );
         assert_eq!(config.contact_vcards.len(), 1, "通讯录路径不得丢失");
         assert!(!config.enable_domain_boost, "领域提权开关不得被重置");
@@ -262,6 +286,55 @@ mod tests {
     }
 
     #[test]
+    fn 缺失配置候选拼音开关默认显示() {
+        let path = temp_dir("pin-missing").join("config.json");
+        let (show, diagnostic) = super::load_candidate_show_pin(&path);
+        assert!(show, "缺失配置默认显示拼音（历史行为）");
+        assert_eq!(diagnostic, None);
+    }
+
+    #[test]
+    fn 只改候选拼音开关不动其他字段且可回读() {
+        let dir = temp_dir("pin-preserve");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "enabled_packs": ["it"],
+                "theme": "dark",
+                "last_check": 1759420800,
+                "default_mode": "english"
+            }"#,
+        )
+        .unwrap();
+
+        super::save_candidate_show_pin(&path, false).unwrap();
+
+        let (config, diagnostic) = super::load(&path);
+        assert_eq!(diagnostic, None);
+        assert!(!config.candidate_show_pin, "关闭应被写入");
+        assert_eq!(config.enabled_packs, vec!["it"], "领域包勾选不得丢失");
+        assert_eq!(
+            config.theme,
+            zhu_ye_core::ThemeChoice::Dark,
+            "主题不得被重置"
+        );
+        assert_eq!(
+            config.default_mode,
+            zhu_ye_core::ModeChoice::English,
+            "默认模式不得被重置"
+        );
+        assert_eq!(
+            config.last_check,
+            Some(1_759_420_800),
+            "提交前重读，更新器写入的 last_check 必须保留（S-8）"
+        );
+        // 关闭后重新打开并回读（开关双向可切换）。
+        super::save_candidate_show_pin(&path, true).unwrap();
+        assert!(super::load_candidate_show_pin(&path).0);
+    }
+
+    #[test]
     fn 默认中英模式保存后序列化可读回() {
         let dir = temp_dir("mode-roundtrip");
         let path = dir.join("config.json");
@@ -316,21 +389,21 @@ mod tests {
     }
 
     #[test]
-    fn 在线更新开关默认关闭且显式开启可往返() {
+    fn 在线更新开关默认开启且显式关闭可往返() {
         let dir = temp_dir("online");
         let path = dir.join("config.json");
-        // P-03：默认关闭。
-        assert!(!super::load_online_update(&path).0);
-
-        super::save_online_update(&path, true).unwrap();
-        let (config, diagnostic) = super::load(&path);
-        assert_eq!(diagnostic, None);
-        assert!(config.online_update, "开启后 config.json 应写入 true");
+        // T-154 反转 P-03：默认开启（缺失文件按开启）。
         assert!(super::load_online_update(&path).0);
 
-        // 关闭同样可往返。
         super::save_online_update(&path, false).unwrap();
+        let (config, diagnostic) = super::load(&path);
+        assert_eq!(diagnostic, None);
+        assert!(!config.online_update, "关闭后 config.json 应写入 false");
         assert!(!super::load_online_update(&path).0);
+
+        // 开启同样可往返。
+        super::save_online_update(&path, true).unwrap();
+        assert!(super::load_online_update(&path).0);
     }
 
     #[test]
@@ -434,7 +507,7 @@ mod tests {
 
     #[test]
     fn 产品日志目录按本地应用数据目录解析且缺失时为空() {
-        // T-091（FR-060）：`%LOCALAPPDATA%\ai-zhu-ye-ime\logs`，与 TSF 侧
+        // T-091（FR-060）：`%LOCALAPPDATA%\zhu-ye-ime\logs`，与 TSF 侧
         // 产品轨 `ime.log` 路径同源。环境变量在单个测试内串行覆盖/恢复，
         // 规避并行线程互相覆盖。
         let original = std::env::var_os("LOCALAPPDATA");
@@ -442,7 +515,7 @@ mod tests {
         std::env::set_var("LOCALAPPDATA", &dir);
         assert_eq!(
             super::product_log_dir(),
-            Some(dir.join("ai-zhu-ye-ime").join("logs"))
+            Some(dir.join("zhu-ye-ime").join("logs"))
         );
         std::env::remove_var("LOCALAPPDATA");
         assert_eq!(super::product_log_dir(), None);

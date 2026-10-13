@@ -10,7 +10,7 @@ FR-003 要求把用户选择的词在本地持久化，并支持删除词与重�
 
 ## 决策
 
-`zhu-ye-core::user_store::UserDictStore` 负责磁盘契约。调用方注入 JSON 文件路径：TSF 宿主使用 `%APPDATA%\ai-zhu-ye-ime\user_words.json`，CLI 与测试使用各自路径，核心库保持平台无关。
+`zhu-ye-core::user_store::UserDictStore` 负责磁盘契约。调用方注入 JSON 文件路径：TSF 宿主使用 `%APPDATA%\zhu-ye-ime\user_words.json`，CLI 与测试使用各自路径，核心库保持平台无关。
 
 文件采用版本化 JSON：`{"version": 1, "entries": [{"word", "pinyin", "frequency", "last_used"}]}`。`UserWord` 派生 serde；`UserDictionary` 新增 `from_entries`，过滤空词文本、空拼音与零词频条目。`words_sorted` 现在按词频降序、再按词与拼音定序，保证落盘文件确定。
 

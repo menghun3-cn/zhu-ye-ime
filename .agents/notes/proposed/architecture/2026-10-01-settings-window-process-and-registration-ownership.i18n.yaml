@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object README.md
 #   git hash-object README.zh.md
-2026-10-01-settings-window-process-and-registration-ownership.md: bd682df6721f830057c6d4dcf5ea60adea65212b
-2026-10-01-settings-window-process-and-registration-ownership.zh.md: 7e9c9a5f1ac8ceb5b0ddf6e130fa8b49227006f3
+2026-10-01-settings-window-process-and-registration-ownership.md: 4139742c9c34595e113d50e6c1f90cae3b411d2a
+2026-10-01-settings-window-process-and-registration-ownership.zh.md: b1cf19f14aa446bd0c44cf43b17c5e6ae31ef842

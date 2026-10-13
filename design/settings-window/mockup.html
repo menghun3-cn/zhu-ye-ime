@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>竹叶输入法 · 设置窗口视觉稿 v0.1（评审用）</title>
+<style>
+/* ============================================================
+   竹叶输入法 · 设置窗口 视觉稿（Zhu Ye Settings visual spec）
+   GDI 边界：实色 / 细线 / 圆角 / ClearType 文字 —— 无渐变无阴影。
+   所有颜色即主题令牌（与 docs/设置窗口视觉设计.md 一一对应）。
+   字体：系统栈（Segoe UI / Microsoft YaHei），模拟 GDI 真实渲染。
+   ============================================================ */
+:root{
+  /* —— 浅色（竹纸） —— */
+  --paper:#F7F9F4;        /* 客户区底色：竹纸白 */
+  --rail:#EFF3EA;         /* 导航列面：深一档的竹纸 */
+  --rail-hover:#E7EDE0;   /* 导航悬停（实现可选） */
+  --rail-sel:#DFE9DB;     /* 选中：淡竹叶底 */
+  --ink:#22302A;          /* 主文字：墨绿黑 */
+  --nav-text:#3A463E;     /* 导航未选中文字 */
+  --secondary:#5C6B60;    /* 次要文字（描述） */
+  --leaf:#3D7A4E;         /* 竹叶青：按钮/强调/品牌 */
+  --leaf-deep:#275A38;    /* 深叶字：选中文字/链接 hover */
+  --on-leaf:#FFFFFF;      /* 按钮上的文字（浅色态=白） */
+  --line:#DDE5D6;         /* 细分隔线 */
+  --bark:#9C7B4F;         /* 竹节棕：仅品牌块下细线 */
+  --sprout:#9AC36A;       /* 新芽黄绿：仅「规划中」记号 */
+  --tag-bg:#EEF3E4;       /* 规划中标签底 */
+  --tag-text:#4A6E28;     /* 规划中标签字 */
+  --expand-bg:#F1F4EC;    /* 占位展开说明底 */
+  --chip-bg:#FFFFFF;      /* chips 未选中底 */
+  --chip-border:#C4CFBB;  /* chips 边框 */
+  --ok:#2C6E3F;           /* 状态·正常 */
+  --warn:#C50F1F;         /* 状态·错误/危险 */
+  --chrome-bg:#F0F2EF;    /* 系统标题栏示意（非自绘） */
+}
+[data-theme="dark"]{
+  /* —— 深色（墨绿黑） —— */
+  --paper:#1F2822;
+  --rail:#192019;
+  --rail-hover:#222C25;
+  --rail-sel:#2A3A2F;
+  --ink:#E8EFE8;
+  --nav-text:#C6D0C8;
+  --secondary:#9FB0A3;
+  --leaf:#80B98A;         /* 亮叶青：深色强调 */
+  --leaf-deep:#9BD6A6;    /* 亮叶字：选中文字 */
+  --on-leaf:#10241A;      /* 深色按钮上的墨色字（白字不达标 2.3:1） */
+  --line:#35403A;
+  --bark:#B99B6D;
+  --sprout:#9AC36A;
+  --tag-bg:#27332B;
+  --tag-text:#B5D39B;
+  --expand-bg:#242E27;
+  --chip-bg:#24302A;
+  --chip-border:#4A5A4F;
+  --ok:#8FD6A0;
+  --warn:#FF9A8C;
+  --chrome-bg:#20241F;
+}
+*{ box-sizing:border-box; margin:0; padding:0; }
+html,body{ background:#141A15; }
+body{
+  font-family:-apple-system,"Segoe UI","Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;
+  color:var(--ink);
+  padding:28px 20px 60px;
+}
+.mono{ font-family:"Cascadia Code",Consolas,"Courier New",monospace; }
+
+/* —— 评审信息条（不属于窗口本体） —— */
+.reviewbar{
+  max-width:880px; margin:0 auto 14px;
+  background:#1C241E; color:#B9C6AD; border-radius:8px;
+  padding:10px 14px; font-size:12.5px; line-height:1.7;
+  display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;
+}
+.reviewbar b{ color:#E8EFE8; font-weight:600; }
+.switchgroup{ display:inline-flex; border:1px solid #3A463E; border-radius:6px; overflow:hidden; }
+.switchgroup button{
+  background:transparent; border:none; color:#B9C6AD; font-size:12.5px;
+  padding:5px 14px; cursor:pointer; font-family:inherit;
+}
+.switchgroup button.on{ background:#2A3A2F; color:#9BD6A6; font-weight:600; }
+
+/* —— 系统标题栏示意（非自绘；T-142 由系统画竹 LOGO 与标题） —— */
+.chrome{
+  max-width:880px; margin:0 auto;
+  height:34px; background:var(--chrome-bg);
+  border:1px dashed #8A938A;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0 10px 0 12px; font-size:12px; color:#6B736A;
+}
+.chrome .dots span{ display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px;
+  background:#C9CEC4; }
+.chrome .note{ font-size:11px; color:#8A938A; }
+
+/* —— 窗口客户区 880×700 —— */
+.win{
+  max-width:880px; margin:0 auto; height:700px;
+  background:var(--paper); display:flex;
+  border:1px solid var(--line);
+  overflow:hidden;
+}
+
+/* —— 导航列 200 —— */
+.rail{ width:200px; flex:none; background:var(--rail); display:flex; flex-direction:column; }
+.brand{
+  height:64px; flex:none; display:flex; align-items:center; gap:10px;
+  padding:0 20px; border-bottom:1px solid var(--bark);
+}
+.brand svg{ width:22px; height:22px; flex:none; }
+.brand-name{ font-size:16px; font-weight:600; color:var(--ink); letter-spacing:.5px; }
+.nav{ padding:10px 12px; display:flex; flex-direction:column; gap:2px; }
+.nav-item{
+  height:54px; display:flex; align-items:center; padding:0 16px;
+  font-size:16px; color:var(--nav-text); border-radius:8px; cursor:pointer; user-select:none;
+}
+.nav-item:hover{ background:var(--rail-hover); }
+.nav-item.sel{ background:var(--rail-sel); color:var(--leaf-deep); font-weight:600; }
+.nav-filler{ flex:1; }
+
+/* —— 内容区 —— */
+.content{ flex:1; display:flex; flex-direction:column; min-width:0; }
+.page-title{ flex:none; height:80px; display:flex; align-items:flex-end; padding:0 26px 24px; }
+.page-title h1{ font-size:24px; font-weight:600; color:var(--ink); letter-spacing:.5px; }
+.titlebar{ flex:none; height:80px; display:flex; align-items:flex-end; gap:14px; padding:0 26px 24px; }
+.titlebar h1{ font-size:24px; font-weight:600; color:var(--ink); letter-spacing:.5px; }
+.backbtn{
+  height:30px; padding:0 12px; border-radius:6px; font-size:13px;
+  border:1px solid var(--leaf); color:var(--leaf-deep); background:transparent; cursor:pointer;
+  display:inline-flex; align-items:center; font-family:inherit;
+}
+.backbtn:hover{ background:var(--rail-sel); }
+.body{ flex:1; overflow-y:auto; padding:0 26px 26px; }
+
+/* —— 条目行 —— */
+.item{ padding:18px 0; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:20px; align-items:flex-start; }
+.item + .item{ margin-top:0; }
+.item .left{ min-width:0; }
+.item-title{ font-size:16px; font-weight:500; color:var(--ink); }
+.item-title.has-tag{ display:flex; align-items:center; gap:10px; }
+.item-desc{ font-size:13px; color:var(--secondary); margin-top:5px; line-height:1.6; }
+.item .right{ flex:none; display:flex; align-items:center; gap:10px; padding-top:2px; }
+.pathrow .item-desc{ font-family:"Cascadia Code",Consolas,"Courier New",monospace; font-size:12px; }
+
+/* —— chips 二选一 —— */
+.chips{ display:inline-flex; border:1px solid var(--chip-border); border-radius:6px; overflow:hidden; background:var(--chip-bg); flex:none; }
+.chip{ padding:0 16px; height:32px; line-height:32px; font-size:14px; color:var(--secondary); cursor:pointer; user-select:none; white-space:nowrap; }
+.chip + .chip{ border-left:1px solid var(--line); }
+.chip.on{ background:var(--rail-sel); color:var(--leaf-deep); font-weight:600; }
+
+/* —— 按钮 —— */
+.btn{
+  height:32px; padding:0 16px; border:none; border-radius:6px; cursor:pointer;
+  font-size:14px; font-weight:500; font-family:inherit;
+  background:var(--leaf); color:var(--on-leaf); white-space:nowrap;
+}
+.btn:hover{ filter:brightness(1.06); }
+.btn.ghost{ background:transparent; border:1px solid var(--leaf); color:var(--leaf-deep); }
+.btn.warn{ background:var(--warn); }
+.btn:disabled{ opacity:.45; cursor:default; filter:none; }
+
+/* —— 规划中标签 + 占位展开 —— */
+.tag{
+  display:inline-flex; align-items:center; gap:6px; height:22px; padding:0 9px;
+  background:var(--tag-bg); color:var(--tag-text); border-radius:11px;
+  font-size:12px; flex:none;
+}
+.tag::before{ content:""; width:6px; height:6px; border-radius:50%; background:var(--sprout); }
+.expand{
+  margin-top:2px; padding:12px 14px; background:var(--expand-bg);
+  border:1px solid var(--line); border-radius:8px;
+  font-size:13px; color:var(--secondary); line-height:1.6;
+}
+.expand b{ color:var(--ink); font-weight:600; }
+
+/* —— 词库内联列表 —— */
+.packrow{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; }
+.packrow + .packrow{ border-top:1px solid var(--line); }
+.packname{ font-size:14px; font-weight:600; color:var(--ink); }
+.packmeta{ font-size:12px; color:var(--secondary); margin-top:3px; line-height:1.5; }
+.packfixed{ font-size:12px; color:var(--secondary); }
+.importrow{ margin-top:12px; display:flex; align-items:center; gap:10px; }
+.importrow .note{ font-size:12px; color:var(--secondary); }
+
+/* —— 检查更新结果区 —— */
+.result{
+  margin-top:14px; border:1px solid var(--line); border-radius:8px;
+  background:var(--expand-bg); padding:12px 14px;
+  font-size:12.5px; color:var(--secondary); line-height:1.7;
+}
+.result .r-title{ font-size:13px; font-weight:600; color:var(--ink); margin-bottom:6px; }
+.result .mono{ display:block; white-space:pre-wrap; word-break:break-all; font-size:12px; }
+.emptyhint{ color:var(--secondary); font-size:13px; }
+
+/* —— 状态行（子视图） —— */
+.statrow{ display:flex; justify-content:space-between; align-items:center; padding:12px 0; border-bottom:1px solid var(--line); gap:12px; }
+.statrow .k{ font-size:14px; color:var(--ink); }
+.statrow .v{ font-size:13px; font-weight:500; }
+.stat-ok{ color:var(--ok); }
+.stat-err{ color:var(--warn); }
+.stat-neu{ color:var(--secondary); }
+.section-h{ font-size:13px; font-weight:600; color:var(--secondary); margin:18px 0 2px; }
+
+/* —— 诊断只读列表 —— */
+.diag{ display:flex; gap:12px; padding:11px 0; border-bottom:1px solid var(--line); font-size:13px; }
+.diag .k{ flex:none; width:96px; color:var(--secondary); }
+.diag .v{ color:var(--ink); min-width:0; word-break:break-all; }
+.diag .v.mono{ font-size:12px; }
+
+/* —— 浮层面板（独立窗口；本稿悬浮演示） —— */
+.panel{
+  position:fixed; right:24px; top:120px; width:636px;
+  background:var(--paper); border:1px solid var(--panel-border); border-radius:10px;
+  display:none; z-index:50;
+}
+.panel.show{ display:block; }
+.p-head{
+  height:54px; display:flex; align-items:center; justify-content:space-between;
+  padding:0 16px; border-bottom:1px solid var(--line); font-size:14px;
+}
+.p-head .g{ font-size:13px; color:var(--secondary); }
+.p-grid{ padding:14px; display:grid; grid-template-columns:repeat(10,56px); gap:6px; }
+.cell{
+  height:56px; border:1px solid var(--chip-border); border-radius:6px;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+  cursor:pointer; background:var(--chip-bg);
+}
+.cell .c{ font-size:24px; line-height:1; }
+.cell .l{ font-size:11px; color:var(--secondary); }
+.cell:hover{ background:var(--rail-hover); }
+.cell.sel{ background:var(--leaf); border-color:var(--leaf); }
+.cell.sel .l{ color:var(--on-leaf); }
+.p-foot{
+  height:46px; display:flex; align-items:center; justify-content:space-between;
+  padding:0 16px; border-top:1px solid var(--line); font-size:13px;
+}
+.p-foot .pg{ color:var(--secondary); }
+.pgbtn{ background:transparent; border:1px solid var(--chip-border); color:var(--ink); border-radius:6px; height:26px; padding:0 10px; cursor:pointer; font-size:12px; }
+.pgbtn:hover{ background:var(--rail-sel); }
+.p-note{ padding:8px 16px 12px; font-size:11.5px; color:var(--secondary); border-top:1px solid var(--line); line-height:1.6; }
+
+/* —— 焦点可见（评审要求） —— */
+:focus-visible{ outline:2px solid var(--leaf); outline-offset:2px; }
+
+/* —— 页脚说明 —— */
+.footnote{ max-width:880px; margin:16px auto 0; color:#8A938A; font-size:12px; line-height:1.8; }
+.footnote code{ background:#1C241E; color:#9AC36A; padding:1px 6px; border-radius:4px; font-size:11.5px; }
+</style>
+</head>
+<body>
+
+<!-- 评审信息条 -->
+<div class="reviewbar">
+  <div><b>竹叶输入法 · 设置窗口视觉稿</b>（v0.1 评审稿，对应 <code class="mono">docs/设置窗口视觉设计.md</code>）<br>
+  客户区 880×700 · 导航 200 · 行高 76 · 字号 16/13/24（T-125 基线锁定）· 全部面容 GDI 可表达</div>
+  <div class="switchgroup" role="group" aria-label="主题切换">
+    <button data-theme-btn="light" class="on">浅色</button>
+    <button data-theme-btn="dark">深色</button>
+  </div>
+</div>
+
+<!-- 系统标题栏示意 -->
+<div class="chrome">
+  <span class="dots"><span></span><span></span><span></span></span>
+  <span>竹叶输入法（系统自绘标题栏：竹 LOGO + 标题，T-142；虚线外框示意，非设置窗口自绘）</span>
+  <span class="note">_ □ ×</span>
+</div>
+
+<!-- 窗口客户区 -->
+<div class="win" id="win">
+
+  <!-- 导航列 -->
+  <div class="rail">
+    <div class="brand">
+      <!-- 竹叶图形：与 logo 同叶片曲线家族，GDI 可沿路径绘制或预渲染位图 -->
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <defs>
+          <linearGradient id="leafg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#3D7A4E"/><stop offset="1" stop-color="#2C5A3B"/>
+          </linearGradient>
+        </defs>
+        <path d="M4 20 C9 16 15 10 20 4 C18 11 13 17 4 20 Z" fill="url(#leafg)"/>
+        <path d="M7 18 C11 12 16 8 19 5" stroke="#F7F9F4" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+      </svg>
+      <span class="brand-name">竹叶输入法</span>
+    </div>
+    <div class="nav" role="tablist" aria-orientation="vertical">
+      <div class="nav-item sel" data-page="common" role="tab" aria-selected="true" tabindex="0">常用设置</div>
+      <div class="nav-item" data-page="toolbox" role="tab" tabindex="0">工具箱</div>
+      <div class="nav-item" data-page="about" role="tab" tabindex="0">关于与更新</div>
+    </div>
+    <div class="nav-filler"></div>
+  </div>
+
+  <!-- 内容区 -->
+  <div class="content">
+
+    <!-- 页面 A：常用设置 -->
+    <div class="view" id="view-common">
+      <div class="page-title"><h1>常用设置</h1></div>
+      <div class="body">
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">主题</div>
+            <div class="item-desc">切换窗口与候选窗主题；重启输入法后生效</div>
+          </div>
+          <div class="right">
+            <div class="chips"><span class="chip on">浅色</span><span class="chip">深色</span></div>
+          </div>
+        </div>
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">候选拼音</div>
+            <div class="item-desc">候选窗是否显示拼音；重启输入法后生效</div>
+          </div>
+          <div class="right">
+            <div class="chips"><span class="chip">关闭</span><span class="chip on">显示</span></div>
+          </div>
+        </div>
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">英文输入法</div>
+            <div class="item-desc">新会话默认从中英模式开始；重启输入法后新会话生效</div>
+          </div>
+          <div class="right">
+            <div class="chips"><span class="chip on">中文</span><span class="chip">英文</span></div>
+          </div>
+        </div>
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">添加词库</div>
+            <div class="item-desc">启用领域词库，或导入本地词库文件（.zyct）</div>
+          </div>
+          <div class="right"><span class="tag">4 个词库</span></div>
+        </div>
+        <div style="padding:4px 0 14px;border-bottom:1px solid var(--line);">
+          <div class="packrow">
+            <div><div class="packname">基础词典 <span class="packfixed">（随安装预置）</span></div>
+            <div class="packmeta mono">378,312 词条 · 23.06 MB · v2026.09.29</div></div>
+            <div class="packfixed">固定启用</div>
+          </div>
+          <div class="packrow">
+            <div><div class="packname">信息技术</div>
+            <div class="packmeta mono">编程与行业术语 · 0.91 MB · v2026.09.29-p3</div></div>
+            <div class="chips"><span class="chip on">启用</span></div>
+          </div>
+          <div class="packrow">
+            <div><div class="packname">医疗</div>
+            <div class="packmeta mono">医学与药品术语 · 1.31 MB · v2026.09.29-p3</div></div>
+            <div class="chips"><span class="chip on">启用</span></div>
+          </div>
+          <div class="packrow">
+            <div><div class="packname">网络用语</div>
+            <div class="packmeta mono">9,900 词条 · 0.03 MB · v2026.09.29-p3</div></div>
+            <div class="chips"><span class="chip">停用</span></div>
+          </div>
+          <div class="importrow">
+            <button class="btn ghost">导入本地词库…</button>
+            <span class="note">本地导入的词库不参与在线更新签名信任链</span>
+          </div>
+        </div>
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">恢复状态栏</div>
+            <div class="item-desc">语言栏项目丢失时重新注册</div>
+          </div>
+          <div class="right"><button class="btn ghost">恢复</button></div>
+        </div>
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">管理输入法</div>
+            <div class="item-desc">当前状态：<span class="stat-ok" style="font-weight:500;">已注册</span> · 在 Windows 输入法设置中管理或移除</div>
+          </div>
+          <div class="right"><button class="btn ghost">打开系统输入法设置</button></div>
+        </div>
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">修复输入法</div>
+            <div class="item-desc">检测注册状态与词库完整性；修复操作需管理员权限</div>
+          </div>
+          <div class="right"><button class="btn" data-subview="repair">检测并修复</button></div>
+        </div>
+
+        <div class="item pathrow">
+          <div class="left">
+            <div class="item-title">打开配置文件</div>
+            <div class="item-desc mono">%APPDATA%\zhu-ye-ime\config.json</div>
+          </div>
+          <div class="right"><button class="btn ghost">打开</button></div>
+        </div>
+
+        <div class="item pathrow">
+          <div class="left">
+            <div class="item-title">打开数据目录</div>
+            <div class="item-desc mono">%APPDATA%\zhu-ye-ime\</div>
+          </div>
+          <div class="right"><button class="btn ghost">打开</button></div>
+        </div>
+
+        <div class="item pathrow">
+          <div class="left">
+            <div class="item-title">打开日志目录</div>
+            <div class="item-desc mono">%LOCALAPPDATA%\zhu-ye-ime\logs\</div>
+          </div>
+          <div class="right"><button class="btn ghost">打开</button></div>
+        </div>
+
+        <div class="item" data-expandable>
+          <div class="left">
+            <div class="item-title has-tag">简繁切换 <span class="tag">规划中</span></div>
+            <div class="item-desc">候选结果简体/繁体一键切换</div>
+          </div>
+          <div class="right"><span class="btn ghost" style="pointer-events:none;opacity:.85;">…</span></div>
+        </div>
+        <div class="expand" data-expand hidden>
+          <b>规划中</b>：与生僻字输入、全半角切换同属候选处理增强，后端实现后开放。
+          当前不会灰显隐藏——你可以先看到它将来会做什么。<br>
+          占用：本条为「占位展开态」演示。
+        </div>
+
+        <div class="item" data-expandable>
+          <div class="left">
+            <div class="item-title has-tag">全半角切换 <span class="tag">规划中</span></div>
+            <div class="item-desc">标点与字母的全角/半角切换</div>
+          </div>
+        </div>
+        <div class="expand" data-expand hidden><b>规划中</b>：后端实现后开放。</div>
+
+        <div class="item" data-expandable style="border-bottom:none;">
+          <div class="left">
+            <div class="item-title has-tag">生僻字输入 <span class="tag">规划中</span></div>
+            <div class="item-desc">生僻字的拼音与笔画输入支持</div>
+          </div>
+        </div>
+        <div class="expand" data-expand hidden><b>规划中</b>：后端实现后开放。</div>
+
+      </div>
+    </div>
+
+    <!-- 页面 B：工具箱 -->
+    <div class="view" id="view-toolbox" hidden>
+      <div class="page-title"><h1>工具箱</h1></div>
+      <div class="body">
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">emoji 面板</div>
+            <div class="item-desc">342 个常用 emoji，按拼音别名分组；选中即上屏，面板不夺取焦点，可连续点选</div>
+          </div>
+          <div class="right"><button class="btn" data-panel="emoji">打开 emoji 面板</button></div>
+        </div>
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">符号大全面板</div>
+            <div class="item-desc">标点、数学、其他共 230+ 字符；选中即上屏</div>
+          </div>
+          <div class="right"><button class="btn" data-panel="symbol">打开符号面板</button></div>
+        </div>
+
+        <div class="item" data-expandable style="border-bottom:none;">
+          <div class="left">
+            <div class="item-title has-tag">图片表情 <span class="tag">规划中</span></div>
+            <div class="item-desc">本地图片表情包管理与发送</div>
+          </div>
+        </div>
+        <div class="expand" data-expand hidden><b>规划中</b>：依赖本地图片管理与宿主集成，后端实现后开放。</div>
+
+      </div>
+    </div>
+
+    <!-- 页面 C：关于与更新 -->
+    <div class="view" id="view-about" hidden>
+      <div class="page-title"><h1>关于与更新</h1></div>
+      <div class="body">
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">启用在线更新</div>
+            <div class="item-desc">默认关闭：开启前输入法保证零出站网络请求；保存后下次检查即生效</div>
+          </div>
+          <div class="right">
+            <div class="chips"><span class="chip on">关闭</span><span class="chip">开启</span></div>
+          </div>
+        </div>
+
+        <div class="item">
+          <div class="left">
+            <div class="item-title">检查更新</div>
+            <div class="item-desc">从更新源获取词典与程序更新（需先开启在线更新）</div>
+          </div>
+          <div class="right"><button class="btn" disabled>检查更新</button></div>
+        </div>
+        <div class="result">
+          <div class="r-title">检查结果</div>
+          <span class="emptyhint">尚未执行检查。开启「启用在线更新」后即可检查（窗口自身不联网，更新由独立更新器完成）。</span>
+        </div>
+
+        <div class="item" style="border-bottom:none;">
+          <div class="left">
+            <div class="item-title">版本与诊断信息</div>
+            <div class="item-desc">版本、配置与数据路径、已装词库清单（全部本地读取）</div>
+          </div>
+          <div class="right"><button class="btn ghost" data-subview="diag">查看诊断</button></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- 子视图：修复输入法 -->
+    <div class="view" id="view-repair" hidden>
+      <div class="titlebar">
+        <button class="backbtn" data-back>← 返回</button>
+        <h1>修复输入法</h1>
+      </div>
+      <div class="body">
+
+        <div class="section-h">检测结果</div>
+        <div class="statrow"><span class="k">TSF 输入法注册</span><span class="v stat-ok">正常</span></div>
+        <div class="statrow"><span class="k">语言栏项目</span><span class="v stat-ok">正常</span></div>
+        <div class="statrow"><span class="k">词库目录与文件</span><span class="v stat-ok">正常</span></div>
+        <div class="statrow"><span class="k">配置文件 / 用户词库</span><span class="v stat-ok">正常</span></div>
+
+        <div class="section-h">修复操作（先报告后动手，全部由你显式触发）</div>
+        <div class="statrow">
+          <div><span class="k">一级修复</span>
+          <div style="font-size:12px;color:var(--secondary);margin-top:3px;">重建缺失目录、损坏文件改名 .bak 后重建；无需管理员</div></div>
+          <div><button class="btn ghost">运行一级修复</button></div>
+        </div>
+        <div class="statrow" style="border-bottom:none;">
+          <div><span class="k">二级修复：重注册输入法</span>
+          <div style="font-size:12px;color:var(--secondary);margin-top:3px;">重写两棵注册表树并重载语言栏；需要管理员，完成后重启 ctfmon</div></div>
+          <div><button class="btn">重注册（需管理员）</button></div>
+        </div>
+
+        <div class="result">
+          <div class="r-title">修复日志</div>
+          <span class="emptyhint">尚未执行任何修复。</span>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- 子视图：版本与诊断信息 -->
+    <div class="view" id="view-diag" hidden>
+      <div class="titlebar">
+        <button class="backbtn" data-back>← 返回</button>
+        <h1>版本与诊断信息</h1>
+      </div>
+      <div class="body">
+
+        <div class="section-h">版本</div>
+        <div class="diag"><span class="k">程序版本</span><span class="v mono">0.18.0 (M1–M14)</span></div>
+        <div class="diag"><span class="k">TSF DLL</span><span class="v mono">0.18.0 · 2,199,552 B</span></div>
+        <div class="diag"><span class="k">词典格式</span><span class="v mono">ZYDT v1</span></div>
+
+        <div class="section-h">路径</div>
+        <div class="diag"><span class="k">配置文件</span><span class="v mono">%APPDATA%\zhu-ye-ime\config.json</span></div>
+        <div class="diag"><span class="k">数据目录</span><span class="v mono">%APPDATA%\zhu-ye-ime\</span></div>
+        <div class="diag"><span class="k">日志目录</span><span class="v mono">%LOCALAPPDATA%\zhu-ye-ime\logs\</span></div>
+
+        <div class="section-h">已装词库</div>
+        <div class="diag"><span class="k">基础词典</span><span class="v mono">378,312 词条 · 23.06 MB</span></div>
+        <div class="diag"><span class="k">信息技术</span><span class="v mono">0.91 MB · v2026.09.29-p3 · 已启用</span></div>
+        <div class="diag"><span class="k">医疗</span><span class="v mono">1.31 MB · v2026.09.29-p3 · 已启用</span></div>
+        <div class="diag"><span class="k">网络用语</span><span class="v mono">0.03 MB · v2026.09.29-p3 · 未启用</span></div>
+
+        <div class="section-h">更新</div>
+        <div class="diag" style="border-bottom:none;"><span class="k">最近检查</span><span class="v mono">2026-10-09 21:30（manual）</span></div>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 浮层面板：emoji -->
+<div class="panel" id="panel-emoji" role="dialog" aria-label="emoji 面板">
+  <div class="p-head"><span>emoji <span class="g">按拼音别名分组 · 342 个</span></span>
+    <button class="pgbtn" data-close-panel>关闭</button></div>
+  <div class="p-grid">
+    <div class="cell"><span class="c">😀</span><span class="l">xiao</span></div>
+    <div class="cell"><span class="c">😄</span><span class="l">kaixin</span></div>
+    <div class="cell"><span class="c">😁</span><span class="l">deyi</span></div>
+    <div class="cell"><span class="c">😂</span><span class="l">kuxiao</span></div>
+    <div class="cell"><span class="c">🤣</span><span class="l">haixiu</span></div>
+    <div class="cell"><span class="c">😊</span><span class="l">tian</span></div>
+    <div class="cell"><span class="c">😍</span><span class="l">ai</span></div>
+    <div class="cell sel"><span class="c">❤️</span><span class="l">ai</span></div>
+    <div class="cell"><span class="c">👍</span><span class="l">zan</span></div>
+    <div class="cell"><span class="c">🙏</span><span class="l">qiu</span></div>
+    <div class="cell"><span class="c">🎉</span><span class="l">zhuhe</span></div>
+    <div class="cell"><span class="c">✨</span><span class="l">shanliang</span></div>
+    <div class="cell"><span class="c">🔥</span><span class="l">huo</span></div>
+    <div class="cell"><span class="c">💡</span><span class="l">dengpao</span></div>
+    <div class="cell"><span class="c">📌</span><span class="l">ding</span></div>
+    <div class="cell"><span class="c">✅</span><span class="l">dui</span></div>
+    <div class="cell"><span class="c">❌</span><span class="l">cuo</span></div>
+    <div class="cell"><span class="c">🐷</span><span class="l">zhu</span></div>
+    <div class="cell"><span class="c">🐶</span><span class="l">gou</span></div>
+    <div class="cell"><span class="c">🌸</span><span class="l">hua</span></div>
+  </div>
+  <div class="p-foot"><span class="pg">组：常用</span>
+    <span style="display:flex;gap:6px;"><button class="pgbtn">◀ 上一页</button><button class="pgbtn">下一页 ▶</button></span>
+    <span class="pg">第 1 / 6 页</span></div>
+  <div class="p-note">真实渲染注：GDI 不支持彩色字体，面板字形为单色轮廓并附拼音别名（T-074 已知限制）；本稿用彩色系统字形仅演示布局。点击不夺取焦点，选中即经 SendInput 上屏。</div>
+</div>
+
+<!-- 浮层面板：符号 -->
+<div class="panel" id="panel-symbol" role="dialog" aria-label="符号大全面板">
+  <div class="p-head"><span>符号大全 <span class="g">标点 · 数学 · 其他</span></span>
+    <button class="pgbtn" data-close-panel>关闭</button></div>
+  <div class="p-grid">
+    <div class="cell"><span class="c">，</span><span class="l">douhao</span></div>
+    <div class="cell"><span class="c">。</span><span class="l">juhao</span></div>
+    <div class="cell"><span class="c">、</span><span class="l">dunhao</span></div>
+    <div class="cell"><span class="c">；</span><span class="l">fenhao</span></div>
+    <div class="cell"><span class="c">：</span><span class="l">maohao</span></div>
+    <div class="cell"><span class="c">？</span><span class="l">wenhao</span></div>
+    <div class="cell"><span class="c">！</span><span class="l">tanhao</span></div>
+    <div class="cell"><span class="c">“</span><span class="l">zuoyin</span></div>
+    <div class="cell"><span class="c">”</span><span class="l">youyin</span></div>
+    <div class="cell"><span class="c">（</span><span class="l">zuokuo</span></div>
+    <div class="cell"><span class="c">）</span><span class="l">youkuo</span></div>
+    <div class="cell"><span class="c">【</span><span class="l">zuofang</span></div>
+    <div class="cell"><span class="c">】</span><span class="l">youfang</span></div>
+    <div class="cell"><span class="c">《</span><span class="l">zuoshuyu</span></div>
+    <div class="cell"><span class="c">》</span><span class="l">youshuyu</span></div>
+    <div class="cell"><span class="c">…</span><span class="l">sheng</span></div>
+    <div class="cell"><span class="c">—</span><span class="l">pozhe</span></div>
+    <div class="cell"><span class="c">·</span><span class="l">jianju</span></div>
+    <div class="cell"><span class="c">＋</span><span class="l">jia</span></div>
+    <div class="cell"><span class="c">÷</span><span class="l">chu</span></div>
+    <div class="cell"><span class="c">±</span><span class="l">zhengfu</span></div>
+    <div class="cell"><span class="c">×</span><span class="l">cheng</span></div>
+    <div class="cell"><span class="c">≈</span><span class="l">yuedeng</span></div>
+    <div class="cell"><span class="c">≠</span><span class="l">budeng</span></div>
+    <div class="cell"><span class="c">≤</span><span class="l">xiaoyu</span></div>
+    <div class="cell"><span class="c">≥</span><span class="l">dayu</span></div>
+    <div class="cell"><span class="c">√</span><span class="l">gen</span></div>
+    <div class="cell"><span class="c">∞</span><span class="l">wuxian</span></div>
+    <div class="cell"><span class="c">℃</span><span class="l">she</span></div>
+    <div class="cell"><span class="c">￥</span><span class="l">yuan</span></div>
+  </div>
+  <div class="p-foot"><span class="pg">组：全部</span>
+    <span style="display:flex;gap:6px;"><button class="pgbtn">◀ 上一页</button><button class="pgbtn">下一页 ▶</button></span>
+    <span class="pg">第 1 / 1 页</span></div>
+  <div class="p-note">真实渲染注：同 emoji 面板（GDI 单色轮廓 + 别名）。</div>
+</div>
+
+<div class="footnote">
+  评审说明：本稿为<b>单文件视觉稿</b>，仅用于评审「面容」（配色/字体层级/选中态/控件形态）；度量与条目行为以 T-125 与
+  <code>docs/设置窗口设计.md</code> 为准。右侧「检测并修复」「查看诊断」可进入子视图演示；工具箱按钮打开浮层面板演示；
+  点击「简繁切换」行可看占位展开态。全部样式元素均为 GDI 可表达（实色、细线、圆角、ClearType 文字），无渐变、无投影、无动画。
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  /* 主题切换 */
+  document.querySelectorAll('[data-theme-btn]').forEach(function(b){
+    b.addEventListener('click',function(){
+      root.setAttribute('data-theme',b.getAttribute('data-theme-btn'));
+      document.querySelectorAll('[data-theme-btn]').forEach(function(x){x.classList.toggle('on',x===b);});
+    });
+  });
+  /* 页面/子视图切换 */
+  var pages=['common','toolbox','about'];
+  function showView(id){
+    document.querySelectorAll('.view').forEach(function(v){v.hidden=(v.id!==id);});
+    document.querySelectorAll('.nav-item').forEach(function(n){
+      var p=n.getAttribute('data-page');
+      n.classList.toggle('sel',id==='view-'+p);
+      n.setAttribute('aria-selected',id==='view-'+p?'true':'false');
+    });
+  }
+  document.querySelectorAll('.nav-item').forEach(function(n){
+    n.addEventListener('click',function(){ showView('view-'+n.getAttribute('data-page')); });
+    n.addEventListener('keydown',function(e){ if(e.key==='Enter'||e.key===' '){e.preventDefault();showView('view-'+n.getAttribute('data-page'));} });
+  });
+  document.querySelectorAll('[data-subview]').forEach(function(b){
+    b.addEventListener('click',function(){ showView('view-'+b.getAttribute('data-subview')); });
+  });
+  document.querySelectorAll('[data-back]').forEach(function(b){
+    b.addEventListener('click',function(){ showView('view-common'); });
+  });
+  /* 浮层面板 */
+  document.querySelectorAll('[data-panel]').forEach(function(b){
+    b.addEventListener('click',function(){
+      document.querySelectorAll('.panel').forEach(function(p){p.classList.remove('show');});
+      document.getElementById('panel-'+b.getAttribute('data-panel')).classList.add('show');
+    });
+  });
+  document.querySelectorAll('[data-close-panel]').forEach(function(b){
+    b.addEventListener('click',function(){ b.closest('.panel').classList.remove('show'); });
+  });
+  /* 占位展开态 */
+  document.querySelectorAll('[data-expandable]').forEach(function(row){
+    row.style.cursor='pointer';
+    row.addEventListener('click',function(){
+      var ex=row.nextElementSibling;
+      if(ex&&ex.hasAttribute('data-expand')){ ex.hidden=!ex.hidden; }
+    });
+  });
+})();
+</script>
+</body>
+</html>

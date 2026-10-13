@@ -44,7 +44,7 @@ Three layers:
   2. otherwise → level gate against `config.log_level`, then a lazily
      assembled `FileLogger` behind
      `static PRODUCT_LOGGER: Mutex<Option<FileLogger>>` writing
-     `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log` (1 MiB rotation).
+     `%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log` (1 MiB rotation).
   `LOCALAPPDATA` missing → skip file writing, keep only `OutputDebugStringW`.
   The 53 call sites were graded (8 error / 7 warn / 14 info / 24 debug; see
   the 诊断产品化设计 §4.1 table); error/warn/info sites call
@@ -59,7 +59,7 @@ Three layers:
   the keystroke path when the config level is `Warn`.
 - **settings (window/shell/model/config):** `acceptance_log_dir` became
   `product_log_dir() -> Option<PathBuf>` =
-  `%LOCALAPPDATA%\ai-zhu-ye-ime\logs` (same mechanism as `data_dir`);
+  `%LOCALAPPDATA%\zhu-ye-ime\logs` (same mechanism as `data_dir`);
   diagnostics and the "open log dir" action use product wording, and the open
   action creates the directory idempotently first (the settings process may
   open it before TSF ever wrote a line).
@@ -93,7 +93,7 @@ possible).
 
 - Default installs (no `log_level` key): zero file writes and zero directory
   syscalls unless a `Warn`/`Error` fires; every `Error`/`Warn` lands in
-  `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log`, rotated at 1 MiB.
+  `%LOCALAPPDATA%\zhu-ye-ime\logs\ime.log`, rotated at 1 MiB.
 - Acceptance regressions are impossible by construction while the sentinel
   file exists: that branch reuses the old formatting and path unchanged.
 - `debug` messages keep flowing to `OutputDebugStringW` at every level (no

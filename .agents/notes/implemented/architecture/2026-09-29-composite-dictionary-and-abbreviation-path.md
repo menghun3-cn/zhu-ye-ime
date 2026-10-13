@@ -53,15 +53,18 @@ lookup went from 9.69 µs to 2.30 µs per query after adding this path, against
 
 ### Configuration
 
-`zhu_ye_core::pack_config` parses `%APPDATA%\ai-zhu-ye-ime\config.json`:
+`zhu_ye_core::pack_config` parses `%APPDATA%\zhu-ye-ime\config.json`:
 
 ```json
 { "version": 1, "enabled_packs": ["it","med","slang"],
-  "online_update": false, "last_check": null }
+  "online_update": true, "last_check": null }
 ```
 
-`online_update` defaults to `false`, which is what keeps the default-off guarantee
-(P-03) testable at the config layer rather than only in the updater. Unknown pack
+`online_update` defaults to `true` since T-154 (2026-10-13; the previous
+off-by-default of P-03 was reversed — an old config missing the key now loads
+as enabled, and explicit `false` keeps the zero-network gate). See
+[2026-10-13-online-update-default-on-app-meta](../../implemented/feature/2026-10-13-online-update-default-on-app-meta.md).
+Unknown pack
 ids are filtered into a `unknown` list and logged; a corrupt or unreadable file
 falls back to the default (base only) and returns a diagnostic. `plan_packs`
 resolves `<packs_dir>/<id>.zyct` and reports configured-but-missing packs

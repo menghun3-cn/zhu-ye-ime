@@ -77,14 +77,21 @@ verified against the complete, unmodified manifest — an earlier attempt to fil
 the manifest before calling `apply_release` broke verification, because trimming
 the pack list changes the canonical bytes.
 
-### Separate process, default off
+### Separate process; **on by default since T-154** (2026-10-13)
 
 `zhu-ye-updater` is a standalone binary and the only component that performs
 network I/O (S-4). It exits after one operation; nothing resident remains.
 
-The default-off guarantee is enforced at the config layer: with
-`online_update: false`, `check` and `apply` return before constructing any
-request. Verified by pointing the manifest URL at an unreachable address — the
+The off-by-default guarantee shipped with this note was **reversed by T-154**:
+`ConfigFile.online_update` now defaults to `true` (serde default; old configs
+missing the key load as enabled), so an installed system checks for updates
+without user action. What stays unchanged: with **explicit** `online_update:
+false`, `check` and `apply` still return before constructing any request, and
+no process is spawned. See
+[2026-10-13-online-update-default-on-app-meta](../../implemented/feature/2026-10-13-online-update-default-on-app-meta.md)
+for the reversal record and the new signed `app.json`.
+
+Verified by pointing the manifest URL at an unreachable address — the
 command still exits successfully without a network attempt, which would be
 impossible if a connection were being made.
 

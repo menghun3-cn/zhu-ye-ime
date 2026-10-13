@@ -12,12 +12,12 @@
 4. 清理 staging 与 iss，输出产物路径、大小与 SHA-256
 
 Inno 安装语义（与验收标准 §17.1 对齐）：
-- 载荷直接安装到 {app}（默认 %ProgramFiles%\ai-zhu-ye-ime），目录页禁用，
+- 载荷直接安装到 {app}（默认 %ProgramFiles%\zhu-ye-ime），目录页禁用，
   固定目录保证与 install.ps1 的 Get-TsfInstallDir 语义一致
 - [Run] 调用 install.ps1（-SkipBuild -InstallDir {app}\tsf）：版本化 DLL 复制、
   TSF 注册、领域包预置、快捷方式全部复用既有脚本，零行为改写
 - [UninstallRun] 调用 uninstall.ps1（-InstallDir {app}\tsf）：TSF 注册清理 +
-  程序文件清理；%APPDATA%\ai-zhu-ye-ime 用户数据保留
+  程序文件清理；%APPDATA%\zhu-ye-ime 用户数据保留
 - Inno 卸载器随后删除自身注册的 scripts/packs/docs/bin 文件，与脚本清理互补
 
 签名（D-75）：默认不签名（接受 SmartScreen）；-SignCommand 提供签名命令模板时
@@ -70,7 +70,7 @@ if (-not $OutputDir) {
 $null = New-Item -ItemType Directory -Path $OutputDir -Force
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 $portableRoot = Join-Path $repoRoot 'target\portable'
-$staging = Join-Path $portableRoot "ai-zhu-ye-ime-$Version-stage"
+$staging = Join-Path $portableRoot "zhu-ye-ime-$Version-stage"
 $setupExe = Join-Path $OutputDir "ai-zhu-ye-ime-setup-$Version.exe"
 $issPath = Join-Path $portableRoot "setup-$Version.iss"
 
@@ -102,7 +102,7 @@ AppVersion={#Version}
 AppVerName=竹叶输入法 {#Version}
 AppPublisher=menghun3-cn
 AppPublisherURL=https://github.com/menghun3-cn/zhu-ye-ime
-DefaultDirName={autopf}\ai-zhu-ye-ime
+DefaultDirName={autopf}\zhu-ye-ime
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin

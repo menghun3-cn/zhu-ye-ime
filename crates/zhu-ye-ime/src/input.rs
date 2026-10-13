@@ -13,6 +13,7 @@ use zhu_ye_core::candidate::{
 };
 use zhu_ye_core::dict::{Dictionary, InMemoryDictionary};
 use zhu_ye_core::pinyin::{segment_all, SyllableTable};
+use zhu_ye_core::tone::ToneMap;
 use zhu_ye_core::{unix_now, DictionaryFile, Result, UserDictStore, UserDictionary};
 
 use crate::candidate_ui::{CandidateUiItem, CandidateUiView};
@@ -22,6 +23,11 @@ pub const CANDIDATE_PAGE_SIZE: usize = 9;
 
 /// 前缀候选（T-029）补全组最多进入排序的条数；防止短前缀命中过多词条。
 const PREFIX_COMPLETION_CAP: usize = 32;
+
+/// 音节分隔符的**显示**字符（T-134，定义见 `candidate_ui`）：英文弯撇 `'`
+/// （U+2019）。T-139 起绘制层用 Segoe UI 直撇渲染该分隔符（页眉
+/// `draw_header_mixed`）；此处转发保持既有引用路径不变。
+pub use crate::candidate_ui::SYLLABLE_SEP_DISPLAY;
 
 /// 缩写前缀补全（M6-R）最多追加的条数。
 const ABBREVIATION_COMPLETION_CAP: usize = 32;
@@ -68,6 +74,9 @@ pub struct InputEngine {
     table: SyllableTable,
     dictionary: Arc<dyn Dictionary>,
     composing: String,
+    /// 手动音节分隔符位置（T-128）：`composing`（纯拼音查询键）字符边界下标
+    /// 升序列表；显示层据此插入 `'` 并约束候选切分，查询键始终是去噪纯拼音。
+    manual_seps: Vec<usize>,
     candidates: Vec<Candidate>,
     mode: InputMode,
     previous_word: Option<String>,
@@ -119,6 +128,9 @@ pub struct InputEngine {
     /// 模糊音与纠错开关（FR-024；O-05 修订）。默认开；关闭后纠错组
     /// （模糊替换 + 少字母补全，`corrected_candidates`）不生成。
     enable_fuzzy: bool,
+    /// 带调拼音表（T-112 后续批四：候选窗拼音显示声调）。旁挂 tone 文件
+    /// 由调用方装配；未装配（默认空表）时候选拼音回退无调拼注。
+    tone: ToneMap,
 }
 
 /// 提交所需的候选快照；TSF 与引擎内部都以此为单位，避免借用冲突。
@@ -134,6 +146,29 @@ fn candidate_owned(candidate: &Candidate) -> CandidateSelection {
         translation: candidate.translation.clone(),
         pinyin: candidate.pinyin.clone(),
     }
+}
+
+/// 把中文层候选展开为译文层候选（T-131）：多义译文（`hello; hi`）拆成
+/// 多条，每行一个单义、保持原义顺序（次行分数微降保序）；无译文/拆后
+/// 全空的不进译文层。词性前缀保留在显示串里，上屏时另剥。
+fn build_translation_candidates(candidates: &[Candidate]) -> Vec<Candidate> {
+    let mut out = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let Some(translation) = candidate.translation.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let senses = zhu_ye_core::dict_format::split_translations(translation);
+        if senses.is_empty() {
+            continue;
+        }
+        for (offset, sense) in senses.into_iter().enumerate() {
+            let mut split = candidate.clone();
+            split.translation = Some(sense);
+            split.score = split.score.saturating_sub(offset as i64);
+            out.push(split);
+        }
+    }
+    out
 }
 
 /// 把「前组」（整句组）置于主候选之前；主候选与整句同文本时让位给前组。
@@ -170,6 +205,7 @@ impl InputEngine {
             table: SyllableTable::standard(),
             dictionary,
             composing: String::new(),
+            manual_seps: Vec::new(),
             candidates: Vec::new(),
             mode: InputMode::Chinese,
             previous_word: None,
@@ -193,7 +229,25 @@ impl InputEngine {
             en_lexicon: None,
             enable_abbreviation: true,
             enable_fuzzy: true,
+            tone: ToneMap::default(),
         }
+    }
+
+    /// 装配带调拼音表（T-112 后续批四：候选窗拼音显示声调）。
+    #[must_use]
+    pub fn with_tone_map(mut self, tone: ToneMap) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    /// 候选词的带调空格拼音；无词级/字级带调数据时返回空串（回退无调拼注）。
+    fn tone_spaced(&self, word: &str) -> String {
+        self.tone.word_tone_spaced(word).unwrap_or_default()
+    }
+
+    /// 候选 → 候选窗条目（含带调拼音装配）。
+    fn ui_item_for(&self, candidate: &Candidate) -> CandidateUiItem {
+        candidate_ui_item_tone(candidate, &self.tone_spaced(&candidate.text))
     }
 
     /// 挂载英文词表文件（T-085，`en.zyen`）；`None`（默认）回退第五期内嵌静态表。
@@ -828,8 +882,48 @@ impl InputEngine {
             .any(|entry| entry.pinyin.chars().any(|c| c.is_ascii_digit()))
     }
 
+    /// 手动插入音节分隔符 `'`（T-128，VK_OEM_7 组合态键路）：在输入串**当前末尾**
+    /// 标记音节边界（引擎无光标模型，手动分隔恒追加到串尾并保留），随后按新的
+    /// 边界约束刷新候选。同位置已有手动分隔符（连续按两次）返回 `false`。
+    pub fn insert_separator(&mut self) -> bool {
+        if self.composing.is_empty() || self.manual_seps.contains(&self.composing.len()) {
+            return false;
+        }
+        self.manual_seps.push(self.composing.len());
+        self.refresh_candidates();
+        true
+    }
+
+    /// 页眉显示串（T-128）：在 `composing` 中按「手动分隔符 ∪ 自动首选切分边界」
+    /// 插入显示用分隔符 `'`（U+2019，T-134）。自动边界取首选切分
+    /// （`segment_all` 首方案）的全部音节边界（用户决策：全部音节边界都
+    /// 显示，如 `nihao` → `ni'hao`），仅中文模式参与；无法切分时仅显示
+    /// 手动分隔符（含串尾 `'`）。查询键 `composing` 本身不含分隔符（去噪）。
+    #[must_use]
+    pub fn composing_display(&self) -> String {
+        let mut boundaries: std::collections::BTreeSet<usize> =
+            self.manual_seps.iter().copied().collect();
+        if self.mode == InputMode::Chinese {
+            boundaries.extend(preferred_segment_boundaries(&self.table, &self.composing));
+        }
+        let length = self.composing.len();
+        let mut display = String::with_capacity(self.composing.len());
+        for (index, c) in self.composing.char_indices() {
+            if index > 0 && boundaries.contains(&index) {
+                display.push(SYLLABLE_SEP_DISPLAY);
+            }
+            display.push(c);
+        }
+        // 串尾手动分隔符（如刚按过 `'` 尚未继续输入）：循环无法覆盖，单独补上。
+        if boundaries.contains(&length) {
+            display.push(SYLLABLE_SEP_DISPLAY);
+        }
+        display
+    }
+
     /// Backspace 删除最后一个拼音字母；无组合时返回 `false`。
     /// 数字模式退格删除 buffer 尾部位（FR-027）；v 模式退格回退类型码（FR-028）。
+    /// T-128：串尾是手动分隔符时**优先删除分隔符**（退格先删 `'`，再删字母）。
     pub fn handle_backspace(&mut self) -> bool {
         if self.digit_active() {
             return self.digit_backspace();
@@ -840,7 +934,16 @@ impl InputEngine {
         if !self.is_active() {
             return false;
         }
+        if self.manual_seps.last() == Some(&self.composing.len()) {
+            self.manual_seps.pop();
+            self.refresh_candidates();
+            return true;
+        }
         self.composing.pop();
+        // 悬尾分隔符（位置 == 新长度）保留：显示 xi'，等待退格先删它或继续输入；
+        // 越界值（旧串尾且 len 已变）防御性清理。
+        self.manual_seps
+            .retain(|&position| position <= self.composing.len());
         self.refresh_candidates();
         true
     }
@@ -975,6 +1078,77 @@ impl InputEngine {
         true
     }
 
+    /// 第 `index` 个候选当前是否有可上屏译文（Ctrl+数字键路判定，T-131）。
+    /// 中文层：可见候选的译文拆义非空（取其首义）；译文层：已拆分行的单义存在。
+    #[must_use]
+    pub fn can_translate_by_index(&self, index: usize) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        match self.layer {
+            CandidateLayer::Translation => self
+                .cached_translation_candidates
+                .get(index)
+                .and_then(|c| c.translation.as_deref())
+                .is_some_and(|t| !t.is_empty()),
+            CandidateLayer::Chinese => self
+                .visible_candidates()
+                .get(index)
+                .and_then(|c| c.translation.as_deref())
+                .is_some_and(|t| !zhu_ye_core::dict_format::split_translations(t).is_empty()),
+        }
+    }
+
+    /// 直接上屏第 `index` 候选的译文（Ctrl+数字，T-131）：中文层取该候选译文
+    /// 的**首义**，译文层取拆分行的**单义**，均剥词性前缀后上屏；中文词条
+    /// 照常记录用户词。无对应译文时返回 `None`（TSF 层放行宿主）。
+    pub fn commit_translation_by_index(&mut self, index: usize) -> Option<String> {
+        if !self.is_active() {
+            return None;
+        }
+        let (word, sense, pinyin) = match self.layer {
+            CandidateLayer::Translation => {
+                let candidate = self.cached_translation_candidates.get(index)?;
+                (
+                    candidate.text.clone(),
+                    candidate.translation.clone(),
+                    candidate.pinyin.clone(),
+                )
+            }
+            CandidateLayer::Chinese => {
+                let candidate = self.visible_candidates().get(index)?;
+                let sense =
+                    zhu_ye_core::dict_format::split_translations(candidate.translation.as_deref()?)
+                        .into_iter()
+                        .next()?;
+                (
+                    candidate.text.clone(),
+                    Some(sense),
+                    candidate.pinyin.clone(),
+                )
+            }
+        };
+        let text = zhu_ye_core::dict_format::strip_pos_prefix(sense.as_deref()?).to_owned();
+        self.commit_translation_text(word, text, pinyin)
+    }
+
+    /// 译文上屏收尾（与 `commit_candidate` 同款）：记录中文词条（词+拼音）、
+    /// 清组合、置前词并刷联想。返回上屏文本。
+    fn commit_translation_text(
+        &mut self,
+        word: String,
+        text: String,
+        pinyin: Option<String>,
+    ) -> Option<String> {
+        if let Some(pinyin) = pinyin {
+            self.record_user_word(&word, &pinyin);
+        }
+        self.clear_composition();
+        self.previous_word = Some(text.clone());
+        self.refresh_suggestion();
+        Some(text)
+    }
+
     /// 组合被 TSF 宿主终止时清空内部分组状态。
     pub fn cancel_input(&mut self) {
         self.clear_composition();
@@ -1030,14 +1204,44 @@ impl InputEngine {
     /// 为 TSF 层提供组合串预览：删除末尾字母后的内容。
     #[must_use]
     pub fn preview_after_backspace(&self) -> Option<String> {
-        self.is_composing()
-            .then(|| self.composing[..self.composing.len() - 1].to_owned())
+        self.is_composing().then(|| {
+            if self.manual_seps.last() == Some(&self.composing.len()) {
+                // T-128：退格将删除串尾手动分隔符（退格先删 `'`）：显示串去掉尾 `'`。
+                // T-134：分隔符为 U+2019（3 字节 UTF-8），按字符 pop 而非按字节切片。
+                let mut display = self.composing_display();
+                display.pop();
+                display
+            } else {
+                self.composing[..self.composing.len() - 1].to_owned()
+            }
+        })
     }
 
     /// 为 TSF 层提供提交预览：回车应上屏的拼音原文。
     #[must_use]
     pub fn preview_enter(&self) -> Option<String> {
         self.is_active().then(|| self.composing.clone())
+    }
+
+    /// T-115 后续：错序容错追加组（主候选不足一页且 `enable_fuzzy` 时）。
+    /// 与 M7 纠错（FR-024）互补：FR-024 只能处理可完整切分串（模糊替换/
+    /// 少字母补全），错位串（`zhegnq→zhengq` 等）不可切分故漏掉——本组
+    /// 枚举相邻字母交换变体出候选，标注 Corrected、pinyin=变体（正确拼音）。
+    /// 主链路与前缀路径共用本入口，防止任一路径漏接。
+    #[must_use]
+    fn append_transposed_group(&self, mut main: Vec<Candidate>, composing: &str) -> Vec<Candidate> {
+        if self.enable_fuzzy && main.len() < self.page_size {
+            let transposed = zhu_ye_core::transposed_candidates(
+                &self.table,
+                self.dictionary.as_ref(),
+                composing,
+                PREFIX_COMPLETION_CAP,
+            );
+            if !transposed.is_empty() {
+                main = append_group(main, transposed);
+            }
+        }
+        main
     }
 
     /// 构建候选窗快照；候选窗渲染与 TSF 联动都从这里取数。
@@ -1061,9 +1265,14 @@ impl InputEngine {
                 items: self
                     .suggestion
                     .iter()
-                    .map(|text| CandidateUiItem {
-                        text: text.clone(),
+                    .map(|word| CandidateUiItem {
+                        text: word.clone(),
                         translation: String::new(),
+                        pinyin: String::new(),
+                        // T-135：联想候选也显示音标。词级带调优先、字级逐字
+                        // 拼合兜底（ToneMap 字级表覆盖常用字）；罕字查不到时
+                        // 留空 → 候选窗回退"无拼音行"（不产生假拼音）。
+                        pinyin_tone: self.tone_spaced(word),
                         source: zhu_ye_core::candidate::CandidateSource::Suggestion,
                     })
                     .collect(),
@@ -1078,7 +1287,11 @@ impl InputEngine {
                 page_count: 1,
                 selected: self.selected_on_page,
                 translation_mode: false,
-                items: self.candidates.iter().map(candidate_ui_item).collect(),
+                items: self
+                    .candidates
+                    .iter()
+                    .map(|c| self.ui_item_for(c))
+                    .collect(),
             };
         }
         if self.v_active() {
@@ -1090,12 +1303,17 @@ impl InputEngine {
                 page_count: 1,
                 selected: self.selected_on_page,
                 translation_mode: false,
-                items: self.candidates.iter().map(candidate_ui_item).collect(),
+                items: self
+                    .candidates
+                    .iter()
+                    .map(|c| self.ui_item_for(c))
+                    .collect(),
             };
         }
         if self.mode != InputMode::Chinese {
             return CandidateUiView {
-                composition: self.composing.clone(),
+                // T-128：页眉组合串含拼音分隔符（英文串无法切分 → 显示原串）。
+                composition: self.composing_display(),
                 pinyin_hint: pinyin_hints(&self.composing),
                 page: self.page.min(self.page_count().saturating_sub(1)),
                 page_size,
@@ -1109,7 +1327,8 @@ impl InputEngine {
         // 会再按 `page` 切片一次；若这里只放当前页，翻页后切片越界变空，
         // 页面上将看不到余下候选（VM 验收翻页时复现）。选中行取引擎页内序号。
         CandidateUiView {
-            composition: self.composing.clone(),
+            // T-128：页眉组合串显示自动/手动分隔符（如 ni'hao、xi'an）。
+            composition: self.composing_display(),
             pinyin_hint: pinyin_hints(&self.composing),
             page: self.page.min(self.page_count().saturating_sub(1)),
             page_size,
@@ -1119,15 +1338,31 @@ impl InputEngine {
             items: self
                 .current_layer_candidates()
                 .iter()
-                .map(candidate_ui_item)
+                .map(|c| {
+                    let mut item = self.ui_item_for(c);
+                    // T-131：中文层副文本只显示译文的**首义**（`int. hello; int. hi`
+                    // 只显示 `int. hello`），多义全量留给译文层逐行展示。
+                    if self.layer == CandidateLayer::Chinese && !item.translation.is_empty() {
+                        item.translation =
+                            zhu_ye_core::dict_format::split_translations(&item.translation)
+                                .into_iter()
+                                .next()
+                                .unwrap_or_default();
+                    }
+                    item
+                })
                 .collect(),
         }
     }
 
     fn commit_candidate(&mut self, selection: CandidateSelection) -> Option<String> {
         let text = if self.layer == CandidateLayer::Translation {
+            // T-131：译文上屏剥词性前缀（`v. suspicious` → 上屏 `suspicious`）。
             selection
                 .translation
+                .as_deref()
+                .map(zhu_ye_core::dict_format::strip_pos_prefix)
+                .map(str::to_owned)
                 .unwrap_or_else(|| selection.text.clone())
         } else {
             selection.text.clone()
@@ -1276,11 +1511,42 @@ impl InputEngine {
         }
     }
 
+    /// 第 `index` 个候选直上屏译文的预取（TSF commit-text，T-131）：与
+    /// `commit_translation_by_index` 同源——中文层取首义、译文层取拆分行的
+    /// 单义，均剥词性前缀后返回；无对应译文返回 `None`。
+    #[must_use]
+    pub fn preview_translation_by_index(&self, index: usize) -> Option<String> {
+        if !self.is_active() {
+            return None;
+        }
+        let sense = match self.layer {
+            CandidateLayer::Translation => self
+                .cached_translation_candidates
+                .get(index)?
+                .translation
+                .clone(),
+            CandidateLayer::Chinese => self
+                .visible_candidates()
+                .get(index)?
+                .translation
+                .as_deref()
+                .and_then(|t| {
+                    zhu_ye_core::dict_format::split_translations(t)
+                        .into_iter()
+                        .next()
+                }),
+        }?;
+        Some(zhu_ye_core::dict_format::strip_pos_prefix(&sense).to_owned())
+    }
+
     fn display_text(&self, candidate: &Candidate) -> String {
         if self.layer == CandidateLayer::Translation {
+            // T-131：译文上屏剥词性前缀（`v. suspicious` → 上屏 `suspicious`）。
             candidate
                 .translation
-                .clone()
+                .as_deref()
+                .map(zhu_ye_core::dict_format::strip_pos_prefix)
+                .map(str::to_owned)
                 .unwrap_or_else(|| candidate.text.clone())
         } else {
             candidate.text.clone()
@@ -1300,11 +1566,9 @@ impl InputEngine {
     }
 
     fn translation_candidates(&self) -> Vec<Candidate> {
-        self.candidates
-            .iter()
-            .filter(|c| c.translation.as_deref().is_some_and(|s| !s.is_empty()))
-            .cloned()
-            .collect()
+        // 与 refresh_candidates 的缓存同源（同一构建函数），供切层判空与
+        // 展示使用；候选未刷新时按当前 candidates 重算，确保语义一致。
+        build_translation_candidates(&self.candidates)
     }
 
     fn clear_composition(&mut self) {
@@ -1386,7 +1650,11 @@ impl InputEngine {
         if !groups.completions.is_empty() || !groups.completed.is_empty() {
             let completions = self.ranking.rank(groups.completions, &context);
             let completed = self.ranking.rank(groups.completed, &context);
-            self.candidates = zhu_ye_core::merge_candidate_groups(completions, completed);
+            let mut main = zhu_ye_core::merge_candidate_groups(completions, completed);
+            // T-115 后续：错序容错同样接入前缀路径——`zhegnq` 这类"完整音节+残尾"
+            // 串会走本分支（completed=这/者非空）而不到主链路，此前容错漏接。
+            main = self.append_transposed_group(main, &self.composing);
+            self.candidates = main;
         } else {
             let composing = self.composing.clone();
             let dictionary = self.dictionary.clone();
@@ -1437,6 +1705,12 @@ impl InputEngine {
                     if !corrected.is_empty() {
                         main = append_group(main, corrected);
                     }
+                    // T-115 后续：错序容错——快打常见的相邻字母颠倒（zhegnq→zhengq、
+                    // shegnc→shengc、xiagnzhe→xiangzhe、zhagnh→zhangh）使串无法完整
+                    // 切分，FR-024 只处理可切分串故漏掉；主候选不足一页时追加
+                    // 「错序组」于纠错组之后、缩写组之前（候选拼音为变体=正确拼音，
+                    // 供 UI 展示正确的拼音）。
+                    main = self.append_transposed_group(main, &composing);
                 }
             }
 
@@ -1492,12 +1766,19 @@ impl InputEngine {
             && self.composing.chars().count() >= EN_WORD_MIN_LEN
             && segment_all(&self.table, &self.composing).is_empty()
         {
-            let en = match &self.en_lexicon {
+            let mut en = match &self.en_lexicon {
                 Some(lexicon) => {
                     zhu_ye_core::en_word_candidates_from(lexicon, &self.composing, EN_WORD_CAP)
                 }
                 None => zhu_ye_core::en_word_candidates(&self.composing, EN_WORD_CAP),
             };
+            // FR-030 扩展：英文候选带中文释义（经词典反查索引 EnToZh；反查
+            // 不到的词保持无译文原样展示，例如英文专名）。
+            for candidate in &mut en {
+                if candidate.translation.is_none() {
+                    candidate.translation = self.dictionary.translate_en_to_zh(&candidate.text);
+                }
+            }
             if !en.is_empty() {
                 let main = std::mem::take(&mut self.candidates);
                 self.candidates = append_group(main, en);
@@ -1516,6 +1797,22 @@ impl InputEngine {
             let main = std::mem::take(&mut self.candidates);
             self.candidates = zhu_ye_core::append_abbreviation_group(main, abbreviation);
         }
+        // T-128：手动音节分隔符的约束组**前置**（强意图最高优先级，置于全部追加组
+        // 之后执行所以排在 main 最前）：`xi'an` 按硬边界 [xi|an] 拼出「西安」顶到
+        // 候选首位，常规候选随之顺延；无手动分隔符时不介入（基线零漂移）。
+        if !self.manual_seps.is_empty() {
+            let constrained = zhu_ye_core::constrained_segment_candidates(
+                &self.table,
+                self.dictionary.as_ref(),
+                &self.composing,
+                &self.manual_seps,
+            );
+            if !constrained.is_empty() {
+                let constrained = self.ranking.rank(constrained, &context);
+                let main = std::mem::take(&mut self.candidates);
+                self.candidates = prepend_group(constrained, main);
+            }
+        }
         // FR-029（场景7）：整串拼音等于别名时把 emoji 追加到候选**尾部**；
         // 只占队尾、不参与排序（score 取 i64::MIN），保证 T-057 命中率不回退。
         if let Some(emoji) = zhu_ye_core::emoji_for(&self.composing) {
@@ -1527,12 +1824,7 @@ impl InputEngine {
                 source: zhu_ye_core::candidate::CandidateSource::Emoji,
             });
         }
-        self.cached_translation_candidates = self
-            .candidates
-            .iter()
-            .filter(|c| c.translation.as_deref().is_some_and(|s| !s.is_empty()))
-            .cloned()
-            .collect();
+        self.cached_translation_candidates = build_translation_candidates(&self.candidates);
         // 输入串变化后选中行回到第一行。
         self.selected_on_page = 0;
         self.clamp_page();
@@ -1565,12 +1857,54 @@ impl InputEngine {
     }
 }
 
-fn candidate_ui_item(candidate: &Candidate) -> CandidateUiItem {
+/// 候选 → 候选窗条目；带调拼音（T-112 后续批四：声调显示）仅在候选文本
+/// 词级/字级带调音齐全时填入，否则留空回退无调拼注。
+fn candidate_ui_item_tone(candidate: &Candidate, tone_spaced: &str) -> CandidateUiItem {
     CandidateUiItem {
         text: candidate.text.clone(),
         translation: candidate.translation.clone().unwrap_or_default(),
+        pinyin: candidate.pinyin.clone().unwrap_or_default(),
+        pinyin_tone: tone_spaced.to_owned(),
         source: candidate.source.clone(),
     }
+}
+
+/// 首选切分的全部音节边界（T-128）：取 `segment_all` 首方案（最长匹配优先），
+/// 返回方案内除串首/串尾外的所有切分点（如 `nihao` → `[2]`，`xian` → `[]`）；
+/// 无法切分时返回空。用于自动分隔符显示（全部音节边界都显式标 `'`）。
+///
+/// T-141：整串无法完全切分时**退化为最长可切分前缀**——从串尾逐步收窄到
+/// 第一个能完整切分的最长前缀，取同一 `segment_all` 首方案（DP 顺序一致，
+/// 保证前缀边界与整串可切分时完全相同）；尾部残段不产生新边界，整体跟在
+/// 最后一个音节后。例：`youshenmeshimah` 无法切分，最长可切分前缀为
+/// `youshenmeshima` → 边界仍 `[3,7,9,12]`，显示 `you'shen'me'shi'mah`。
+/// 完全切不动的串（如 `zzzz`）仍返回空、原样显示。
+fn preferred_segment_boundaries(table: &SyllableTable, input: &str) -> Vec<usize> {
+    let Some(segments) = segment_all(table, input)
+        .into_iter()
+        .next()
+        .or_else(|| longest_segmentable_prefix(table, input))
+    else {
+        return Vec::new();
+    };
+    if segments.len() < 2 {
+        return Vec::new();
+    }
+    let mut boundaries = Vec::with_capacity(segments.len() - 1);
+    let mut position = 0usize;
+    for syllable in &segments[..segments.len() - 1] {
+        position = position.saturating_add(syllable.len());
+        boundaries.push(position);
+    }
+    boundaries
+}
+
+/// 最长可切分前缀的首选切分（T-141）：从 `len-1` 递减试探完整切分，命中
+/// 即返回该前缀的 `segment_all` 首方案；无任何可切分前缀时返回 `None`。
+fn longest_segmentable_prefix(table: &SyllableTable, input: &str) -> Option<Vec<String>> {
+    (1..input.len())
+        .rev()
+        .find_map(|len| segment_all(table, &input[..len]).into_iter().next())
 }
 
 /// 拼音分词提示；使用标准音节表生成空格分隔的拼音，无法切分时保持原串。
@@ -1601,9 +1935,11 @@ mod tests {
     use zhu_ye_core::bigram::InMemoryBigramModel;
     use zhu_ye_core::generate_candidates;
     use zhu_ye_core::pinyin::SyllableTable;
+    use zhu_ye_core::tone::ToneMap;
     use zhu_ye_core::Dictionary;
+    use zhu_ye_core::InMemoryDictionary;
     use zhu_ye_core::UserDictStore;
-    use zhu_ye_core::{build_v2, seed_bigrams, seed_entries};
+    use zhu_ye_core::{build_v2, seed_bigrams, seed_entries, DictionaryEntry};
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let now = std::time::SystemTime::now()
@@ -1651,6 +1987,174 @@ mod tests {
             .collect();
         assert!(texts.contains(&"先"));
         assert!(texts.contains(&"西安"));
+    }
+
+    // ---- T-128 音节分隔符 ----
+
+    #[test]
+    fn 自动分隔符按首选切分显示() {
+        let mut typing = engine();
+        // nihao 首选 [ni,hao]：全部音节边界显式插 `'`。
+        type_text(&mut typing, "nihao");
+        assert_eq!(typing.composing_display(), "ni\u{2019}hao");
+        assert_eq!(typing.composing(), "nihao", "查询键保持纯拼音（去噪）");
+        // xian 首选 [xian]（无内部边界）：不自动插 `'`。
+        let mut other = engine();
+        type_text(&mut other, "xian");
+        assert_eq!(other.composing_display(), "xian");
+        // xihuan 首选 [xi,huan]。
+        let mut third = engine();
+        type_text(&mut third, "xihuan");
+        assert_eq!(third.composing_display(), "xi\u{2019}huan");
+        // 不可切分串（缩写/残缺）不插自动分隔。
+        let mut fourth = engine();
+        type_text(&mut fourth, "zzzz");
+        assert_eq!(fourth.composing_display(), "zzzz");
+        // 空串。
+        let empty = engine();
+        assert_eq!(empty.composing_display(), "");
+    }
+
+    #[test]
+    fn 手动分隔符插入与显示() {
+        let mut typing = engine();
+        type_text(&mut typing, "xi");
+        assert!(typing.insert_separator());
+        assert_eq!(typing.composing_display(), "xi\u{2019}");
+        // 同位置重复插入被拒绝。
+        assert!(!typing.insert_separator());
+        type_text(&mut typing, "an");
+        assert_eq!(typing.composing_display(), "xi\u{2019}an");
+        assert_eq!(typing.composing(), "xian", "查询键不受分隔符影响");
+        // 空串无法插入分隔符。
+        let mut empty = engine();
+        assert!(!empty.insert_separator());
+    }
+
+    #[test]
+    fn 退格优先删除串尾手动分隔符() {
+        let mut engine = engine();
+        type_text(&mut engine, "xi");
+        engine.insert_separator();
+        assert_eq!(engine.composing_display(), "xi\u{2019}");
+        // 退格先删 `'`，字母保留。
+        assert!(engine.handle_backspace());
+        assert_eq!(engine.composing_display(), "xi");
+        assert_eq!(engine.composing(), "xi");
+        // 再退格删字母。
+        assert!(engine.handle_backspace());
+        assert_eq!(engine.composing_display(), "x");
+        // 连续退格直到组合停用。
+        assert!(engine.handle_backspace());
+        assert!(!engine.handle_backspace());
+    }
+
+    #[test]
+    fn 退格后自动分隔实时重算() {
+        let mut typing = engine();
+        type_text(&mut typing, "nihao");
+        assert_eq!(typing.composing_display(), "ni\u{2019}hao");
+        // 删 o：niha 首选 [ni,ha]，边界 2 仍在。
+        assert!(typing.handle_backspace());
+        assert_eq!(typing.composing_display(), "ni\u{2019}ha");
+        // 删 a：nih 为残缺前缀，无完整切分 → 自动分隔消失。
+        assert!(typing.handle_backspace());
+        assert_eq!(typing.composing_display(), "nih");
+        // 中途手动分隔符保留在有效位置。
+        let mut manual = engine();
+        type_text(&mut manual, "xi");
+        manual.insert_separator();
+        type_text(&mut manual, "an");
+        assert_eq!(manual.composing_display(), "xi\u{2019}an");
+        manual.handle_backspace();
+        assert_eq!(manual.composing_display(), "xi\u{2019}a");
+        manual.handle_backspace();
+        // plain=xi、手动分隔悬在串尾：退格先删 `'`。
+        assert_eq!(manual.composing_display(), "xi\u{2019}");
+        manual.handle_backspace();
+        assert_eq!(manual.composing_display(), "xi");
+    }
+
+    #[test]
+    fn 手动分隔约束候选置首() {
+        let mut plain = engine();
+        type_text(&mut plain, "xian");
+        // 无分隔：主候选首位是高频整词「先」。
+        assert_eq!(plain.candidates()[0].text, "先");
+        // xi' + an：硬边界 [xi|an] 组合「西安」前置。
+        let mut separated = engine();
+        type_text(&mut separated, "xi");
+        separated.insert_separator();
+        type_text(&mut separated, "an");
+        assert_eq!(separated.composing_display(), "xi\u{2019}an");
+        assert_eq!(separated.candidates()[0].text, "西安");
+        // 页眉组合串同步带分隔符。
+        assert_eq!(separated.candidate_ui_view().composition, "xi\u{2019}an");
+    }
+
+    #[test]
+    fn 无手动分隔时约束组不介入() {
+        let mut typing = engine();
+        type_text(&mut typing, "nihao");
+        // 仅自动分隔：候选首位不变（基线行为）。
+        assert_eq!(typing.candidates()[0].text, "你好");
+        assert_eq!(typing.composing_display(), "ni\u{2019}hao");
+        // 不可切分串保持原样显示。
+        let mut other = engine();
+        type_text(&mut other, "zzzz");
+        assert_eq!(other.composing_display(), "zzzz");
+    }
+
+    #[test]
+    fn 尾音节缺字身时手动分隔符保留() {
+        // 用户输入 B：you'shen'me'shi'mah（末尾 'ma' 后多一个 h）——
+        // 整串无法切分时手动分隔符必须原样保留（不再被"无自动边界"吞掉）。
+        for tail in ["ma", "mah"] {
+            let mut engine = engine();
+            for seg in ["you", "shen", "me", "shi"] {
+                type_text(&mut engine, seg);
+                assert!(engine.insert_separator(), "分隔符应插入（段 {seg} 后）");
+            }
+            type_text(&mut engine, tail);
+            assert_eq!(
+                engine.composing_display(),
+                format!("you\u{2019}shen\u{2019}me\u{2019}shi\u{2019}{tail}"),
+                "尾音节 {tail}（无法切分）应保留全部手动分隔符"
+            );
+            assert_eq!(engine.composing(), format!("youshenmeshi{tail}"));
+        }
+    }
+
+    #[test]
+    fn 尾部残段时自动分隔退化为最长可切分前缀() {
+        // 用户反馈（T-141）：纯字母输入 you'shen'me'shi'ma（未按 `'`，分隔为
+        // T-128 自动边界显示）后继续追加 h → youshenmeshimah 无法完整切分，
+        // 自动边界整体消失，页眉退成无分隔连续串。期望：按**最长可切分前缀**
+        // （与首选切分同源）保留前端全部分隔，尾部残段不产生新边界。
+        let mut sut = engine();
+        type_text(&mut sut, "youshenmeshima");
+        assert_eq!(
+            sut.composing_display(),
+            "you\u{2019}shen\u{2019}me\u{2019}shi\u{2019}ma",
+            "A 场景（可完整切分）自动边界全显示"
+        );
+        // B：追加 h 后整串不可切分，仍应保留 A 的全部分隔（前端边界不变）。
+        type_text(&mut sut, "h");
+        assert_eq!(
+            sut.composing_display(),
+            "you\u{2019}shen\u{2019}me\u{2019}shi\u{2019}mah",
+            "B 场景尾部残段 h：自动分隔退化为最长可切分前缀 youshenmeshima 的边界"
+        );
+        // 完全不可切分串（任一前缀都切不动）保持原样（既有 zzzz 基线）。
+        let mut other = engine();
+        type_text(&mut other, "zzzz");
+        assert_eq!(other.composing_display(), "zzzz");
+        // 残段较长也整体保留（xianjingd：xian|jing + 残 d）。
+        let mut third = engine();
+        type_text(&mut third, "xianjingd");
+        let display = third.composing_display();
+        assert_eq!(display, "xian\u{2019}jingd");
+        assert_eq!(third.composing(), "xianjingd");
     }
 
     #[test]
@@ -1724,14 +2228,19 @@ mod tests {
     }
 
     #[test]
-    fn 无完整音节开头的输入不出现前缀候选() {
+    fn 无完整音节开头的输入出补全候选() {
+        // T-115 后续：`z`/`zh` 等无完整音节首的单字母/声母前缀照常出补全候选
+        // （搜狗/微软同款：`d` 一按出现 的/多/到），补全组有词频排序即可见。
         let mut eng = engine();
         type_text(&mut eng, "zh");
-        assert!(eng.candidates().is_empty());
+        assert!(
+            !eng.candidates().is_empty(),
+            "zh 应给出补全候选（的中这之类）"
+        );
 
         let mut eng2 = engine();
         type_text(&mut eng2, "z");
-        assert!(eng2.candidates().is_empty());
+        assert!(!eng2.candidates().is_empty(), "z 应给出补全候选");
     }
 
     #[test]
@@ -2073,6 +2582,61 @@ mod tests {
     }
 
     #[test]
+    fn 联想候选携带带调拼音() {
+        // 未装配带调表：pinyin_tone 全空（T-135 前的基线：联想无拼音行）。
+        let mut plain = suggestion_engine();
+        commit_nihao(&mut plain);
+        let view = plain.candidate_ui_view();
+        assert!(
+            view.items.iter().all(|i| i.pinyin_tone.is_empty()),
+            "无带调表时联想不强行造拼音"
+        );
+
+        // 装配带调表（词级"你好" + 字级兜底）：整词/短语/字级拼合全部出音标。
+        let mut engine = suggestion_engine();
+        engine = engine.with_tone_map(ToneMap::from_lines(
+            "#word\n你好\tnǐ hǎo\n#char\n你\tnǐ\n好\thǎo\n世\tshì\n界\tjiè\n中\tzhōng\n国\tguó\n",
+        ));
+        commit_nihao(&mut engine);
+        let view = engine.candidate_ui_view();
+        let pin = |text: &str| {
+            view.items
+                .iter()
+                .find(|i| i.text == text)
+                .map(|i| i.pinyin_tone.as_str())
+        };
+        assert_eq!(pin("世界"), Some("shì jiè"), "字级逐字拼合");
+        assert_eq!(pin("你好世界"), Some("nǐ hǎo shì jiè"), "两词短语逐字拼合");
+        assert_eq!(pin("中国"), Some("zhōng guó"), "字级拼合");
+
+        // 字级缺音的罕字联想词留空：候选窗回退"无拼音行"，不产生假拼音。
+        let mut bigram = InMemoryBigramModel::new();
+        bigram.insert("你好", "世界", 120);
+        bigram.insert("你好", "赞", 10);
+        let mut engine = InputEngine::with_bigram(m1_seed_dictionary(), Arc::new(bigram));
+        engine = engine.with_tone_map(ToneMap::from_lines("#char\n世\tshì\n界\tjiè\n"));
+        commit_nihao(&mut engine);
+        let view = engine.candidate_ui_view();
+        assert_eq!(
+            view.items
+                .iter()
+                .find(|i| i.text == "赞")
+                .unwrap()
+                .pinyin_tone,
+            "",
+            "缺音字留空"
+        );
+        assert_eq!(
+            view.items
+                .iter()
+                .find(|i| i.text == "世界")
+                .unwrap()
+                .pinyin_tone,
+            "shì jiè"
+        );
+    }
+
+    #[test]
     fn 无bigram数据时上屏不联想() {
         let mut engine =
             InputEngine::with_bigram(m1_seed_dictionary(), Arc::new(InMemoryBigramModel::new()));
@@ -2174,6 +2738,154 @@ mod tests {
 
         drop(engine);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 前缀路径下错序容错命中正确候选() {
+        // `zhegnq`：completed=这 非空 → 前缀分支；错序组漏接的历史 bug 回归封印
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("正确", "zhengque", 300));
+        entries.push(DictionaryEntry::new("这", "zhe", 250));
+        let dir = temp_dir("transposed-prefix");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "zhegnq");
+        let cands = engine.candidates();
+        let zh = cands.iter().find(|c| c.text == "正确");
+        assert!(
+            zh.is_some(),
+            "zhegnq 应经前缀路径命中错序候选 正确，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(zh.unwrap().pinyin.as_deref(), Some("zhengq"));
+    }
+
+    #[test]
+    fn 前缀路径下错序容错命中生成候选() {
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("生成", "shengcheng", 280));
+        entries.push(DictionaryEntry::new("设", "she", 220));
+        let dir = temp_dir("transposed-prefix2");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "shegnc");
+        let cands = engine.candidates();
+        let sc = cands.iter().find(|c| c.text == "生成");
+        assert!(
+            sc.is_some(),
+            "shegnc 应命中错序候选 生成，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(sc.unwrap().pinyin.as_deref(), Some("shengc"));
+    }
+
+    #[test]
+    fn 主链路路径错序容错命中账号与想着() {
+        // `zhagnh` 无任何完整音节压阵 → 主链路分支；`xiagnzhe` 的 xi=西 压阵 → 前缀分支
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("账号", "zhanghao", 260));
+        entries.push(DictionaryEntry::new("想着", "xiangzhe", 120));
+        let dir = temp_dir("transposed-main");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "zhagnh");
+        let cands = engine.candidates();
+        let zh = cands.iter().find(|c| c.text == "账号");
+        assert!(
+            zh.is_some(),
+            "zhagnh 应命中错序候选 账号，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(zh.unwrap().pinyin.as_deref(), Some("zhangh"));
+    }
+
+    #[test]
+    fn 带调拼音装配后候选视图携带声调() {
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("正确", "zhengque", 300));
+        let dir = temp_dir("tone-pin");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        // 未装配带调表 -> pinyin_tone 为空（回退无调拼注）
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        type_text(&mut engine, "zhengque");
+        let view = engine.candidate_ui_view();
+        let item = view.items.iter().find(|i| i.text == "正确").unwrap();
+        assert!(item.pinyin_tone.is_empty());
+
+        // 词级带调命中
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        engine = engine.with_tone_map(ToneMap::from_lines("#word\n正确\tzhèng què\n"));
+        type_text(&mut engine, "zhengque");
+        let view = engine.candidate_ui_view();
+        let item = view.items.iter().find(|i| i.text == "正确").unwrap();
+        assert_eq!(item.pinyin_tone, "zhèng què");
+
+        // 字级兜底逐字拼合
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+        engine = engine.with_tone_map(ToneMap::from_lines("#char\n正\tzhèng\n确\tquè\n"));
+        type_text(&mut engine, "zhengque");
+        let view = engine.candidate_ui_view();
+        let item = view.items.iter().find(|i| i.text == "正确").unwrap();
+        assert_eq!(item.pinyin_tone, "zhèng què");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn 前缀路径下错序容错命中想着() {
+        // `xiagnzhe`：xi=西 压阵 → 前缀分支，变体 xiangzhe 可切分 → 想着
+        let mut entries = seed_entries();
+        entries.push(DictionaryEntry::new("想着", "xiangzhe", 120));
+        let dir = temp_dir("transposed-main2");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&entries, &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "xiagnzhe");
+        let cands = engine.candidates();
+        let xz = cands.iter().find(|c| c.text == "想着");
+        assert!(
+            xz.is_some(),
+            "xiagnzhe 应命中错序候选 想着，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(xz.unwrap().pinyin.as_deref(), Some("xiangzhe"));
+    }
+
+    #[test]
+    fn 英文候选带中文译文() {
+        // v2 词典（含 你好→hello 反查索引）驱动：英文候选 hello 应挂中文"你好"。
+        // 英文词表走静态表回退（测试环境无 en.zyen），反查来自 DictionaryFile。
+        let dir = temp_dir("en-trans");
+        let path = dir.join("t.zyct");
+        let bytes = build_v2(&seed_entries(), &seed_bigrams()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let mut engine = InputEngine::with_dictionary_file(&path).unwrap();
+
+        type_text(&mut engine, "hello");
+        let cands = engine.candidates();
+        let hello = cands
+            .iter()
+            .find(|c| c.source == zhu_ye_core::candidate::CandidateSource::EnWord);
+        assert!(
+            hello.is_some(),
+            "hello 应命中英文候选，实际: {:?}",
+            cands.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(hello.unwrap().translation.as_deref(), Some("你好"));
     }
 
     #[test]
@@ -3630,6 +4342,102 @@ mod tests {
                 .iter()
                 .all(|c| c.source != zhu_ye_core::candidate::CandidateSource::Contact),
             "清除后不得再产出联系人候选"
+        );
+    }
+
+    // ---- T-131 英译多义候选：分号拆义 / 词性上屏剥离 / Ctrl+数字直上屏 ----
+
+    /// 含多义/词性译文的专用引擎：你好（int. hello; int. hi）、怀疑
+    /// （v. suspect; v. doubt）、世界（world）、苹果（n. apple）、测试（无译文）。
+    fn multi_sense_engine() -> InputEngine {
+        let entries = vec![
+            DictionaryEntry::new("你好", "nihao", 100).with_translation("int. hello; int. hi"),
+            DictionaryEntry::new("怀疑", "huaiyi", 90).with_translation("v. suspect; v. doubt"),
+            DictionaryEntry::new("世界", "shijie", 80).with_translation("world"),
+            DictionaryEntry::new("苹果", "pingguo", 70).with_translation("n. apple"),
+            DictionaryEntry::new("测试", "ceshi", 60),
+        ];
+        InputEngine::new(Arc::new(InMemoryDictionary::from_entries(entries)))
+    }
+
+    #[test]
+    fn 译文层多义拆成多行候选() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "nihao");
+        assert!(engine.toggle_translation_layer());
+        let rows = engine.visible_candidates();
+        assert_eq!(rows.len(), 2, "你好 hello; hi 应拆成两行");
+        assert_eq!(rows[0].text, "你好");
+        assert_eq!(rows[0].translation.as_deref(), Some("int. hello"));
+        assert_eq!(rows[1].text, "你好");
+        assert_eq!(rows[1].translation.as_deref(), Some("int. hi"));
+    }
+
+    #[test]
+    fn 译文层选择上屏剥词性前缀() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "huaiyi");
+        assert!(engine.toggle_translation_layer());
+        // 第一行 v. suspect → 上屏剥 v. 前缀。
+        assert_eq!(engine.select_index(0).as_deref(), Some("suspect"));
+        assert!(!engine.is_active(), "上屏后组合结束");
+        assert_eq!(engine.previous_word(), Some("suspect"));
+    }
+
+    #[test]
+    fn 译文层空格同理剥词性() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "pingguo");
+        assert!(engine.toggle_translation_layer());
+        assert_eq!(engine.preview_space().as_deref(), Some("apple"));
+    }
+
+    #[test]
+    fn 中文层ctrl数字直上屏首义() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "nihao");
+        assert_eq!(engine.layer(), CandidateLayer::Chinese);
+        assert!(engine.can_translate_by_index(0));
+        assert_eq!(
+            engine.commit_translation_by_index(0).as_deref(),
+            Some("hello")
+        );
+        assert!(!engine.is_active(), "直上屏后组合结束");
+        assert_eq!(engine.previous_word(), Some("hello"));
+    }
+
+    #[test]
+    fn 译文层ctrl数字上屏对应行单义() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "nihao");
+        assert!(engine.toggle_translation_layer());
+        assert!(engine.can_translate_by_index(1));
+        assert_eq!(engine.commit_translation_by_index(1).as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn 无译文或越界候选ctrl数字返回none() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "ceshi");
+        assert!(!engine.can_translate_by_index(0), "无译文候选不可直上屏");
+        assert_eq!(engine.commit_translation_by_index(0), None);
+        assert!(engine.is_active(), "不可上屏时组合保持、键放行宿主");
+
+        let mut typing = multi_sense_engine();
+        type_text(&mut typing, "nihao");
+        assert!(!typing.can_translate_by_index(9), "越界候选不可直上屏");
+        assert_eq!(typing.commit_translation_by_index(9), None);
+    }
+
+    #[test]
+    fn 中文层候选窗副文本只显示首义() {
+        let mut engine = multi_sense_engine();
+        type_text(&mut engine, "nihao");
+        let view = engine.candidate_ui_view();
+        assert!(!view.translation_mode);
+        assert_eq!(
+            view.items[0].translation, "int. hello",
+            "中文层副文本仅首义"
         );
     }
 }
