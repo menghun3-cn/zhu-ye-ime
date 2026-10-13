@@ -77,7 +77,9 @@ release pipeline.
   Markdown headings/links/backticks stripped by `plain_text_notes`),
   signs and includes it in the upload list and SHA256SUMS.txt;
   `verify-release-e2e.ps1` grows two steps: benign app.json display and
-  tampered-app.json degradation.
+  tampered-app.json degradation. CI (`release.yml`) uploads `app.json` to both
+  the main repo Release and the update-source mirror feed (T-155), closing the
+  publish-side loop so a real release carries app version info end-to-end.
 
 ## Alternatives considered
 

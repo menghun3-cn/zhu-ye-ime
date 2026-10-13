@@ -58,6 +58,8 @@ Status: implemented
   release_notes = CHANGELOG 最新段经 `plain_text_notes` 纯文本化——去
   Markdown 标题/链接/反引号）、签名并纳入上传清单与 SHA256SUMS.txt；
   `verify-release-e2e.ps1` 增加两步：app.json 良性展示与篡改降级。
+  CI（`release.yml`）把 `app.json` 一并上传主仓 Release 与更新源镜像 feed
+  （T-155），发布端闭环补齐——真实发版即可端到端携带应用版本信息。
 
 ## Alternatives considered
 
