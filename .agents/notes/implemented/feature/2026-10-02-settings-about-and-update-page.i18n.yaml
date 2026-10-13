@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object README.md
 #   git hash-object README.zh.md
-2026-10-02-settings-about-and-update-page.md: 780bff9607f1ab8121c67122ee06496d5facc5dd
-2026-10-02-settings-about-and-update-page.zh.md: aa53f4ff919079ebcbbb7309b92a3ecde6e1f4e2
+2026-10-02-settings-about-and-update-page.md: ac9b7a3f7ee10ae7411d34585f2ce6835c5a298b
+2026-10-02-settings-about-and-update-page.zh.md: 2fa4ab2ea567d921f45901becd2382bc5452e857

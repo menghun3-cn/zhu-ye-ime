@@ -110,7 +110,7 @@ pub fn canonical_bytes(manifest: &Manifest) -> Result<Vec<u8>, SignatureError> {
     serde_json::to_vec(&unsigned).map_err(|error| SignatureError::Json(error.to_string()))
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push_str(&format!("{byte:02x}"));
@@ -118,7 +118,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn hex_decode(text: &str) -> Result<Vec<u8>, SignatureError> {
+pub(crate) fn hex_decode(text: &str) -> Result<Vec<u8>, SignatureError> {
     if !text.len().is_multiple_of(2) {
         return Err(SignatureError::Encoding(format!(
             "十六进制长度必须为偶数: {}",

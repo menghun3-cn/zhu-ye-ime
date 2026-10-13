@@ -196,7 +196,8 @@ impl WindowState {
             Some(path) => config::load_mode(path).0,
             None => ModeChoice::Chinese,
         };
-        // P-03：在线更新默认关闭；开启与否都从配置装载，窗口如实反映当前状态。
+        // T-154：在线更新默认开启；开启与否都从配置装载，窗口如实反映当前状态。
+        // APPDATA 缺失时无法定位/持久化配置，保守按关闭（避免无法管理的联网）。
         let online_update = match &config_path {
             Some(path) => config::load_online_update(path).0,
             None => false,
@@ -891,7 +892,7 @@ fn build_diagnostics(config_path: Option<&std::path::Path>) -> Vec<DiagEntry> {
     });
     entries.push(DiagEntry {
         label: "联机更新",
-        value_lines: vec!["由独立更新器进程完成下载与替换（D-44），本窗口自身不联网。".to_owned()],
+        value_lines: vec!["由独立更新器进程完成下载与替换，本窗口自身不联网。".to_owned()],
     });
     match config_path {
         Some(path) => entries.push(DiagEntry {
@@ -1232,7 +1233,7 @@ fn apply_online_update(state: &mut WindowState, on: bool) {
         Some(path) => match config::save_online_update(path, on) {
             Ok(()) => {
                 if on {
-                    "已开启在线更新：检查/应用将经独立更新器进程联网（D-44）".to_owned()
+                    "已开启在线更新：检查/应用将经独立更新器进程联网".to_owned()
                 } else {
                     "已关闭在线更新：更新器不再发起任何网络请求".to_owned()
                 }
@@ -2806,7 +2807,7 @@ unsafe fn draw_about(
     let layout_rows = layout::about_layout(metrics, client);
     let online = state.settings.online_update;
 
-    // 状态行：在线更新开关状态（P-03 默认关）。
+    // 状态行：在线更新开关状态（T-154 默认开）。
     draw_text(
         hdc,
         if online {
@@ -2826,7 +2827,7 @@ unsafe fn draw_about(
     );
     // 提示行：不可点的原因或更新器位置（D-44 边界说明）。
     let hint = if !online {
-        "未开启时不发起任何网络请求（D-44）：请在「启用在线更新」中开启".to_owned()
+        "未开启时不发起任何网络请求：请在「启用在线更新」中开启".to_owned()
     } else {
         match updater::updater_exe_path() {
             Some(path) => format!("更新器：{}", path.display()),
@@ -3046,6 +3047,9 @@ fn update_result_lines(state: &WindowState) -> Vec<String> {
 
 /// 读取启动异步检查的状态文件（update_status.json），生成摘要行；文件不存在或损坏
 /// 返回 `None`（调用方显示占位文案）。本函数不联网（S-4）。
+///
+/// T-154：发现输入法应用新版本时优先展示「版本 + 更新日志」（来源为独立签名的
+/// `app.json`，状态文件由 check-once 合成），词典包信息附后。
 fn update_status_lines(config_path: Option<&std::path::Path>) -> Option<Vec<String>> {
     let path = config_path
         .and_then(|path| path.parent())
@@ -3054,6 +3058,22 @@ fn update_status_lines(config_path: Option<&std::path::Path>) -> Option<Vec<Stri
     let mut lines = vec!["启动时异步检查（update_status.json）：".to_owned()];
     if let Some(error) = &status.error {
         lines.push(format!("检查失败：{error}"));
+    } else if let Some(app_version) = &status.app_version {
+        lines.push(format!(
+            "发现输入法新版本 v{app_version}（当前 v{}）",
+            zhu_ye_core::core_version()
+        ));
+        lines.push("更新日志：".to_owned());
+        for line in status.release_notes.as_deref().unwrap_or_default().lines() {
+            lines.push(line.to_owned());
+        }
+        if !status.outdated_packs.is_empty() {
+            lines.push(format!(
+                "同时可更新词典包（{}）：最新版本 {}",
+                status.outdated_packs.join("、"),
+                status.latest_version.as_deref().unwrap_or("未知")
+            ));
+        }
     } else if status.available {
         let packs = if status.outdated_packs.is_empty() {
             "但清单为空".to_owned()

@@ -4,11 +4,12 @@
 
 对 `assemble-release.ps1` 产出的发布目录跑完整更新链路（不走真实网络，
 用 curl 的 file:// 协议验证"拉取 manifest → 内置公钥验签 → 下载分发包 →
-内容哈希/大小校验 → staging + rename 原子落地 → 幂等"）以及两个负面用例
-（篡改落地包自愈、篡改 manifest 被拒）。
+内容哈希/大小校验 → staging + rename 原子落地 → 幂等"）以及负面用例
+（篡改落地包自愈、篡改 manifest 被拒、篡改 app.json 降级）。
+第 5-6 步验证 T-154 应用版本元数据：良性展示 + 篡改不被当成"有新版本"。
 
 前置：
-  1. `assemble-release.ps1` 已产出发布目录（含签名 manifest）；
+  1. `assemble-release.ps1` 已产出发布目录（含签名 manifest 与签名 app.json）；
   2. 已用注入发布公钥的更新器构建产物（ZHU_YE_RELEASE_PUBLIC_KEY 构建）；
   3. 本机存在 `target\release\zhu-ye-updater.exe`（未注入公钥的产物会在
      "签名校验"步骤报"未内置发布公钥"并拒绝——那也是通过：说明未配公钥
@@ -68,7 +69,7 @@ function Assert-Step([string]$name, [string[]]$expectLines, [int]$exit) {
 
 $failures = @()
 
-Write-Host '== 1/4 apply：下载并落地全部可分发包 =='
+Write-Host '== 1/6 apply：下载并落地全部可分发包 =='
 $applyOut = & $updater apply 2>&1
 $applyExit = $LASTEXITCODE
 $applyText = $applyOut -join "`n"
@@ -80,7 +81,7 @@ if ($applyExit -eq 0 -and $applyText -match '已应用') {
     $failures += "apply 失败（exit=$applyExit）：`n$applyText"
 }
 
-Write-Host '== 2/4 落地包与 manifest 哈希/大小一致 =='
+Write-Host '== 2/6 落地包与 manifest 哈希/大小一致 =='
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $installedOk = $true
 foreach ($pack in $manifest.packs) {
@@ -96,7 +97,7 @@ if ($installedOk) {
     $failures += '落地包哈希/大小与 manifest 不一致'
 }
 
-Write-Host '== 3/4 篡改落地包：应被检测并自愈 =='
+Write-Host '== 3/6 篡改落地包：应被检测并自愈 =='
 $first = $manifest.packs[0]
 $packFile = Join-Path $appData "zhu-ye-ime\packs\$($first.file)"
 $bytes = [System.IO.File]::ReadAllBytes($packFile)
@@ -111,7 +112,7 @@ if ($hashAfter -eq $first.sha256) {
     $failures += "篡改包未被恢复（哈希仍不一致）：`n$tamperText"
 }
 
-Write-Host '== 4/4 篡改 manifest：内置公钥验签拒绝 =='
+Write-Host '== 4/6 篡改 manifest：内置公钥验签拒绝 =='
 $origText = Get-Content -LiteralPath $manifestPath -Raw
 $tampered = $origText -replace '"published_at": "[^"]+"', '"published_at": "1999-01-01"'
 Set-Content -LiteralPath $manifestPath -Value $tampered -Encoding utf8
@@ -122,6 +123,35 @@ if ($sigExit -ne 0) {
     Assert-Step '篡改 manifest 被拒绝'
 } else {
     $failures += "篡改 manifest 未被拒绝：`n$($sigOut -join "`n")"
+}
+
+Write-Host '== 5/6 app.json（T-154）：check 输出包含应用版本信息 =='
+$appMetaPath = Join-Path $packsDir 'app.json'
+if (-not (Test-Path -LiteralPath $appMetaPath -PathType Leaf)) {
+    $failures += "发布资产缺失 app.json：$appMetaPath"
+} else {
+    $appOut = & $updater check 2>&1
+    $appExit = $LASTEXITCODE
+    $appText = $appOut -join "`n"
+    if ($appExit -eq 0 -and ($appText -match '输入法应用')) {
+        Assert-Step 'check 展示应用版本信息'
+    } else {
+        $failures += "check 未展示应用版本信息（exit=$appExit）：`n$appText"
+    }
+}
+
+Write-Host '== 6/6 篡改 app.json：验签失败按降级提示、不阻断检查 =='
+$origApp = Get-Content -LiteralPath $appMetaPath -Raw
+$tamperedApp = $origApp -replace '"app_version": "[^"]+"', '"app_version": "99.0.0"'
+Set-Content -LiteralPath $appMetaPath -Value $tamperedApp -Encoding utf8
+$appTamperOut = & $updater check 2>&1
+$appTamperExit = $LASTEXITCODE
+Set-Content -LiteralPath $appMetaPath -Value $origApp -Encoding utf8
+$appTamperText = $appTamperOut -join "`n"
+if ($appTamperExit -eq 0 -and $appTamperText -match '应用版本信息检查失败') {
+    Assert-Step '篡改 app.json 被降级提示且检查仍完成'
+} else {
+    $failures += "篡改 app.json 未按降级处理（exit=$appTamperExit）：`n$appTamperText"
 }
 
 Write-Host ''

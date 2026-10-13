@@ -11,9 +11,14 @@
 //!   "available": true,
 //!   "outdated_packs": ["it", "med"],
 //!   "latest_version": "2026.10.4",
+//!   "app_version": "0.1.3",
+//!   "release_notes": "- 检查更新不再弹窗\n- 描述文字不再被裁剪",
 //!   "error": null
 //! }
 //! ```
+//!
+//! `app_version` / `release_notes`（可选，T-154）：来自独立签名的 `app.json`，
+//! 有输入法应用新版本时填写；旧 v1 文件没有这两个字段也照常读取（均按 `None`）。
 //!
 //! 写入方 = 更新器 `check-once` 子命令；读取方 = 设置窗口关于页。文件不存在或损坏
 //! 时读取方按"从未检查/无结果"处理，不弹窗、不打扰。
@@ -56,6 +61,12 @@ pub struct UpdateStatus {
     /// 可更新包中的最大版本号（无可用更新时为 `None`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_version: Option<String>,
+    /// 输入法应用发现的新版本（T-154；来自独立签名的 `app.json`，无则 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
+    /// 输入法新版本的更新日志（纯文本，多行；T-154；无可用时为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_notes: Option<String>,
     /// 检查失败的摘要（成功或未检查时为 `None`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -76,6 +87,33 @@ impl UpdateStatus {
             available: true,
             outdated_packs,
             latest_version: Some(latest_version),
+            app_version: None,
+            release_notes: None,
+            error: None,
+        }
+    }
+
+    /// 构造"发现输入法应用新版本"状态（T-154；词典包信息一并携带）。
+    ///
+    /// `app_version` / `release_notes` 来自独立签名的 `app.json`；`outdated_packs`
+    /// 与 `latest_version` 仍按词典包检查结果填写（无则空）。
+    #[must_use]
+    pub fn available_app(
+        last_checked: u64,
+        app_version: String,
+        release_notes: String,
+        outdated_packs: Vec<String>,
+        latest_version: Option<String>,
+    ) -> Self {
+        Self {
+            format: UPDATE_STATUS_FORMAT.to_owned(),
+            version: UPDATE_STATUS_VERSION,
+            last_checked,
+            available: true,
+            outdated_packs,
+            latest_version,
+            app_version: Some(app_version),
+            release_notes: Some(release_notes),
             error: None,
         }
     }
@@ -90,6 +128,8 @@ impl UpdateStatus {
             available: false,
             outdated_packs: Vec::new(),
             latest_version: None,
+            app_version: None,
+            release_notes: None,
             error: None,
         }
     }
@@ -104,6 +144,8 @@ impl UpdateStatus {
             available: false,
             outdated_packs: Vec::new(),
             latest_version: None,
+            app_version: None,
+            release_notes: None,
             error: Some(error.into()),
         }
     }
@@ -222,6 +264,29 @@ mod tests {
             parse_update_status(&super::to_json(&UpdateStatus::failed(1, "网络不通")).unwrap())
                 .unwrap();
         assert_eq!(failed.error.as_deref(), Some("网络不通"));
+    }
+
+    #[test]
+    fn 应用新版本状态与旧文件兼容() {
+        // available_app 携带 app 信息。
+        let status = UpdateStatus::available_app(
+            7,
+            "0.1.3".into(),
+            "更新日志".into(),
+            vec!["med".into()],
+            Some("2026.10.4".into()),
+        );
+        let parsed = parse_update_status(&super::to_json(&status).unwrap()).unwrap();
+        assert_eq!(parsed.app_version.as_deref(), Some("0.1.3"));
+        assert_eq!(parsed.release_notes.as_deref(), Some("更新日志"));
+        assert_eq!(parsed.outdated_packs, vec!["med"]);
+        assert_eq!(parsed.latest_version.as_deref(), Some("2026.10.4"));
+        // 旧 v1 文件没有 app 字段 → 读作 None（向后兼容）。
+        let old = r#"{"format":"zhu-ye-update-status","version":1,"last_checked":1,"available":true,"outdated_packs":["it"],"latest_version":"2026.10.1"}"#;
+        let old_parsed = parse_update_status(old).unwrap();
+        assert_eq!(old_parsed.app_version, None);
+        assert_eq!(old_parsed.release_notes, None);
+        assert_eq!(old_parsed.outdated_packs, vec!["it"]);
     }
 
     #[test]

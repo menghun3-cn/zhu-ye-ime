@@ -228,7 +228,7 @@ pub enum ChipValue {
     Theme(ThemeChoice),
     /// 新会话默认中英模式（中文 / 英文，D-32 装配项）。
     Mode(ModeChoice),
-    /// 在线更新开关（关闭 / 开启，P-03 默认关）。
+    /// 在线更新开关（关闭 / 开启，T-154 默认开）。
     OnlineUpdate(bool),
     /// 候选框拼音行开关（关闭 / 显示，T-127 默认开）。
     CandidatePin(bool),
@@ -325,7 +325,7 @@ fn mode_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
     )
 }
 
-/// 在线更新二选一控件：关闭在前、开启在后（P-03 默认关，用户须显式开启）。
+/// 在线更新二选一控件：关闭在前、开启在后（T-154 默认开启，显式关闭仍尊重）。
 fn online_update_chips(metrics: &SettingsMetrics, row: UiRect) -> Vec<Chip> {
     two_chips(
         metrics,
@@ -607,8 +607,9 @@ pub struct AboutLayout {
 const LOGICAL_SECTION_ROW: i32 = 26;
 const LOGICAL_HINT_ROW: i32 = 20;
 const LOGICAL_DIAG_ROW: i32 = 21;
-/// 结果区固定显示行数（更新器输出超出部分截断）。
-const LOGICAL_RESULT_ROWS: i32 = 3;
+/// 结果区固定显示行数（更新器输出超出部分截断）。T-154 起 3 → 6：
+/// 发现输入法新版本时结果区展示「版本 + 更新日志」（多行），需更高的固定区。
+const LOGICAL_RESULT_ROWS: i32 = 6;
 /// 诊断卡片内标签列宽（`small` 13px 下 6 个汉字 ≈ 78px，留余量到 88px）。
 const LOGICAL_DIAG_LABEL_W: i32 = 88;
 
@@ -1339,7 +1340,7 @@ mod tests {
         let metrics = SettingsMetrics::new(96);
         let rows = item_rows(&metrics, CLIENT, Page::About.items(), None);
         let chips = &rows[0].chips;
-        assert_eq!(chips.len(), 2, "在线更新是二选一开关（P-03）");
+        assert_eq!(chips.len(), 2, "在线更新是二选一开关（T-154）");
         assert_eq!(
             chips[0].value,
             super::ChipValue::OnlineUpdate(false),

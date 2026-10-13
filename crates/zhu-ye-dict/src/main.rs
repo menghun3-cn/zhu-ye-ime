@@ -67,6 +67,9 @@ fn run() -> Result<(), String> {
         Some("verify-manifest") => verify_manifest_command(required_path(&args, 2)?),
         Some("sign-manifest") => sign_manifest_command(required_path(&args, 2)?),
         Some("verify-signature") => verify_signature_command(required_path(&args, 2)?),
+        Some("build-app") => build_app_command(&args),
+        Some("sign-app") => sign_app_command(required_path(&args, 2)?),
+        Some("verify-app") => verify_app_command(required_path(&args, 2)?),
         Some("keygen") => keygen_command(),
         Some("en-build") => en_build_command(&args),
         Some("en-bench") => {
@@ -126,6 +129,15 @@ fn print_usage() {
     );
     println!(
         "  verify-signature <manifest.json>  用内置/指定公钥验签（读 ZHU_YE_RELEASE_PUBLIC_KEY，M6-U）"
+    );
+    println!(
+        "  build-app <app.json> --version <V> --release-notes-file <纯文本>  生成未签名的应用版本元数据 app.json（T-154）"
+    );
+    println!(
+        "  sign-app <app.json>  用发布私钥签名（读 ZHU_YE_RELEASE_SECRET_KEY，T-154，与 sign-manifest 同构）"
+    );
+    println!(
+        "  verify-app <app.json>  用指定公钥验签 app.json（读 ZHU_YE_RELEASE_PUBLIC_KEY，T-154）"
     );
     println!(
         "  keygen           生成 ed25519 发布密钥对（私钥仅发布环境保存、绝不入库；公钥经构建期注入客户端，M6-U/T-094）"
@@ -831,6 +843,177 @@ fn verify_signature_command(path: PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// `build-app <out.json> --version <V> --release-notes-file <文本>`（T-154）：
+/// 生成**未签名**的输入法应用版本元数据 `app.json`。
+///
+/// 更新日志来自发布说明文件（发布脚本从 CHANGELOG 提取后传入）；这里的
+/// `plain_text_notes` 做 Markdown → 纯文本清洗（行首 `#`/`-`、行内链接/反引号），
+/// 使设置窗口结果区可以逐行展示。发布时随后用 `sign-app` 签名。
+fn build_app_command(args: &[String]) -> Result<(), String> {
+    let mut out: Option<PathBuf> = None;
+    let mut version: Option<String> = None;
+    let mut notes_file: Option<PathBuf> = None;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--version" => {
+                index += 1;
+                version = Some(
+                    args.get(index)
+                        .ok_or_else(|| "--version 缺少版本号".to_owned())?
+                        .clone(),
+                );
+            }
+            "--release-notes-file" => {
+                index += 1;
+                notes_file =
+                    Some(PathBuf::from(args.get(index).ok_or_else(|| {
+                        "--release-notes-file 缺少文件路径".to_owned()
+                    })?));
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("未知选项：{flag}"));
+            }
+            _ => {
+                out = Some(PathBuf::from(&args[index]));
+            }
+        }
+        index += 1;
+    }
+    let out = out.ok_or_else(|| "缺少输出文件参数".to_owned())?;
+    let version = version.ok_or_else(|| "缺少 --version（与根 Cargo.toml 版本一致）".to_owned())?;
+    let notes_file = notes_file.ok_or_else(|| "缺少 --release-notes-file".to_owned())?;
+    let raw = std::fs::read_to_string(&notes_file)
+        .map_err(|error| format!("读取发布说明失败（{}）: {error}", notes_file.display()))?;
+    let release_notes = plain_text_notes(&raw);
+    let published_at = format!("{}T00:00:00Z", today());
+    let meta = zhu_ye_core::AppMeta {
+        format: zhu_ye_core::APP_META_FORMAT.to_owned(),
+        version: zhu_ye_core::APP_META_VERSION,
+        app_version: version,
+        published_at,
+        release_notes,
+        signature: None,
+    };
+    let json = serde_json::to_string_pretty(&meta)
+        .map_err(|error| format!("序列化 app 元数据失败: {error}"))?;
+    std::fs::write(&out, json)
+        .map_err(|error| format!("写入 app.json 失败（{}）: {error}", out.display()))?;
+    println!("已写入（未签名，请用 sign-app 签名）: {}", out.display());
+    Ok(())
+}
+
+/// Markdown 发布说明 → 纯文本行（供设置窗口结果区逐行展示，T-154）：
+/// - 折叠空行（结果区行数有限）；
+/// - 去行首的 `#` / `-` / `*` 与链接符号、行内反引号；
+/// - 行内链接 `[文字](url)` 只留文字。
+fn plain_text_notes(text: &str) -> String {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let body: String = trimmed
+                .trim_start_matches(['#', '-', '*', ' '])
+                .chars()
+                .map(|c| if c == '`' { ' ' } else { c })
+                .collect();
+            let body = strip_inline_links(&body);
+            let body = body.trim();
+            if body.is_empty() {
+                None
+            } else {
+                Some(body.to_owned())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 行内链接 `[文字](url)` → `文字`（其余原样）。
+fn strip_inline_links(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '[' {
+            if let Some(close) = chars[i + 1..].iter().position(|&c| c == ']') {
+                let j = i + 1 + close;
+                if j + 1 < chars.len() && chars[j + 1] == '(' {
+                    if let Some(paren) = chars[j + 2..].iter().position(|&c| c == ')') {
+                        let k = j + 2 + paren;
+                        out.extend(chars[i + 1..j].iter());
+                        i = k + 1;
+                        continue;
+                    }
+                }
+            }
+            out.push(chars[i]);
+        } else {
+            out.push(chars[i]);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `sign-app <app.json>`（T-154）：用发布私钥对应用元数据签名并就地写回。
+///
+/// 私钥读取与 `sign-manifest` 同口径（环境变量 `ZHU_YE_RELEASE_SECRET_KEY`，
+/// 32 字节十六进制，绝不写入仓库/日志/命令行参数）。
+fn sign_app_command(path: PathBuf) -> Result<(), String> {
+    let secret_hex = std::env::var("ZHU_YE_RELEASE_SECRET_KEY").map_err(|_| {
+        "未设置 ZHU_YE_RELEASE_SECRET_KEY（32 字节十六进制私钥）；\
+         私钥只应存在于发布环境，不得写入仓库"
+            .to_owned()
+    })?;
+    let secret_bytes = decode_hex(&secret_hex)?;
+    let secret: [u8; 32] = secret_bytes.as_slice().try_into().map_err(|_| {
+        format!(
+            "私钥长度应为 32 字节（64 个十六进制字符），实际 {} 字节",
+            secret_bytes.len()
+        )
+    })?;
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("读取 app.json 失败（{}）: {error}", path.display()))?;
+    let meta = zhu_ye_core::parse_app_meta(&text).map_err(|error| error.to_string())?;
+    let signed = zhu_ye_core::sign_app_meta(&meta, &secret)?;
+
+    let json = serde_json::to_string_pretty(&signed)
+        .map_err(|error| format!("序列化签名 app.json 失败: {error}"))?;
+    std::fs::write(&path, json)
+        .map_err(|error| format!("写入 app.json 失败（{}）: {error}", path.display()))?;
+
+    let signature = signed
+        .signature
+        .as_ref()
+        .ok_or_else(|| "签名后 app.json 缺少签名块".to_owned())?;
+    println!("已签名: {}", path.display());
+    println!("  算法: {}", signature.algorithm);
+    println!("  公钥: {}", signature.public_key);
+    Ok(())
+}
+
+/// `verify-app <app.json>`（T-154）：用指定公钥验签应用元数据。
+fn verify_app_command(path: PathBuf) -> Result<(), String> {
+    let key_hex = std::env::var("ZHU_YE_RELEASE_PUBLIC_KEY")
+        .map_err(|_| "未设置 ZHU_YE_RELEASE_PUBLIC_KEY（32 字节十六进制公钥）".to_owned())?;
+    let key = zhu_ye_core::parse_public_key(&key_hex).map_err(|error| error.to_string())?;
+
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("读取 app.json 失败（{}）: {error}", path.display()))?;
+    let meta = zhu_ye_core::parse_app_meta(&text).map_err(|error| error.to_string())?;
+    meta.verify(&key).map_err(|error| error.to_string())?;
+    println!(
+        "验签通过: {}（应用版本 {}）",
+        path.display(),
+        meta.app_version
+    );
+    Ok(())
+}
+
 /// 解析十六进制字符串为字节。
 fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
     let text = text.trim();
@@ -1336,4 +1519,48 @@ fn hex(bytes: &[u8]) -> String {
         output.push_str(&format!("{byte:02x}"));
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{plain_text_notes, strip_inline_links};
+
+    #[test]
+    fn 发布说明清洗为纯文本行() {
+        let md = "\
+### 新增
+
+- 检查更新不再弹窗（T-153）
+- 描述文字不再被裁剪
+
+### 修复
+
+- 修复设置窗口偶发卡顿 [详情](https://example.com/x)
+";
+        let text = plain_text_notes(md);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "新增");
+        assert_eq!(lines[1], "检查更新不再弹窗（T-153）");
+        assert_eq!(lines[2], "描述文字不再被裁剪");
+        assert_eq!(lines[3], "修复");
+        assert_eq!(lines[4], "修复设置窗口偶发卡顿 详情");
+        // 空行被折叠、无前后空白。
+        assert!(!text.contains("\n\n"));
+    }
+
+    #[test]
+    fn 纯文本原样保留() {
+        let text = plain_text_notes("恢复默认值\n设置项被重置时自动回退");
+        assert_eq!(text, "恢复默认值\n设置项被重置时自动回退");
+    }
+
+    #[test]
+    fn 行内链接只留文字() {
+        assert_eq!(
+            strip_inline_links("见[文档](https://e/x)与[说明](https://e/y)。"),
+            "见文档与说明。"
+        );
+        assert_eq!(strip_inline_links("无链接[未闭合"), "无链接[未闭合");
+        assert_eq!(strip_inline_links("[a](b)(c)"), "a(c)");
+    }
 }
