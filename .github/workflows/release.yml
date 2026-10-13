@@ -124,14 +124,26 @@ jobs:
           $notesFile = "$dir/RELEASE_NOTES.md"
           & ./scripts/release-notes-from-changelog.ps1 -Version $version -NotesFile $notesFile
           if ($LASTEXITCODE -ne 0) { throw "生成发布说明失败" }
-          # Release 可能已存在（重跑幂等）；失败忽略后走 upload --clobber。
+          # Release 可能已存在（重跑幂等：tag 重打后 create 幂等失败可接受）。
+          # 2026-10-14 教训（T-159）：原 create 用 `2>$null` 静默吞错，v0.1.3 上传步骤
+          # 连续 3 次 create 静默失败、upload 报 "release not found" 才暴露——create
+          # 失败不再静默：打日志；仅当 release 确实已存在时继续（upload --clobber 补资产）。
           # 坑（2026-10-05 实测）：删除 tag 重打会使已发布的 release 被 GitHub
           # 置为 untagged + draft（tag 删除行为），create 幂等失败不会自动恢复——
           # 重打 tag 后必须手动 PATCH 恢复关联与发布状态：
           #   gh api -X PATCH repos/<owner>/<repo>/releases/<id> \
           #     -f tag_name=<tag> -F draft=false -F prerelease=false
-          gh release create $tag --title $tag --notes-file $notesFile $prerelease --latest 2>$null
-          gh release upload $tag @assets --clobber
+          gh release create $tag --title $tag --notes-file $notesFile $prerelease --latest 2>&1 | ForEach-Object { "create: $_" }
+          $createExit = $LASTEXITCODE
+          if ($createExit -ne 0) {
+            if (gh release view $tag --json id 2>$null) {
+              Write-Host "Release $tag 已存在（幂等场景），继续 upload --clobber 补资产。"
+            } else {
+              throw "gh release create 失败（exit=$createExit）：见上方 create 输出（tag=$tag）"
+            }
+          }
+          gh release upload $tag @assets --clobber 2>&1 | ForEach-Object { "upload: $_" }
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload 失败（tag=$tag）：见上方 upload 输出" }
 
       - name: 发布更新源镜像（zhu-ye-updates，T-098）
         if: github.event_name == 'push' || inputs.upload
