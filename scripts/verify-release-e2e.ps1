@@ -126,7 +126,10 @@ if ($sigExit -ne 0) {
 }
 
 Write-Host '== 5/6 app.json（T-154）：check 输出包含应用版本信息 =='
-$appMetaPath = Join-Path $packsDir 'app.json'
+# app.json 由 assemble-release.ps1 5.5 节写在 release-assets\<version>\ 根（relDir），
+# 与 manifest.json（packs\ 下）不同目录；两者上传到 feed release 根时同级（客户端按
+# manifest URL 前缀推导 {base}/app.json）。
+$appMetaPath = Join-Path (Split-Path -Parent $packsDir) 'app.json'
 if (-not (Test-Path -LiteralPath $appMetaPath -PathType Leaf)) {
     $failures += "发布资产缺失 app.json：$appMetaPath"
 } else {
