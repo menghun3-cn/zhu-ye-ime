@@ -11,7 +11,9 @@ import/export, symbol-panel expansion, theme files (custom themes), an async
 update check at startup, and GUI .vcf import for contacts (D-53, user-confirmed
 2026-10-02; plan §14.5). Constraints: the settings window and the IME process
 stay zero-network (D-44 / S-4), the online-update default stays off (zero
-spawn, zero outbound), `config.json` format version stays stable (S-7),
+spawn, zero outbound — **reversed to on-by-default by T-154, 2026-10-13**;
+explicit off keeps the zero-spawn/zero-outbound gate), `config.json` format
+version stays stable (S-7),
 imports validate before writing (FR-042), and system high-contrast mode still
 overrides hand-picked themes (D-31).
 

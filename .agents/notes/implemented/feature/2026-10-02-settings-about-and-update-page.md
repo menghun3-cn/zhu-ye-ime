@@ -14,6 +14,14 @@ from the separate `zhu-ye-updater.exe` process. Updates are opt-in by default
 and explain why, and the window must not spawn any process — keeping "zero
 outbound connections when disabled" verifiable (acceptance 13.1 FR-044).
 
+> **T-154 (2026-10-13) reversed the default** — `online_update` is now on by
+> default (missing-key configs load as enabled); the *disabled-state gating*
+> below is unchanged and still the acceptance path for "zero connections when
+> explicitly off". UI copy dropped the (P-03)/(D-44) IDs. The About page now
+> also shows the IME app version + changelog from the signed `app.json` (result
+> pane 3 → 6 rows). See
+> [2026-10-13-online-update-default-on-app-meta](../../implemented/feature/2026-10-13-online-update-default-on-app-meta.md).
+
 Two additional constraints: applying an update replaces local program files,
 so it needs a second confirmation; and diagnostics (config path, data
 directory, log directory, installed packs) must be shown without spawning the
@@ -44,7 +52,7 @@ install the full package"). That gate sits **before** any spawn, so
 ### "Enable online updates" is a runtime switch, first About item
 
 `ChipValue::OnlineUpdate(bool)` reuses the two-option chip mechanism
-("关闭"/"开启", off first per P-03). Clicking persists immediately via
+("关闭"/"开启", off first). Clicking persists immediately via
 `config::save_online_update` (re-read before write, S-8), like theme/mode.
 Selecting the row itself does nothing.
 
@@ -111,9 +119,10 @@ Format lines are drawn like the manage/repair subviews (first line stronger).
 
 - `load_online_update`/`save_online_update` added to `config.rs` with a
   round-trip and field-preservation test (S-8 re-read keeps `last_check`).
-- Settings lib tests 95→97 (model: About items ready + switch default off +
-  subview transitions; layout: update/diagnostics geometry; updater bridge:
-  line filtering, exit-code and spawn-failure paths run against `cmd.exe`).
+- Settings lib tests 95→97 (model: About items ready + switch default (off at
+  the time, on since T-154) + subview transitions; layout: update/diagnostics
+  geometry; updater bridge: line filtering, exit-code and spawn-failure paths
+  run against `cmd.exe`).
 - T-143: `Subview::Update/Diagnostics` and `ItemControl::OpenUpdate/
   OpenDiagnostics` deleted; `ABOUT_ITEMS` keeps only the switch item; the two
   former subview layouts were replaced by `about_layout` (106 lib tests).

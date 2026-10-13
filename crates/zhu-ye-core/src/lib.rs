@@ -4,6 +4,7 @@
 //! 后续输入法 DLL/CLI 全部通过这里的纯数据接口取结果。
 
 pub mod ai;
+pub mod app_meta;
 pub mod bigram;
 pub mod candidate;
 pub mod char_pinyin;
@@ -46,6 +47,10 @@ pub mod user_words_exchange;
 pub mod vcard;
 
 pub use ai::{AiService, OfflineAiService};
+pub use app_meta::{
+    app_update_available, parse_app_meta, sign_app_meta, AppMeta, AppMetaSignature,
+    APP_META_FILE_NAME, APP_META_FORMAT, APP_META_VERSION,
+};
 pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
 pub use candidate::{
     abbreviation_candidates, append_abbreviation_group, constrained_segment_candidates,

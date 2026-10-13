@@ -164,7 +164,8 @@ pub enum ItemControl {
     OpenRepair,
     /// 恢复状态栏：重启输入法进程（ctfmon）重建语言栏；执行前弹确认（D-43）。
     RestoreLangBar,
-    /// 在线更新开/关二选一（T-077 / FR-044；写 `config.json` 的 `online_update`，P-03 默认关）。
+    /// 在线更新开/关二选一（T-077 / FR-044；写 `config.json` 的 `online_update`，
+    /// T-154 反转 P-03：默认开启）。
     OnlineUpdate,
     /// 候选框拼音行开/关二选一（T-127；写 `config.json` 的 `candidate_show_pin`，默认开）。
     CandidatePin,
@@ -337,7 +338,7 @@ static COMMON_ITEMS: &[Item] = &[
 /// 页面上（`window::draw_about`），不再是可点击进入子视图的条目）。
 static ABOUT_ITEMS: &[Item] = &[item(
     "启用在线更新",
-    "由独立更新器进程联网；默认关闭，需显式开启（P-03）",
+    "默认开启：由独立更新器进程联网检查词典与软件更新，本窗口自身不联网",
     ItemState::Ready,
     ItemControl::OnlineUpdate,
 )];
@@ -353,7 +354,7 @@ pub struct SettingsState {
     pub theme: ThemeChoice,
     /// 新会话默认中英模式选择（来自 `config.json`，D-32 装配项）。
     pub default_mode: ModeChoice,
-    /// 在线更新开关（来自 `config.json`，P-03 默认关）。
+    /// 在线更新开关（来自 `config.json`，T-154 默认开）。
     pub online_update: bool,
     /// 候选框拼音行开关（来自 `config.json`，T-127 默认开；装配项）。
     pub candidate_show_pin: bool,
@@ -368,7 +369,7 @@ impl Default for SettingsState {
             expanded: None,
             theme: ThemeChoice::Light,
             default_mode: ModeChoice::Chinese,
-            online_update: false,
+            online_update: true,
             candidate_show_pin: true,
             subview: Subview::None,
         }
@@ -736,7 +737,7 @@ mod tests {
     #[test]
     fn m12_5关于页开关条目接入且控件齐备() {
         let items = Page::About.items();
-        // 在线更新开关：P-03 默认关，界面显式开启；关于页由此不再有可点击进入
+        // 在线更新开关：T-154 默认开；显式关闭的配置如实反映。关于页由此不再有可点击进入
         // 子视图的条目（T-143："检查更新"与"版本与诊断信息"改为页面内平铺）。
         let online = items
             .iter()
@@ -752,16 +753,17 @@ mod tests {
     }
 
     #[test]
-    fn 在线更新开关默认关闭且随配置装载() {
-        // P-03：默认关闭，未显式开启不得联网。
+    fn 在线更新开关默认开启且随配置装载() {
+        // T-154 反转 P-03：默认开启；显式关闭的配置仍如实装载。
         let state = SettingsState::default();
         assert!(
-            !state.online_update,
-            "online_update 默认必须为 false（P-03）"
+            state.online_update,
+            "online_update 默认必须为 true（T-154）"
         );
-        assert!(!SettingsState::new(ThemeChoice::Light).online_update);
-        let state = SettingsState::with_config(ThemeChoice::Dark, ModeChoice::English, true, false);
-        assert!(state.online_update, "显式开启后应为 true");
+        assert!(SettingsState::new(ThemeChoice::Light).online_update);
+        let state =
+            SettingsState::with_config(ThemeChoice::Dark, ModeChoice::English, false, false);
+        assert!(!state.online_update, "显式关闭后应为 false");
         assert!(!state.candidate_show_pin, "候选拼音开关随配置装载（T-127）");
     }
 

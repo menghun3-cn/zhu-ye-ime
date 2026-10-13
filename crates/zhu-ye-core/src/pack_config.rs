@@ -216,8 +216,9 @@ pub struct ConfigFile {
     /// 启用的领域包 id 列表；基础包始终加载，不出现在此列表。
     #[serde(default)]
     pub enabled_packs: Vec<String>,
-    /// 是否允许在线更新；默认 `false`（需求 P-03 默认关闭原则）。
-    #[serde(default)]
+    /// 是否允许在线更新；默认 `true`（T-154 反转 P-03：默认开启，显式关闭仍尊重）。
+    /// 缺失该键的旧配置同样按开启处理（升级路径，T-154）。
+    #[serde(default = "default_online_update")]
     pub online_update: bool,
     /// 上次检查更新时间（Unix 秒）；`null` 表示从未检查。
     #[serde(default)]
@@ -271,6 +272,11 @@ fn default_domain_boost() -> bool {
     true
 }
 
+/// 在线更新默认开启（T-154 反转 P-03）。
+fn default_online_update() -> bool {
+    true
+}
+
 fn default_enable_abbreviation() -> bool {
     true
 }
@@ -288,7 +294,7 @@ impl Default for ConfigFile {
         Self {
             version: CONFIG_FORMAT_VERSION,
             enabled_packs: Vec::new(),
-            online_update: false,
+            online_update: true,
             last_check: None,
             enable_domain_boost: true,
             enable_abbreviation: true,
@@ -480,12 +486,28 @@ mod tests {
     }
 
     #[test]
-    fn 默认配置仅基础包且在线更新关闭() {
+    fn 默认配置仅基础包且在线更新开启() {
         let config = ConfigFile::default();
         assert!(config.enabled_packs.is_empty());
-        assert!(!config.online_update, "默认必须关闭在线更新（P-03）");
+        assert!(
+            config.online_update,
+            "默认必须开启在线更新（T-154 反转 P-03）"
+        );
         assert_eq!(config.last_check, None);
         assert_eq!(config.version, CONFIG_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn 旧配置缺失在线更新键按开启处理() {
+        // 升级路径（T-154）：老配置没有 online_update 字段 → 解析后按默认 true。
+        let text = r#"{
+            "version": 1,
+            "enabled_packs": ["it"],
+            "last_check": 1234567890
+        }"#;
+        let config = ConfigFile::from_json(text).unwrap();
+        assert!(config.online_update, "缺键旧配置应默认开启");
+        assert_eq!(config.last_check, Some(1234567890), "其余字段照常");
     }
 
     #[test]
@@ -507,7 +529,8 @@ mod tests {
         let config = ConfigFile::from_json("{}").unwrap();
         assert_eq!(config.version, CONFIG_FORMAT_VERSION);
         assert!(config.enabled_packs.is_empty());
-        assert!(!config.online_update);
+        // 在线更新默认开（T-154 反转 P-03）。
+        assert!(config.online_update);
         // 领域提权默认开（D-14）。
         assert!(config.enable_domain_boost);
         // 主题缺失时按浅色（T-030 候选窗默认浅色口径）。

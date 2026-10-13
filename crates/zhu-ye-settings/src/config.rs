@@ -89,7 +89,7 @@ pub fn save_packs(path: &Path, enabled_packs: &[String]) -> Result<(), String> {
     save_config(path, &config)
 }
 
-/// 只更新在线更新开关并原子保存（S-8 同口径，P-03 默认关）。
+/// 只更新在线更新开关并原子保存（S-8 同口径；T-154 默认开启）。
 ///
 /// 勾选即写：`online_update` 是运行时开关（设置状态三分），由更新器进程读取；
 /// 保存前重读避免覆盖其他写入方的字段。
@@ -99,7 +99,7 @@ pub fn save_online_update(path: &Path, online_update: bool) -> Result<(), String
     save_config(path, &config)
 }
 
-/// 读取在线更新开关；缺失或损坏回退关闭（P-03）。
+/// 读取在线更新开关；缺失或损坏回退开启（T-154 反转 P-03；显式关闭仍尊重）。
 #[must_use]
 pub fn load_online_update(path: &Path) -> (bool, Option<String>) {
     let (config, diagnostic) = load_config(path);
@@ -202,7 +202,7 @@ mod tests {
         );
         assert!(
             config.online_update,
-            "在线更新开关不得被重置（P-03 默认关）"
+            "在线更新开关不得被重置（T-154 默认开）"
         );
         assert_eq!(config.contact_vcards.len(), 1, "通讯录路径不得丢失");
         assert!(!config.enable_domain_boost, "领域提权开关不得被重置");
@@ -389,21 +389,21 @@ mod tests {
     }
 
     #[test]
-    fn 在线更新开关默认关闭且显式开启可往返() {
+    fn 在线更新开关默认开启且显式关闭可往返() {
         let dir = temp_dir("online");
         let path = dir.join("config.json");
-        // P-03：默认关闭。
-        assert!(!super::load_online_update(&path).0);
-
-        super::save_online_update(&path, true).unwrap();
-        let (config, diagnostic) = super::load(&path);
-        assert_eq!(diagnostic, None);
-        assert!(config.online_update, "开启后 config.json 应写入 true");
+        // T-154 反转 P-03：默认开启（缺失文件按开启）。
         assert!(super::load_online_update(&path).0);
 
-        // 关闭同样可往返。
         super::save_online_update(&path, false).unwrap();
+        let (config, diagnostic) = super::load(&path);
+        assert_eq!(diagnostic, None);
+        assert!(!config.online_update, "关闭后 config.json 应写入 false");
         assert!(!super::load_online_update(&path).0);
+
+        // 开启同样可往返。
+        super::save_online_update(&path, true).unwrap();
+        assert!(super::load_online_update(&path).0);
     }
 
     #[test]

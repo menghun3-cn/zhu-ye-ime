@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-09-29-dictionary-update-trust-chain.md
 #   git hash-object 2026-09-29-dictionary-update-trust-chain.zh.md
-2026-09-29-dictionary-update-trust-chain.md: 2845452cc4b46492308c30333527677a8904b2cc
-2026-09-29-dictionary-update-trust-chain.zh.md: 53df96ed3fb9d046040d5b6e5c00ad16a91cad33
+2026-09-29-dictionary-update-trust-chain.md: 04beed326fa9598a2a40743d338270f6d0df7d91
+2026-09-29-dictionary-update-trust-chain.zh.md: 4542d8a17aed134f3a96dc255787ada564a1c7f5

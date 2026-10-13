@@ -11,6 +11,12 @@
 更新默认关闭（P-03）：`online_update=false` 时界面必须禁用检查/应用按钮并说明原因，
 且窗口不得 spawn 任何进程——保证"关闭时零出站连接"可测（验收 13.1 FR-044）。
 
+> **T-154（2026-10-13）反转默认值**——`online_update` 现默认开启（缺键配置
+> 按开启）；下方的"关闭态门禁"不变，仍是"显式关闭时零连接"的验收路径。UI
+> 文案已去掉 (P-03)/(D-44) 编号；关于页现在还从签名 `app.json` 展示输入法
+> 应用版本与更新日志（结果区 3 → 6 行）。见
+> [2026-10-13-online-update-default-on-app-meta](../../implemented/feature/2026-10-13-online-update-default-on-app-meta.zh.md)。
+
 另有两条约束：应用更新会替换本机程序文件，需要二次确认；诊断信息（配置路径、数据目录、
 日志目录、已装包）必须不经 updater 就展示（T-077 本地直读）。
 
@@ -34,8 +40,8 @@ stderr，非零退出码返回 `Err(text)` 以便原样展示失败；`output_li
 
 ### 「启用在线更新」是运行时开关，列于关于页首条
 
-`ChipValue::OnlineUpdate(bool)` 复用二选一 chip 机制（"关闭"/"开启"，关闭在前，
-P-03）。点击即经 `config::save_online_update` 持久化（先重读再写，S-8），与主题/
+`ChipValue::OnlineUpdate(bool)` 复用二选一 chip 机制（"关闭"/"开启"，关闭在前）。
+点击即经 `config::save_online_update` 持久化（先重读再写，S-8），与主题/
 模式同口径。点条目行本身无动作。
 
 ### 检查更新与诊断信息是页面平铺小节，不是子视图（T-143）
@@ -89,7 +95,7 @@ post，消息到达时结果必在 channel 里。`WM_UPDATER_DONE` 的 `wparam` 
 
 - `config.rs` 新增 `load_online_update`/`save_online_update`，含往返与字段保全测试
   （S-8 重读保留 `last_check`）。
-- settings 库测试 95→97（model：关于页三条目 Ready + 开关默认关 + 子视图切换；
+- settings 库测试 95→97（model：关于页三条目 Ready + 开关默认（当时关、T-154 起开）+ 子视图切换；
   layout：更新/诊断几何；updater 桥：行过滤、非零退出码与启动失败路径，用
   `cmd.exe` 实测）。
 - T-143：删除 `Subview::Update/Diagnostics` 与 `ItemControl::OpenUpdate/
