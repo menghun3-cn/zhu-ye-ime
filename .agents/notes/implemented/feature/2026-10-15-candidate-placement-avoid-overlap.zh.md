@@ -62,3 +62,8 @@ anchor_y, anchor_right, width, height, gap)` 决策：
   `cargo clippy --all-targets -- -D warnings` 干净。
 - 验收标准 FR-009 增「定位策略（T-162）」行（需求规格说明书、验收标准同步）、
   方案设计 §5.1 定位策略节更新、CHANGELOG [Unreleased] 登记、todos T-162 登记。
+- 2026-10-15 经用户机提权 worker `copy-dll-ver` 部署：新 DLL
+  `C:\Program Files\zhu-ye-ime\tsf\zhu_ye_ime_878D26F8.dll`（2,244,096 B）落地，
+  CLSID InprocServer32 + 语言档 IconFile 指针已切换，ctfmon 已重启；
+  `verify-tsf-dll`（导出 3/3）与 `verify-tsf-identity`（7/7）通过。新宿主进程
+  （如新建记事本）将加载新 DLL；真机目视验收待用户确认。
