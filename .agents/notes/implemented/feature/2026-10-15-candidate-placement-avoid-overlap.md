@@ -1,0 +1,83 @@
+# Agent Note: Candidate window placement avoids covering the host input line
+
+Status: implemented
+
+[中文](2026-10-15-candidate-placement-avoid-overlap.zh.md) | English
+
+## Problem
+
+The candidate window must never cover the host input line. The previous
+`place_at` strategy always preferred the space below the anchor
+(`anchor.y + gap`): when the input line sat near the bottom of the monitor
+work area the window could not fit below, so it was pushed back up
+(`top = work.bottom - height`), landing directly on top of the input line
+and hiding what the user was typing. The user requested a three-tier strategy
+instead: prefer below, fall back to the right of the input line, and only
+then above.
+
+## Decision
+
+Placement is decided by a pure function `place_in_work_area(work, anchor_x,
+anchor_y, anchor_right, width, height, gap)` in `candidate_window.rs`:
+
+1. **Below** — top = `anchor.y + gap`; used whenever it fits vertically in the
+   work area (horizontal is still clamped into the work area).
+2. **Right** — left = `anchor_right + gap`; used whenever it fits horizontally.
+   Vertically it aligns with the input line's bottom where possible and clamps
+   into the work area. Because the panel starts at the input line's right edge
+   it never overlaps the line horizontally, so lifting it vertically never
+   hides the input.
+3. **Above** — top = `anchor.y − gap − height`; used whenever it fits.
+4. **Fallback** — clamp into the work area (bottom-aligned) so the window
+   stays visible, for the extreme case where the panel is taller than the
+   work area.
+
+`CandidateWindowPlacement` gains `anchor_right` (the input line's right edge
+in screen pixels), filled by `selection_placement` from the existing
+`ITfContextView::GetTextExt` rect. This extends the placement mechanism
+described in the [TSF integration
+note](../../implemented/feature/2026-09-20-candidate-window-tsf-integration.md):
+anchoring to the caret still comes from `GetTextExt`; only the expansion
+strategy is new. The gap constant is `PLACEMENT_GAP = 4` (unchanged from the
+previous behavior).
+
+## Alternatives considered
+
+- **Always place above.** A common IME default, but the user explicitly wants
+  below-first and only accepts above as a last resort; flipping the default
+  would change the familiar position for every normal typing session.
+  Rejected.
+- **Keep pushing the window up into the work area (status quo).** That is
+  exactly the behavior that hides the input line; rejected as the complaint's
+  root cause.
+- **Place to the left instead of the right.** A mirrored fallback; the user
+  explicitly named the right side, and left placement would feel disconnected
+  from reading order. Rejected.
+- **Shrink or reflow the panel.** Changes the polished T-122/T-124 layout and
+  still cannot solve a work area smaller than the panel. Rejected.
+- **Move the panel to another monitor.** Invasive to host desktops; rejected.
+  The panel stays clamped to the nearest monitor's work area.
+
+## Consequences
+
+- Near the bottom of the screen the window appears to the right of the input
+  line, vertically clamped into the work area — it no longer covers the line.
+- At the screen's bottom-right corner it moves above the line.
+- Only when the panel is taller than the whole work area does the fallback
+  clamp it in place; the panel will then cover the line, which is unavoidable
+  at that size.
+- `anchor_right` comes from an API already used for anchoring, so there is no
+  new COM surface; the engine and keyboard routing are untouched, keeping the
+  change purely presentational.
+
+## Verification
+
+- 6 new unit tests on `place_in_work_area`: below-first; right fallback with
+  horizontal non-overlap; right fallback with vertical alignment when it
+  barely fits; above fallback at the bottom-right corner; fallback clamp when
+  all three tiers fail; horizontal clamping into the work area.
+- `cargo test -p zhu-ye-ime`: lib 244 (candidate_window 13), tsf 44,
+  host_e2e 167 — all green. `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings` clean.
+- Acceptance row added under FR-009 (需求规格说明书, 验收标准), design
+  section §5.1 updated, CHANGELOG [Unreleased] entry, todos T-162 registered.

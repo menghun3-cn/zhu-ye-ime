@@ -56,8 +56,12 @@ composition termination, and `Deactivate`.
 `CandidateWindow` is now a TSF-controlled popup: created, updated, hidden, and
 destroyed on the host UI thread with no message loop of its own. Destroying it
 does not call `PostQuitMessage`; the demo path keeps its own quit behavior.
-The popup positions below the composition's text-ext bottom edge and clamps
-into the monitor work area.
+The popup is placed relative to the composition's text-ext rect in three tiers
+(T-162): below the input line when it fits, to the input line's right when the
+space below is insufficient, and above as a last resort; all tiers clamp into
+the monitor work area so the window never covers the host input line (see the
+[placement
+note](../../implemented/feature/2026-10-15-candidate-placement-avoid-overlap.md)).
 
 When Shift switches to English mode, the candidate window hides immediately,
 and Tab/paging/selection no longer consume keys; switching back to Chinese

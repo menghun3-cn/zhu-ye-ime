@@ -1371,6 +1371,8 @@ fn selection_placement(context: &ITfContext, ec: u32) -> Option<CandidateWindowP
             x: rect.left,
             y: rect.bottom,
         },
+        // T-162：右侧展开时从输入行右缘起排，保证与输入行水平不重叠。
+        anchor_right: rect.right,
     })
 }
 
