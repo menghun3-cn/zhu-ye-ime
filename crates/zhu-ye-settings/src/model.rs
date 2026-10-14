@@ -238,7 +238,7 @@ static COMMON_ITEMS: &[Item] = &[
     ),
     item(
         "自定义主题",
-        "从 themes\\*.json 加载配色；缺键回退预设，系统高对比度仍由系统接管（D-31）",
+        "从 themes\\*.json 加载配色；缺键回退预设，系统高对比度仍由系统接管",
         ItemState::Ready,
         ItemControl::OpenThemes,
     ),

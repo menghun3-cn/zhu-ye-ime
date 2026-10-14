@@ -1788,8 +1788,7 @@ unsafe fn on_themes_click(
             break;
         };
         if state.theme_kind == UiThemeKind::HighContrast {
-            state.hint =
-                Some("系统处于高对比度模式，由系统接管配色（D-31），自定义主题不生效".to_owned());
+            state.hint = Some("系统处于高对比度模式，由系统接管配色，自定义主题不生效".to_owned());
             invalidate(hwnd);
             return;
         }
