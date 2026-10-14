@@ -64,6 +64,30 @@ pub fn run(program: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// 运行「检查更新」并返回**结构化**结果（T-161）。
+///
+/// 子进程以 `check --json` 输出 `UpdateStatus`（与 `check-once` 写 `update_status.json`
+/// 同构的契约，见 `zhu_ye_core::parse_update_status`），界面按结构化结果渲染用户
+/// 友好摘要，不再把更新器的人类诊断行（清单地址/签名校验/可用更新列表）直接搬进界面。
+/// 非零退出或输出不可解析返回 `Err`（文本供界面展示失败原因）。
+///
+/// # Errors
+/// 进程无法启动、退出码非零，或输出不是合法 `UpdateStatus`。
+pub fn run_check(program: &Path) -> Result<zhu_ye_core::UpdateStatus, String> {
+    let text = run(program, &["check", "--json"])?;
+    parse_check_output(&text)
+}
+
+/// 解析 `check --json` 的输出为结构化检查结果（T-161；契约同状态文件，见
+/// `zhu_ye_core::parse_update_status`）；非法输出返回 `Err`（含原始文本便于诊断）。
+///
+/// # Errors
+/// 输出不是合法 `UpdateStatus`。
+pub fn parse_check_output(text: &str) -> Result<zhu_ye_core::UpdateStatus, String> {
+    zhu_ye_core::parse_update_status(text)
+        .map_err(|error| format!("更新器输出不是有效的检查结果: {error}\n输出: {text}"))
+}
+
 /// 把更新器输出整理为界面的逐行文本：去掉空行与行尾空白（纯逻辑，便于单测）。
 #[must_use]
 pub fn output_lines(text: &str) -> Vec<String> {
@@ -89,6 +113,33 @@ mod tests {
     fn 空输出为空列表() {
         assert!(output_lines("").is_empty());
         assert!(output_lines("\r\n\r\n").is_empty());
+    }
+
+    #[test]
+    fn 检查输出契约可解析回结构化状态() {
+        // T-161：`check --json` 输出契约 = UpdateStatus，解析后原样还原。
+        let status = zhu_ye_core::UpdateStatus::available_app(
+            1_700_000_000,
+            "0.2.0".to_owned(),
+            "第一行\n第二行".to_owned(),
+            vec!["it".to_owned()],
+            Some("2026-10-11".to_owned()),
+        );
+        let text = zhu_ye_core::update_status_to_json(&status).unwrap();
+        let back = super::parse_check_output(&text).unwrap();
+        assert_eq!(back, status);
+    }
+
+    #[test]
+    fn 检查输出非法输入报错且带回诊断() {
+        let result = super::parse_check_output("这不是 JSON");
+        let Err(message) = result else {
+            panic!("非法输出必须报错");
+        };
+        assert!(
+            message.contains("这不是 JSON"),
+            "错误信息应含原始输出便于诊断：{message}"
+        );
     }
 
     #[test]

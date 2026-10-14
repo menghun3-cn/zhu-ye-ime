@@ -49,8 +49,12 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("status") | None => status_command(),
-        Some("check") => check_command(false),
-        Some("apply") => check_command(true),
+        Some("check") | Some("apply") => {
+            let apply = args.first().map(String::as_str) == Some("apply");
+            // T-161：`check --json` 输出结构化 UpdateStatus，供设置窗口渲染用户摘要。
+            let json = args.get(1).map(String::as_str) == Some("--json");
+            check_command(apply, json)
+        }
         Some("check-once") => check_once_command(),
         Some("--help") | Some("-h") => {
             print_usage();
@@ -72,6 +76,7 @@ fn print_usage() {
     println!("用法:");
     println!("  zhu-ye-updater status   查看配置与已安装包状态（不联网）");
     println!("  zhu-ye-updater check    检查可用更新（需 online_update=true）");
+    println!("  zhu-ye-updater check --json   检查并以 UpdateStatus JSON 输出（设置窗口契约）");
     println!("  zhu-ye-updater apply    下载并应用更新（需 online_update=true）");
     println!("  zhu-ye-updater check-once   启动时静默检查一次（结果写 update_status.json）");
 }
@@ -160,8 +165,119 @@ fn status_command() -> Result<(), String> {
     Ok(())
 }
 
-/// 检查或应用更新。`apply` 为 `false` 时只报告。
-fn check_command(apply: bool) -> Result<(), String> {
+/// 检查收集阶段的载荷：网络/验签/版本比较的结果，人类检查行一并收集
+/// （T-161：`--json` 时静默收集，末尾统一输出结构化状态）。
+struct CheckInfo {
+    manifest: zhu_ye_core::manifest::Manifest,
+    key: ed25519_dalek::VerifyingKey,
+    engine_version: String,
+    /// 输入法应用元数据（T-154）：`Err` 为拉取/验签失败摘要（人类模式降级打印）。
+    app_meta: Result<Option<AppMeta>, String>,
+    /// 可更新的包 id 列表（基础包随安装只读交付，real/seed 是开发产物，不在更新范围）。
+    outdated: Vec<String>,
+    /// 可更新包中的最大版本号（比较口径同 `version_at_least`；无可更新为空串）。
+    latest: String,
+    /// 人类检查行（清单地址/清单/签名校验），由调用方统一输出。
+    human_lines: Vec<String>,
+}
+
+impl CheckInfo {
+    /// 检查结果 → 结构化更新状态（口径与 `check-once` 一致，T-154）。
+    #[must_use]
+    fn to_status(&self) -> UpdateStatus {
+        let now = zhu_ye_core::unix_now();
+        if let Ok(Some(meta)) = &self.app_meta {
+            if zhu_ye_core::app_update_available(&meta.app_version, &self.engine_version) {
+                return UpdateStatus::available_app(
+                    now,
+                    meta.app_version.clone(),
+                    meta.release_notes.clone(),
+                    self.outdated.clone(),
+                    (!self.latest.is_empty()).then_some(self.latest.clone()),
+                );
+            }
+        }
+        if self.outdated.is_empty() {
+            return UpdateStatus::up_to_date(now);
+        }
+        UpdateStatus::available(now, self.outdated.clone(), self.latest.clone())
+    }
+}
+
+/// 拉取、验签并比较版本，收集检查结果；`silent` 时不收集人类行（T-161）。
+fn check_collect(url: &str, silent: bool) -> Result<CheckInfo, String> {
+    let mut human_lines = Vec::new();
+    let mut ui = |line: String| {
+        if !silent {
+            human_lines.push(line);
+        }
+    };
+
+    ui(format!("清单地址: {url}"));
+    let manifest_text = http_get_text(url)?;
+    let manifest = parse_manifest(&manifest_text).map_err(|error| error.to_string())?;
+    ui(format!(
+        "清单: schema={} 发布时间={} 包数={}",
+        manifest.schema,
+        manifest.published_at,
+        manifest.packs.len()
+    ));
+
+    let key = trusted_key()?;
+    verify_signature_with_key(&manifest, &key).map_err(|error| error.to_string())?;
+    ui("签名校验: 通过（内置公钥）".to_owned());
+
+    let engine_version = zhu_ye_core::core_version();
+    // 输入法应用版本信息（T-154）：独立签名的 app.json，仅展示用途；缺失/损坏/
+    // 验签失败只降级，不阻断词典包检查与应用。
+    let app_base = url.rsplit_once('/').map(|(prefix, _)| prefix).unwrap_or("");
+    let app_meta = fetch_app_meta(app_base, &key);
+
+    let packs_dir = packs_dir()?;
+    // 只考虑可分发包：基础包随安装只读交付，real/seed 是开发产物，都不在更新范围。
+    let outdated: Vec<String> = find_outdated(&manifest, &packs_dir)
+        .into_iter()
+        .filter(|id| zhu_ye_core::is_distributable_pack(id))
+        .collect();
+    // 可更新包中的最大版本号（与 `check-once` 相同口径）。
+    let latest = manifest
+        .packs
+        .iter()
+        .filter(|pack| outdated.contains(&pack.id))
+        .map(|pack| pack.version.as_str())
+        .max_by(|a, b| {
+            if version_at_least(a, b) {
+                std::cmp::Ordering::Greater
+            } else if version_at_least(b, a) {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .unwrap_or_default()
+        .to_owned();
+
+    Ok(CheckInfo {
+        manifest,
+        key,
+        engine_version: engine_version.to_owned(),
+        app_meta,
+        outdated,
+        latest,
+        human_lines,
+    })
+}
+
+/// 输出结构化检查结果（T-161：设置窗口 `check --json` 契约）。
+fn print_status_json(status: &UpdateStatus) -> Result<(), String> {
+    let text = zhu_ye_core::update_status_to_json(status)?;
+    println!("{text}");
+    Ok(())
+}
+
+/// 检查或应用更新。`apply` 为 `false` 时只报告；`json` 为 `true` 时只输出
+/// 机器可读 `UpdateStatus`（T-161：设置窗口按结构化结果渲染，不解析人类文本）。
+fn check_command(apply: bool, json: bool) -> Result<(), String> {
     let config_path = config_path()?;
     let (config, diagnostic) = load_config(&config_path);
     if let Some(diagnostic) = diagnostic {
@@ -170,64 +286,66 @@ fn check_command(apply: bool) -> Result<(), String> {
 
     // 关闭原则（T-154）：显式关闭时不发起任何网络请求。
     if !config.online_update {
-        println!("在线更新已关闭（online_update=false），未发起任何网络请求。");
-        println!("如需检查更新，请在设置「关于与更新」中启用在线更新。");
+        if json {
+            print_status_json(&UpdateStatus::failed(
+                zhu_ye_core::unix_now(),
+                "在线更新已关闭（online_update=false），未发起任何网络请求",
+            ))?;
+        } else {
+            println!("在线更新已关闭（online_update=false），未发起任何网络请求。");
+            println!("如需检查更新，请在设置「关于与更新」中启用在线更新。");
+        }
         return Ok(());
     }
 
     let url =
         std::env::var("ZHU_YE_MANIFEST_URL").unwrap_or_else(|_| DEFAULT_MANIFEST_URL.to_owned());
-    println!("清单地址: {url}");
-
-    let manifest_text = http_get_text(&url)?;
-    let manifest = parse_manifest(&manifest_text).map_err(|error| error.to_string())?;
-    println!(
-        "清单: schema={} 发布时间={} 包数={}",
-        manifest.schema,
-        manifest.published_at,
-        manifest.packs.len()
-    );
-
-    let key = trusted_key()?;
-    verify_signature_with_key(&manifest, &key).map_err(|error| error.to_string())?;
-    println!("签名校验: 通过（内置公钥）");
-
-    let engine_version = zhu_ye_core::core_version();
-
-    // 输入法应用版本信息（T-154）：独立签名的 app.json，仅展示用途；
-    // 缺失/损坏/验签失败只降级，不阻断词典包检查与应用。
-    let app_base = url.rsplit_once('/').map(|(prefix, _)| prefix).unwrap_or("");
-    match fetch_app_meta(app_base, &key) {
-        Ok(Some(meta)) if zhu_ye_core::app_update_available(&meta.app_version, engine_version) => {
-            println!(
-                "发现输入法应用新版本: {}（当前 {engine_version}）",
-                meta.app_version
-            );
-            println!("更新日志:");
-            for line in meta.release_notes.lines() {
-                println!("  {line}");
+    let info = match check_collect(&url, json) {
+        Ok(info) => info,
+        Err(message) => {
+            if json {
+                // JSON 契约：失败以 `error` 字段表述，进程仍以 0 退出，
+                // 设置窗口无需拼装退出码与输出文本。
+                print_status_json(&UpdateStatus::failed(zhu_ye_core::unix_now(), message))?;
+                return Ok(());
             }
-            println!("（输入法主程序升级请到官网或更新页下载新版安装包）");
+            return Err(message);
         }
-        Ok(Some(_)) => {
-            println!("输入法应用已是最新版本（{engine_version}）。");
-        }
-        Ok(None) => println!("（发布源未提供应用版本信息）"),
-        Err(error) => println!("应用版本信息检查失败: {error}（不影响词典包检查）"),
+    };
+    for line in &info.human_lines {
+        println!("{line}");
     }
 
-    let packs_dir = packs_dir()?;
-    // 只考虑可分发包：基础包随安装只读交付，real/seed 是开发产物，都不在更新范围。
-    let outdated: Vec<String> = find_outdated(&manifest, &packs_dir)
-        .into_iter()
-        .filter(|id| zhu_ye_core::is_distributable_pack(id))
-        .collect();
+    // 输入法应用版本信息（人类检查行；json 模式载荷已含，不再输出）。
+    if !json {
+        match &info.app_meta {
+            Ok(Some(meta))
+                if zhu_ye_core::app_update_available(&meta.app_version, &info.engine_version) =>
+            {
+                println!(
+                    "发现输入法应用新版本: {}（当前 {}）",
+                    meta.app_version, info.engine_version
+                );
+                println!("更新日志:");
+                for line in meta.release_notes.lines() {
+                    println!("  {line}");
+                }
+                println!("（输入法主程序升级请到官网或更新页下载新版安装包）");
+            }
+            Ok(Some(_)) => println!("输入法应用已是最新版本（{}）。", info.engine_version),
+            Ok(None) => println!("（发布源未提供应用版本信息）"),
+            Err(error) => println!("应用版本信息检查失败: {error}（不影响词典包检查）"),
+        }
+    }
 
-    if outdated.is_empty() {
+    if json {
+        return print_status_json(&info.to_status());
+    }
+    if info.outdated.is_empty() {
         println!("所有可更新包均为最新，无需更新。");
         return Ok(());
     }
-    println!("可用更新: {outdated:?}");
+    println!("可用更新: {:?}", info.outdated);
 
     if !apply {
         println!("（未应用；执行 `zhu-ye-updater apply` 下载并应用）");
@@ -237,14 +355,14 @@ fn check_command(apply: bool) -> Result<(), String> {
     // 下载各包；跳过版本门槛不足的包。
     let base_url = url.rsplit_once('/').map(|(prefix, _)| prefix).unwrap_or("");
     let mut downloads: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for pack in &manifest.packs {
-        if !outdated.contains(&pack.id) {
+    for pack in &info.manifest.packs {
+        if !info.outdated.contains(&pack.id) {
             continue;
         }
-        if !version_at_least(engine_version, &pack.min_engine_version) {
+        if !version_at_least(&info.engine_version, &pack.min_engine_version) {
             println!(
                 "跳过 {}：需要引擎 >= {}，当前 {}",
-                pack.id, pack.min_engine_version, engine_version
+                pack.id, pack.min_engine_version, info.engine_version
             );
             continue;
         }
@@ -262,8 +380,15 @@ fn check_command(apply: bool) -> Result<(), String> {
 
     // 传**原始** manifest：签名是对完整清单计算的，裁剪包列表会让验签失败。
     // `apply_release` 内部只校验本次下载的包。
-    let outcome = apply_release(&manifest, &key, &downloads, &packs_dir, engine_version)
-        .map_err(|error| error.to_string())?;
+    let packs_dir = packs_dir()?;
+    let outcome = apply_release(
+        &info.manifest,
+        &info.key,
+        &downloads,
+        &packs_dir,
+        &info.engine_version,
+    )
+    .map_err(|error| error.to_string())?;
     println!("已应用: {:?}", outcome.applied);
     if !outcome.skipped_by_version.is_empty() {
         println!("版本门槛跳过: {:?}", outcome.skipped_by_version);
@@ -445,5 +570,20 @@ mod tests {
             ..ConfigFile::default()
         };
         assert!(!network_required(&config));
+    }
+
+    #[test]
+    fn update_status_json可被同源解析回来() {
+        // T-161：`check --json` 输出契约 = UpdateStatus（同 check-once 写文件的口径）。
+        let status = zhu_ye_core::UpdateStatus::available_app(
+            1,
+            "0.2.0".to_owned(),
+            "第一行\n第二行".to_owned(),
+            vec!["it".to_owned(), "med".to_owned()],
+            Some("2026-10-11".to_owned()),
+        );
+        let text = zhu_ye_core::update_status_to_json(&status).unwrap();
+        let back = zhu_ye_core::parse_update_status(&text).unwrap();
+        assert_eq!(back, status, "序列化后应能原样解析回同一状态");
     }
 }

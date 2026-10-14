@@ -80,14 +80,6 @@ impl UpdateKind {
         }
     }
 
-    /// 更新器子命令参数。
-    const fn args(self) -> &'static [&'static str] {
-        match self {
-            Self::Check => &["check"],
-            Self::Apply => &["apply"],
-        }
-    }
-
     /// 完成后写入结果区的标题行。
     const fn done_title(self) -> &'static str {
         match self {
@@ -97,10 +89,20 @@ impl UpdateKind {
     }
 }
 
+/// 后台更新器任务回执的载荷（T-161）：「检查更新」为结构化 `UpdateStatus`
+/// （渲染用户友好摘要，不展示清单地址/签名校验/包 id 等内部输出）；「应用更新」
+/// 保持更新器人类输出行（下载/应用过程反馈）。
+enum OutcomePayload {
+    /// `check --json` 的结构化检查结果（`Err` 为检查失败摘要文本）。
+    Summary(Result<zhu_ye_core::UpdateStatus, String>),
+    /// 更新器人类输出行（`Err` 为失败输出；apply 流程）。
+    Text(Result<String, String>),
+}
+
 /// 后台任务完成时送回的内容。
 struct UpdateOutcome {
     kind: UpdateKind,
-    result: Result<String, String>,
+    payload: OutcomePayload,
 }
 
 /// 启动选项。
@@ -154,8 +156,9 @@ struct WindowState {
     repair_scan: Option<RepairScan>,
     /// 正在运行的后台更新器任务（None 表示空闲）；完成后回执到主线程再清空。
     update_busy: Option<UpdateKind>,
-    /// 最近一次后台任务的结果（含错误）；任务完成时写入，关于页结果区展示。
-    update_result: Option<(UpdateKind, Result<String, String>)>,
+    /// 最近一次后台任务的结果（含错误；T-161：检查为结构化载荷，应用为文本行）；
+    /// 任务完成时写入，关于页结果区展示。
+    update_result: Option<(UpdateKind, OutcomePayload)>,
     /// 后台任务完成回执的接收端；spawn 新任务时重建。
     update_rx: Option<Receiver<UpdateOutcome>>,
     /// 已派发的任务序号；回执消息用它识别"当前任务"（旧任务迟到回执忽略）。
@@ -514,7 +517,7 @@ unsafe extern "system" fn wnd_proc(
                             // 线程在投递回执前完成 send，这里必能取到；竞态时清 busy 自愈。
                             if let Ok(outcome) = rx.try_recv() {
                                 state.update_busy = None;
-                                state.update_result = Some((outcome.kind, outcome.result));
+                                state.update_result = Some((outcome.kind, outcome.payload));
                             } else {
                                 state.update_busy = None;
                             }
@@ -786,8 +789,9 @@ fn on_repair_click(
 
 /// 「关于与更新」页扁平区块内的命中（T-143）：检查更新 / 应用更新。
 ///
-/// 检查与应用按钮有共同的可点条件：在线更新已开启（P-03）、更新器存在、当前无任务在跑。
-/// 未开启或更新器缺失时按钮不可点，界面在状态/提示行给出原因——保证"关闭时零出站连接"可测。
+/// 检查按钮可点条件：在线更新已开启（P-03）+ 更新器存在 + 无任务在跑；「应用更新」
+/// 额外要求检查发现**可应用的更新**（新版本/新词库，T-161）。未开启或更新器缺失时
+/// 按钮不可点，界面在状态/提示行给出原因——保证"关闭时零出站连接"可测。
 fn on_about_sections_click(
     hwnd: HWND,
     state: &mut WindowState,
@@ -806,19 +810,50 @@ fn on_about_sections_click(
     }
     if layout::contains(layout_rows.apply, x, y) {
         // 应用更新是下载并覆盖本机安装的动作：二次确认（FR-044 / 验收 13.2）。
-        if can_run && confirm_apply_update(hwnd) {
+        // T-161：没有可应用的更新（新版本/新词库）时按钮不可点，此分支不响应。
+        if can_apply_updates(state) && confirm_apply_update(hwnd) {
             unsafe { start_update_task(hwnd, state, UpdateKind::Apply) };
         }
     }
 }
 
-/// 检查/应用按钮是否可点：在线更新已开启（P-03）+ 更新器存在 + 无任务在跑。
+/// 「检查更新」按钮是否可点：在线更新已开启（P-03）+ 更新器存在 + 无任务在跑。
 ///
 /// `online_update` 未开启时**不 spawn 任何进程**，这是"关闭时零出站连接"的保证边界。
 fn can_run_updater(state: &WindowState) -> bool {
     state.settings.online_update
         && updater::updater_exe_path().is_some()
         && state.update_busy.is_none()
+}
+
+/// 「应用更新」按钮是否可点（T-161）：在「检查更新」可点的基础上，还要求最近一次
+/// 检查发现**有可应用的更新**（输入法新版本或可更新词库）。没有更新内容时置灰，
+/// 避免用户做无意义的重复操作；发现更新后立即解锁（见 `check_has_update`）。
+fn can_apply_updates(state: &WindowState) -> bool {
+    can_run_updater(state) && check_has_update(state)
+}
+
+/// 是否存在可应用的更新：优先最近一次「检查更新」的结构化结果，其次读本机
+/// 状态文件（启动异步检查 `check-once` 写入）。
+fn check_has_update(state: &WindowState) -> bool {
+    if let Some((_, OutcomePayload::Summary(Ok(summary)))) = &state.update_result {
+        return summary.app_version.is_some() || !summary.outdated_packs.is_empty();
+    }
+    status_has_update(state.config_path.as_deref())
+}
+
+/// 从更新状态文件判断有无可应用的更新（无文件/损坏/无更新 → `false`）。
+fn status_has_update(config_path: Option<&std::path::Path>) -> bool {
+    let Some(path) = config_path
+        .and_then(|path| path.parent())
+        .map(|dir| dir.join(zhu_ye_core::UPDATE_STATUS_FILE_NAME))
+    else {
+        return false;
+    };
+    match zhu_ye_core::read_update_status(&path) {
+        Ok(Some(status)) => status.app_version.is_some() || !status.outdated_packs.is_empty(),
+        _ => false,
+    }
 }
 
 /// 应用更新的二次确认（D-44 / FR-044）。
@@ -842,10 +877,16 @@ unsafe fn start_update_task(hwnd: HWND, state: &mut WindowState, kind: UpdateKin
         invalidate(hwnd);
         return;
     };
-    let args: Vec<&'static str> = kind.args().to_vec();
     state.update_seq = state.update_seq.wrapping_add(1);
     let seq = state.update_seq;
     let (tx, rx) = mpsc::channel();
+    let payload = match kind {
+        // T-161：检查走 `check --json`（结构化契约 → 用户友好摘要），不再把
+        // 更新器的人类诊断行（清单地址/签名校验/可用更新列表）直接搬进界面；
+        // 应用仍取人类输出行反馈下载/应用过程。
+        UpdateKind::Check => OutcomePayload::Summary(updater::run_check(&program)),
+        UpdateKind::Apply => OutcomePayload::Text(updater::run(&program, &["apply"])),
+    };
     state.update_busy = Some(kind);
     state.update_result = None; // 新任务清掉旧结果，避免把上一次结果误读为新任务输出。
     state.update_rx = Some(rx);
@@ -854,8 +895,7 @@ unsafe fn start_update_task(hwnd: HWND, state: &mut WindowState, kind: UpdateKin
     let hwnd_raw = hwnd.0 as isize;
     let _ = thread::spawn(move || {
         // 先送结果、后投递回执：回执到达时结果必然已在 channel 里（见 WM_UPDATER_DONE）。
-        let result = updater::run(&program, &args);
-        let _ = tx.send(UpdateOutcome { kind, result });
+        let _ = tx.send(UpdateOutcome { kind, payload });
         let target = HWND(hwnd_raw as *mut core::ffi::c_void);
         unsafe {
             let _ = PostMessageW(
@@ -2787,8 +2827,9 @@ unsafe fn draw_repair(
 /// 复用 `draw_items`），其下依次平铺更新状态/提示行、结果区、检查/应用按钮与
 /// 诊断信息小节——检查更新与版本与诊断信息不再进入子视图，也没有返回按钮。
 ///
-/// 检查/应用按钮的可点条件：在线更新已开启（P-03）、更新器存在、无任务在跑；
-/// 未开启或更新器缺失时置灰且不响应——保证"关闭时零出站连接"可测。
+/// 检查按钮可点条件：在线更新已开启（P-03）+ 更新器存在 + 无任务在跑；「应用更新」
+/// 额外要求检查发现可应用的更新（T-161）。未开启或更新器缺失时置灰且不响应——
+/// 保证"关闭时零出站连接"可测。
 unsafe fn draw_about(
     hdc: HDC,
     state: &mut WindowState,
@@ -2915,7 +2956,9 @@ unsafe fn draw_about(
         );
     }
     // 「应用更新」是次级动作：可点用描边按钮，不可点用禁用按钮（说明字色）。
-    if can_run {
+    // T-161：仅在检查发现"有可应用的更新"（新版本或新词库）时可点；没有更新
+    // 内容时置灰，用户无需做无意义的重复操作。
+    if can_apply_updates(state) {
         draw_secondary_button(
             hdc,
             state.fonts.small,
@@ -3011,30 +3054,49 @@ unsafe fn draw_about(
 
 /// 结果区的逐行内容：任务进行中 / 最近一次手动检查结果 / 启动异步检查状态文件 /
 /// 都为空时的占位文案。手动检查优先，其次展示 update_status.json（T-088 / FR-048）。
+///
+/// T-161：「检查更新」的结果是结构化 `UpdateStatus`（见 [`summary_lines`]，只讲
+/// 给用户听"有没有新版本/新词库"的结论），不再把更新器的人类诊断行（清单地址、
+/// 清单摘要、签名校验、可用更新列表等内部输出）直接搬进界面；「应用更新」仍展示
+/// 更新器的人类输出行（下载/应用过程反馈）。
 fn update_result_lines(state: &WindowState) -> Vec<String> {
     if let Some(kind) = state.update_busy {
         return vec![kind.busy_label().to_owned()];
     }
-    if let Some((kind, result)) = &state.update_result {
+    if let Some((kind, payload)) = &state.update_result {
         let mut lines = vec![format!("{}：", kind.done_title())];
-        match result {
-            Ok(text) => {
-                let output = updater::output_lines(text);
-                if output.is_empty() {
-                    lines.push("（无输出）".to_owned());
-                } else {
-                    lines.extend(output);
+        match payload {
+            OutcomePayload::Summary(result) => match result {
+                Ok(summary) => lines.extend(summary_lines(summary)),
+                Err(text) => {
+                    lines.push("检查失败：".to_owned());
+                    let output = updater::output_lines(text);
+                    if output.is_empty() {
+                        lines.push("（无输出）".to_owned());
+                    } else {
+                        lines.extend(output);
+                    }
                 }
-            }
-            Err(text) => {
-                lines.push("更新器执行失败：".to_owned());
-                let output = updater::output_lines(text);
-                if output.is_empty() {
-                    lines.push("（无输出）".to_owned());
-                } else {
-                    lines.extend(output);
+            },
+            OutcomePayload::Text(result) => match result {
+                Ok(text) => {
+                    let output = updater::output_lines(text);
+                    if output.is_empty() {
+                        lines.push("（无输出）".to_owned());
+                    } else {
+                        lines.extend(output);
+                    }
                 }
-            }
+                Err(text) => {
+                    lines.push("更新器执行失败：".to_owned());
+                    let output = updater::output_lines(text);
+                    if output.is_empty() {
+                        lines.push("（无输出）".to_owned());
+                    } else {
+                        lines.extend(output);
+                    }
+                }
+            },
         }
         return lines;
     }
@@ -3044,49 +3106,68 @@ fn update_result_lines(state: &WindowState) -> Vec<String> {
     vec!["尚未执行检查。".to_owned()]
 }
 
-/// 读取启动异步检查的状态文件（update_status.json），生成摘要行；文件不存在或损坏
-/// 返回 `None`（调用方显示占位文案）。本函数不联网（S-4）。
+/// 结构化检查结果 → 用户可见摘要行（T-161）。
+///
+/// 面向用户的语义（第一性原理）：用户点击「检查更新」只想知道「我是不是最新的、
+/// 有什么新东西」，而不是更新器内部的清单地址/签名校验/包 id 列表。因此：
+/// - 检查失败 → 一行错误摘要（保留诊断，失败时需要反馈依据）；
+/// - 发现输入法新版本 → 「版本 + 更新日志」（来源为独立签名的 `app.json`，
+///   T-154），词库有更新时一句话合并提示；
+/// - 无新版本 → 「已经是最新版本」；若有可更新词库，再加一句可点「应用更新」。
+fn summary_lines(summary: &zhu_ye_core::UpdateStatus) -> Vec<String> {
+    if let Some(error) = &summary.error {
+        return vec![format!("检查失败：{error}")];
+    }
+    if let Some(app_version) = &summary.app_version {
+        let mut lines = vec![format!(
+            "发现输入法新版本 v{app_version}（当前 v{}）",
+            zhu_ye_core::core_version()
+        )];
+        if let Some(notes) = &summary.release_notes {
+            lines.push("更新日志：".to_owned());
+            lines.extend(notes.lines().map(str::to_owned));
+        }
+        if !summary.outdated_packs.is_empty() {
+            lines.push(format!(
+                "同时有 {} 个词库文件可更新，点「应用更新」更新。",
+                summary.outdated_packs.len()
+            ));
+        }
+        lines.push("（输入法主程序升级请到官网或更新页下载新版安装包）".to_owned());
+        return lines;
+    }
+    if summary.outdated_packs.is_empty() {
+        return vec![format!(
+            "输入法已经是最新版本（当前 v{}）。",
+            zhu_ye_core::core_version()
+        )];
+    }
+    vec![
+        format!(
+            "输入法已经是最新版本（当前 v{}）。",
+            zhu_ye_core::core_version()
+        ),
+        format!(
+            "词库有更新内容（{} 个），点「应用更新」更新。",
+            summary.outdated_packs.len()
+        ),
+    ]
+}
+
+/// 读取启动异步检查的状态文件（update_status.json），生成用户可见摘要行；文件不存在或
+/// 损坏返回 `None`（调用方显示占位文案）。本函数不联网（S-4）。
 ///
 /// T-154：发现输入法应用新版本时优先展示「版本 + 更新日志」（来源为独立签名的
-/// `app.json`，状态文件由 check-once 合成），词典包信息附后。
+/// `app.json`，状态文件由 check-once 合成）。T-161：与手动检查共用
+/// [`summary_lines`] 的面向用户文案（不再列出包 id、清单摘要等内部信息），
+/// 末尾附检查时间。
 fn update_status_lines(config_path: Option<&std::path::Path>) -> Option<Vec<String>> {
     let path = config_path
         .and_then(|path| path.parent())
         .map(|dir| dir.join(zhu_ye_core::UPDATE_STATUS_FILE_NAME))?;
     let status = zhu_ye_core::read_update_status(&path).ok()??;
-    let mut lines = vec!["启动时异步检查（update_status.json）：".to_owned()];
-    if let Some(error) = &status.error {
-        lines.push(format!("检查失败：{error}"));
-    } else if let Some(app_version) = &status.app_version {
-        lines.push(format!(
-            "发现输入法新版本 v{app_version}（当前 v{}）",
-            zhu_ye_core::core_version()
-        ));
-        lines.push("更新日志：".to_owned());
-        for line in status.release_notes.as_deref().unwrap_or_default().lines() {
-            lines.push(line.to_owned());
-        }
-        if !status.outdated_packs.is_empty() {
-            lines.push(format!(
-                "同时可更新词典包（{}）：最新版本 {}",
-                status.outdated_packs.join("、"),
-                status.latest_version.as_deref().unwrap_or("未知")
-            ));
-        }
-    } else if status.available {
-        let packs = if status.outdated_packs.is_empty() {
-            "但清单为空".to_owned()
-        } else {
-            format!("（{}）", status.outdated_packs.join("、"))
-        };
-        lines.push(format!(
-            "发现可用更新：可更新 {} 个包{packs}，最新版本 {}",
-            status.outdated_packs.len(),
-            status.latest_version.as_deref().unwrap_or("未知")
-        ));
-    } else {
-        lines.push("未发现可用更新。".to_owned());
-    }
+    let mut lines = vec!["启动时异步检查：".to_owned()];
+    lines.extend(summary_lines(&status));
     lines.push(format!(
         "检查时间：{}",
         zhu_ye_core::format_date(status.last_checked)
@@ -3263,4 +3344,175 @@ fn register_window_class(instance: HINSTANCE) -> Result<(), String> {
     }
     REGISTERED_ATOM.store(atom, Ordering::Relaxed);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{status_has_update, summary_lines, update_status_lines};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// 唯一临时数据目录（每次测试独立，避免并行测试互相干扰）。
+    fn temp_config_dir(tag: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("时钟应在纪元之后")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("zy-t161-{tag}-{nonce}-{nonce}"));
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        dir
+    }
+
+    fn write_status(dir: &std::path::Path, status: &zhu_ye_core::UpdateStatus) {
+        let path = dir.join(zhu_ye_core::UPDATE_STATUS_FILE_NAME);
+        zhu_ye_core::write_update_status(&path, status).expect("写入状态文件");
+    }
+
+    fn up_to_date() -> zhu_ye_core::UpdateStatus {
+        zhu_ye_core::UpdateStatus::up_to_date(1_790_000_000)
+    }
+
+    #[test]
+    fn 最新版本摘要只有一行结论() {
+        let lines = summary_lines(&up_to_date());
+        assert_eq!(
+            lines,
+            vec![format!(
+                "输入法已经是最新版本（当前 v{}）。",
+                zhu_ye_core::core_version()
+            )]
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("清单") && !line.contains("签名")),
+            "摘要不得泄漏内部诊断词：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn 发现新版本摘要含版本与更新日志() {
+        let status = zhu_ye_core::UpdateStatus::available_app(
+            1_790_000_000,
+            "0.2.0".to_owned(),
+            "第一行\n第二行".to_owned(),
+            Vec::new(),
+            Some("2026-10-11".to_owned()),
+        );
+        let lines = summary_lines(&status);
+        assert_eq!(
+            lines[0],
+            format!(
+                "发现输入法新版本 v0.2.0（当前 v{}）",
+                zhu_ye_core::core_version()
+            )
+        );
+        assert_eq!(lines[1], "更新日志：");
+        assert!(lines.contains(&"第一行".to_owned()));
+        assert!(lines.contains(&"第二行".to_owned()));
+        assert!(
+            lines.last().unwrap().contains("官网"),
+            "新版本应说明主程序升级下载渠道：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn 新版本与词库更新并存时一句话合并提示() {
+        let status = zhu_ye_core::UpdateStatus::available_app(
+            1_790_000_000,
+            "0.2.0".to_owned(),
+            "日志".to_owned(),
+            vec!["it".to_owned(), "med".to_owned()],
+            Some("2026-10-11".to_owned()),
+        );
+        let lines = summary_lines(&status);
+        assert!(
+            lines.contains(&"同时有 2 个词库文件可更新，点「应用更新」更新。".to_owned()),
+            "词库有更新时应一句话提示：{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("it") && !line.contains("med")),
+            "不得泄漏包 id：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn 无新版本词库可更新摘要提示应用更新() {
+        let status = zhu_ye_core::UpdateStatus::available(
+            1_790_000_000,
+            vec!["it".to_owned(), "med".to_owned()],
+            "2026-10-11".to_owned(),
+        );
+        let lines = summary_lines(&status);
+        assert_eq!(
+            lines[0],
+            format!(
+                "输入法已经是最新版本（当前 v{}）。",
+                zhu_ye_core::core_version()
+            )
+        );
+        assert_eq!(lines[1], "词库有更新内容（2 个），点「应用更新」更新。");
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("2026-10-11") && !line.contains("it")),
+            "不得泄漏版本日期与包 id：{lines:?}"
+        );
+    }
+
+    #[test]
+    fn 检查失败摘要给出错误原因() {
+        let status = zhu_ye_core::UpdateStatus::failed(1_790_000_000, "网络不可达");
+        let lines = summary_lines(&status);
+        assert_eq!(lines, vec!["检查失败：网络不可达".to_owned()]);
+    }
+
+    #[test]
+    fn 状态文件渲染为最新版本加检查时间() {
+        let dir = temp_config_dir("uptodate");
+        write_status(&dir, &up_to_date());
+        // 参数是 config.json 路径（父目录即数据目录）。
+        let config_path = dir.join("config.json");
+        let lines = update_status_lines(Some(&config_path)).expect("应有摘要行");
+        assert_eq!(lines[0], "启动时异步检查：");
+        assert!(lines[1].contains("已经是最新版本"));
+        assert!(lines.last().unwrap().starts_with("检查时间："));
+    }
+
+    #[test]
+    fn 无更新状态文件不使应用按钮可点() {
+        let dir = temp_config_dir("none");
+        assert!(!status_has_update(Some(&dir.join("config.json"))));
+        write_status(&dir, &up_to_date());
+        assert!(!status_has_update(Some(&dir.join("config.json"))));
+    }
+
+    #[test]
+    fn 词库或新版本状态文件使应用按钮可点() {
+        let dir = temp_config_dir("available");
+        let config = dir.join("config.json");
+        write_status(
+            &dir,
+            &zhu_ye_core::UpdateStatus::available(
+                1_790_000_000,
+                vec!["slang".to_owned()],
+                "2026-10-11".to_owned(),
+            ),
+        );
+        assert!(status_has_update(Some(&config)));
+
+        write_status(
+            &dir,
+            &zhu_ye_core::UpdateStatus::available_app(
+                1_790_000_000,
+                "0.2.0".to_owned(),
+                "日志".to_owned(),
+                Vec::new(),
+                None,
+            ),
+        );
+        assert!(status_has_update(Some(&config)));
+    }
 }
