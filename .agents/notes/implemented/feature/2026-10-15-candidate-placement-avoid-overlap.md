@@ -81,3 +81,9 @@ previous behavior).
   `cargo clippy --all-targets -- -D warnings` clean.
 - Acceptance row added under FR-009 (需求规格说明书, 验收标准), design
   section §5.1 updated, CHANGELOG [Unreleased] entry, todos T-162 registered.
+- Deployed to the user machine via the elevated worker `copy-dll-ver`
+  (2026-10-15): new DLL `zhu_ye_ime_878D26F8.dll` (2,244,096 B) landed,
+  CLSID InprocServer32 + LanguageProfile IconFile pointers switched, ctfmon
+  restarted; `verify-tsf-dll` (3/3 exports) and `verify-tsf-identity` (7/7)
+  passed. New host processes (e.g. a fresh Notepad window) load the new DLL;
+  the user's real-host visual acceptance stays pending.
