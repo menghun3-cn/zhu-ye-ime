@@ -20,7 +20,7 @@ TSF 新增四个键动作：Shift 切换模式（忽略 `lparam` 第 30 位标�
 
 需要编辑会话的动作先写文本，再用 `ITfContextView::GetTextExt` 取组合范围的屏幕坐标刷新候选窗；纯状态动作不申请编辑会话，刷新时用 `SWP_NOMOVE` 保持窗口当前位置。提交/取消、组合被终止和 `Deactivate` 时隐藏候选窗。
 
-`CandidateWindow` 现在是 TSF 受控弹窗：在宿主 UI 线程创建、更新、隐藏与销毁，不启动自己的消息循环；销毁不会调用 `PostQuitMessage`，演示路径保留单独的退出行为。弹窗按三级策略相对组合文本延伸区定位（T-162）：优先输入行正下方，下方放不下时转输入行右侧，仍放不下时转上方；各档均收进显示器工作区，任何情况下不遮挡宿主输入行（详见[定位笔记](../../implemented/feature/2026-10-15-candidate-placement-avoid-overlap.zh.md)）。
+`CandidateWindow` 现在是 TSF 受控弹窗：在宿主 UI 线程创建、更新、隐藏与销毁，不启动自己的消息循环；销毁不会调用 `PostQuitMessage`，演示路径保留单独的退出行为。弹窗按三级策略相对组合文本延伸区定位（T-162）：优先输入行正下方，下方放不下时转输入行**右上角**（输入行右侧且整体置于输入行文字上方），仍放不下时转上方；各档均收进显示器工作区，任何情况下不遮挡宿主输入行（详见[定位笔记](../../implemented/feature/2026-10-15-candidate-placement-avoid-overlap.zh.md)）。
 
 Shift 切到英文模式时候选窗立即隐藏，Tab/翻页/选择不再吃掉按键；切回中文时恢复之前的组合与候选图层。
 

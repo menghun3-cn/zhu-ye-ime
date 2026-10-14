@@ -57,10 +57,10 @@ composition termination, and `Deactivate`.
 destroyed on the host UI thread with no message loop of its own. Destroying it
 does not call `PostQuitMessage`; the demo path keeps its own quit behavior.
 The popup is placed relative to the composition's text-ext rect in three tiers
-(T-162): below the input line when it fits, to the input line's right when the
-space below is insufficient, and above as a last resort; all tiers clamp into
-the monitor work area so the window never covers the host input line (see the
-[placement
+(T-162): below the input line when it fits, at the input line's upper-right
+corner (right of the line and entirely above its text) when the space below
+is insufficient, and above as a last resort; all tiers clamp into the monitor
+work area so the window never covers the host input line (see the [placement
 note](../../implemented/feature/2026-10-15-candidate-placement-avoid-overlap.md)).
 
 When Shift switches to English mode, the candidate window hides immediately,

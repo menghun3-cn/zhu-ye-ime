@@ -1371,7 +1371,9 @@ fn selection_placement(context: &ITfContext, ec: u32) -> Option<CandidateWindowP
             x: rect.left,
             y: rect.bottom,
         },
-        // T-162：右侧展开时从输入行右缘起排，保证与输入行水平不重叠。
+        // T-162：右缘用于「右上角」横排（右缘 + gap 起排），顶缘用于候选窗
+        // 整体置于输入行文字上方（底边不越过文字顶边），见 place_in_work_area。
+        anchor_top: rect.top,
         anchor_right: rect.right,
     })
 }
