@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-10-15-candidate-placement-avoid-overlap.md
 #   git hash-object 2026-10-15-candidate-placement-avoid-overlap.zh.md
-2026-10-15-candidate-placement-avoid-overlap.md: ff5f4d1acbd4a6a97a0b2321bf912e23e5a26264
-2026-10-15-candidate-placement-avoid-overlap.zh.md: b6117a3e3c77cd51fcef362a53ed4cfa083c574c
+2026-10-15-candidate-placement-avoid-overlap.md: bfd8d4d473cd4beee26675853fed299f9882ec5b
+2026-10-15-candidate-placement-avoid-overlap.zh.md: 692fc4f44345e5bdc3089db69781ce9c56376e14

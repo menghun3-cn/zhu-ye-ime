@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-09-20-candidate-window-tsf-integration.md
 #   git hash-object 2026-09-20-candidate-window-tsf-integration.zh.md
-2026-09-20-candidate-window-tsf-integration.md: eb909e8adb9a62266fb40b21e54fc7a1caea4eab
-2026-09-20-candidate-window-tsf-integration.zh.md: bdbc3332e28df175f4d8de810deee6db76cbba72
+2026-09-20-candidate-window-tsf-integration.md: 329f3de8aa634a806cbc332d6ae7b414f645012d
+2026-09-20-candidate-window-tsf-integration.zh.md: 81028a54cdca794fd896a6c277e77b1a0849f932
