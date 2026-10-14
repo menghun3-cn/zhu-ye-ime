@@ -94,10 +94,11 @@ previous behavior).
 - Acceptance row under FR-009 (需求规格说明书, 验收标准), design section
   §5.1, CHANGELOG [Unreleased] entry, and todos T-162 updated to the
   upper-right-corner semantics.
-- First deploy to the user machine via the elevated worker `copy-dll-ver`
-  (2026-10-15): DLL `zhu_ye_ime_878D26F8.dll` (2,244,096 B) landed, CLSID
-  InprocServer32 + LanguageProfile IconFile pointers switched, ctfmon
+- Deploys to the user machine via the elevated worker `copy-dll-ver`
+  (2026-10-15): first round `zhu_ye_ime_878D26F8.dll` (2,244,096 B), then the
+  upper-right-corner round `zhu_ye_ime_8DA8D8FB.dll` (2,244,096 B) — each with
+  CLSID InprocServer32 + LanguageProfile IconFile pointers switched and ctfmon
   restarted; `verify-tsf-dll` (3/3 exports) and `verify-tsf-identity` (7/7)
-  passed. A second deployment carrying the upper-right-corner tier follows the
-  same channel; new host processes (e.g. a fresh Notepad window) load the new
-  DLL. The user's real-host visual acceptance stays pending.
+  passed on the release binary. New host processes (e.g. a fresh Notepad
+  window) load the new DLL; the user's real-host visual acceptance of the
+  upper-right-corner tier stays pending.
