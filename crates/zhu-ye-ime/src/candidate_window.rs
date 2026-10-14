@@ -106,10 +106,17 @@ pub struct CandidateWindowOptions {
     pub show_pin: bool,
 }
 
-/// 候选窗放置点：`anchor` 为组成区屏幕坐标左边界/底部，窗口显示在其下方。
+/// 候选窗放置点（T-162）：输入行（文档组合/选区）的屏幕坐标包络。
+///
+/// `anchor` 为输入行底部左缘（`x = 输入行左边界, y = 输入行底部`），
+/// `anchor_right` 为输入行右缘屏幕横坐标——右侧展开时候选窗从该边界
+/// 起排，保证与输入行水平不重叠。窗口按「下方 → 右侧 → 上方」策略展开，
+/// 见 `place_in_work_area`。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CandidateWindowPlacement {
     pub anchor: POINT,
+    /// 输入行右边界屏幕横坐标（GetTextExt 矩形右缘）。
+    pub anchor_right: i32,
 }
 
 /// TSF 生命周期内的候选窗控制器。
@@ -208,7 +215,13 @@ impl CandidateWindow {
                 let height = height.max(1);
                 state.view = view;
                 if let Some(placement) = placement {
-                    place_at(self.hwnd, placement.anchor, width, height);
+                    place_at(
+                        self.hwnd,
+                        placement.anchor,
+                        placement.anchor_right,
+                        width,
+                        height,
+                    );
                 } else {
                     let _ = SetWindowPos(
                         self.hwnd,
@@ -310,16 +323,79 @@ impl Drop for CandidateWindow {
     }
 }
 
-/// 把候选窗放到组合区下方并限制在显示器工作区内。
-fn place_at(hwnd: HWND, anchor: POINT, width: i32, height: i32) {
+/// 候选窗与输入行的最小间距（物理像素）。
+const PLACEMENT_GAP: i32 = 4;
+
+/// 定位策略纯函数（T-162）：在工作区内按「下方 → 右侧 → 上方」三级展开候选窗，
+/// 目标是**不遮挡宿主输入行**。
+///
+/// 输入为屏幕物理像素：`work` 为显示器工作区，`(anchor_x, anchor_y)` 为输入行
+/// 底部左缘、`anchor_right` 为输入行右缘；`width/height` 为候选窗尺寸；`gap` 为
+/// 候选窗与输入行的间距。返回候选窗左上角。
+///
+/// 1. **下方**：输入行底部 + gap 起排；垂直放得下即用（水平仍收进工作区）。
+/// 2. **右侧**：输入行右缘 + gap 起排；水平放得下即用，垂直与输入行底部尽量
+///    平齐并收进工作区——候选窗与输入行水平不重叠，垂直上移不会遮挡输入行。
+/// 3. **上方**：输入行底部 − gap − 高起排；垂直放得下即用（水平收进工作区）。
+/// 4. **兜底**：三档都放不下（如候选窗高于整个工作区）时压进工作区保证可见。
+#[must_use]
+fn place_in_work_area(
+    work: RECT,
+    anchor_x: i32,
+    anchor_y: i32,
+    anchor_right: i32,
+    width: i32,
+    height: i32,
+    gap: i32,
+) -> (i32, i32) {
+    // 1) 下方：输入行正下方。
+    let below_top = anchor_y.saturating_add(gap);
+    if below_top.saturating_add(height) <= work.bottom {
+        return (
+            clamp_x(anchor_x, width, work),
+            clamp_y(below_top, height, work),
+        );
+    }
+    // 2) 右侧：输入行右缘起排，垂直方向收进工作区。
+    let right_left = anchor_right.saturating_add(gap);
+    if right_left.saturating_add(width) <= work.right {
+        return (right_left, clamp_y(anchor_y, height, work));
+    }
+    // 3) 上方：输入行之上，水平方向收进工作区。
+    let above_top = anchor_y.saturating_sub(gap).saturating_sub(height);
+    if above_top >= work.top {
+        return (clamp_x(anchor_x, width, work), above_top);
+    }
+    // 4) 兜底：垂直贴工作区底部（最终保证可见）。
+    (
+        clamp_x(anchor_x, width, work),
+        clamp_y(work.bottom.saturating_sub(height), height, work),
+    )
+}
+
+/// 把候选窗左缘收进工作区水平范围，避免窗口不可见。
+#[must_use]
+fn clamp_x(left: i32, width: i32, work: RECT) -> i32 {
+    let left = left.max(work.left);
+    if left.saturating_add(width) > work.right {
+        return (work.right - width).max(work.left);
+    }
+    left
+}
+
+/// 把候选窗顶缘收进工作区垂直范围，避免窗口不可见。
+#[must_use]
+fn clamp_y(top: i32, height: i32, work: RECT) -> i32 {
+    let top = top.max(work.top);
+    if top.saturating_add(height) > work.bottom {
+        return (work.bottom - height).max(work.top);
+    }
+    top
+}
+
+/// 按 `place_in_work_area` 的策略把候选窗放到输入行附近并限制在显示器工作区内。
+fn place_at(hwnd: HWND, anchor: POINT, anchor_right: i32, width: i32, height: i32) {
     unsafe {
-        let rect = RECT {
-            left: anchor.x,
-            top: anchor.y,
-            right: anchor.x + width,
-            bottom: anchor.y + height,
-        };
-        // 超出显示器工作区时回到右下角，避免候选窗不可见。
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -328,22 +404,15 @@ fn place_at(hwnd: HWND, anchor: POINT, width: i32, height: i32) {
         if !GetMonitorInfoW(monitor, &mut info).as_bool() {
             return;
         }
-        let work = info.rcWork;
-        let gap = 4i32;
-        let mut left = rect.left;
-        let mut top = rect.top + gap;
-        if left < work.left {
-            left = work.left;
-        }
-        if left + width > work.right {
-            left = (work.right - width).max(work.left);
-        }
-        if top < work.top {
-            top = work.top;
-        }
-        if top + height > work.bottom {
-            top = (work.bottom - height).max(work.top);
-        }
+        let (left, top) = place_in_work_area(
+            info.rcWork,
+            anchor.x,
+            anchor.y,
+            anchor_right,
+            width,
+            height,
+            PLACEMENT_GAP,
+        );
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOP),
@@ -1607,10 +1676,71 @@ fn system_colors() -> SystemColors {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bmp, create_font, query_font_tm_height, resolve_theme, resolve_with_custom,
-        spell_pinyin, system_high_contrast_on, to_utf16_null, CandidateWindow, ThemePreference,
+        build_bmp, create_font, place_in_work_area, query_font_tm_height, resolve_theme,
+        resolve_with_custom, spell_pinyin, system_high_contrast_on, to_utf16_null, CandidateWindow,
+        ThemePreference,
     };
+    use windows::Win32::Foundation::RECT;
     use windows::Win32::Graphics::Gdi::FW_NORMAL;
+
+    /// T-162 候选窗定位：1920×1040 工作区 + 标准间距 4px 的通用夹具。
+    fn work_area() -> RECT {
+        RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        }
+    }
+
+    #[test]
+    fn 定位下方放得下优先输入行正下方() {
+        // 输入行在屏幕上中部：下方绰绰有余 → 候选窗紧贴其下方、左缘对齐。
+        let (x, y) = place_in_work_area(work_area(), 200, 500, 220, 360, 400, 4);
+        assert_eq!((x, y), (200, 504));
+    }
+
+    #[test]
+    fn 定位下方放不下转右侧且不与输入行水平重叠() {
+        // 输入行贴近工作区底（下方仅剩 40px < 400px）→ 右侧展开：
+        // 左缘 = 输入行右缘 + 4px，垂直方向收进工作区（底边贴工作区底）。
+        let (x, y) = place_in_work_area(work_area(), 200, 1000, 206, 360, 400, 4);
+        assert_eq!(x, 210, "候选窗应从输入行右缘起排");
+        assert_eq!(y, 1040 - 400, "右侧展开时垂直上移收进工作区");
+        // 候选窗 x 范围 [210, 570) 与输入行右缘 206 不重叠 → 不遮挡输入行。
+    }
+
+    #[test]
+    fn 定位右侧垂直空间充足时与输入行底部平齐() {
+        // 下方差 4px 放不下（640+4+400 > 1040），但右侧垂直空间恰好充足：
+        // 候选窗顶边 = 输入行底部（640+400 == 工作区底，不越界）。
+        let (x, y) = place_in_work_area(work_area(), 200, 640, 206, 360, 400, 4);
+        assert_eq!((x, y), (210, 640));
+    }
+
+    #[test]
+    fn 定位下方与右侧都放不下转上方() {
+        // 输入行贴屏幕右下角：下方与右侧均不足 → 上方展开（锚点线上方 − gap − 高）。
+        let (_, y) = place_in_work_area(work_area(), 1800, 1000, 1880, 360, 400, 4);
+        assert_eq!(y, 1000 - 4 - 400);
+    }
+
+    #[test]
+    fn 定位三档全放不下压进工作区保证可见() {
+        // 候选窗 1200px 高于工作区 1040px：下方/右侧/上方均放不下 → 贴工作区顶兜底。
+        let (_, y) = place_in_work_area(work_area(), 1800, 1000, 1880, 360, 1200, 4);
+        assert_eq!(y, 0);
+    }
+
+    #[test]
+    fn 定位水平方向越界收进工作区() {
+        // 左缘越界 → 贴工作区左缘。
+        let (x1, _) = place_in_work_area(work_area(), -50, 500, -40, 360, 400, 4);
+        assert_eq!(x1, 0);
+        // 左缘 + 宽越右界 → 右对齐工作区右缘。
+        let (x2, _) = place_in_work_area(work_area(), 1700, 500, 1800, 360, 400, 4);
+        assert_eq!(x2, 1920 - 360);
+    }
 
     #[test]
     fn 拼音拼注逐字插音节() {
