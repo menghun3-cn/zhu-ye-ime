@@ -73,4 +73,8 @@ beam），远低于 30ms 刷新门槛。词典二进制格式零改动（O-06）
 - 文档同步：需求规格说明书 FR-023 自动隔音条目 + §12.4 决策 O-07、方案设计
   §12.2.5、验收标准 §8.1 FR-023 自动隔音三行、CHANGELOG [Unreleased]、
   todos T-163（另有 T-164 单独登记输入法切换循环排障）。
-- 部署与真机验收（`wsshui`→「我是谁」）待进行。
+- 已部署（2026-10-16）：经提权 worker `copy-dll-ver` 落地
+  `zhu_ye_ime_74C68A5A.dll`（2,255,360 B）并切换 CLSID InprocServer32 +
+  IconFile 指针、ctfmon 已重启（PID 40784）；release 二进制
+  `verify-tsf-dll`（导出 3/3）与 `verify-tsf-identity`（7/7）通过。
+  真机验收（`wsshui`→「我是谁」，需新建宿主进程窗口）待用户确认。

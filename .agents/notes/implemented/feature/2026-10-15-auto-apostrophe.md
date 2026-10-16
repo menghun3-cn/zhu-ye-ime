@@ -97,4 +97,9 @@ dictionary format is untouched (O-06).
 - Docs updated: FR-023 auto-apostrophe bullet, §12.4 decision O-07, design
   §12.2.5, acceptance rows under §8.1 FR-023, CHANGELOG [Unreleased],
   todos T-163 (plus T-164 for the separate Ctrl+Shift cycling investigation).
-- Deployment and real-host acceptance of `wsshui` → 我是谁 stay pending.
+- Deployed via the elevated worker `copy-dll-ver` (2026-10-16): DLL
+  `zhu_ye_ime_74C68A5A.dll` (2,255,360 B) landed with CLSID InprocServer32 +
+  LanguageProfile IconFile pointers switched and ctfmon restarted (PID
+  40784); `verify-tsf-dll` (3/3 exports) and `verify-tsf-identity` (7/7)
+  passed on the release binary. Real-host acceptance of `wsshui` → 我是谁
+  stays pending (test in a new host-process window).
