@@ -53,14 +53,16 @@ pub use app_meta::{
 };
 pub use bigram::{BigramModel, EmptyBigramModel, InMemoryBigramModel};
 pub use candidate::{
-    abbreviation_candidates, append_abbreviation_group, constrained_segment_candidates,
-    corrected_candidates, en_word_candidates, en_word_candidates_from, generate_candidates,
-    generate_prefix_candidates, initial_candidates, is_abbreviation_input, merge_candidate_groups,
-    prefix_expand_candidates, sentence_candidates, transposed_candidates, Candidate,
-    CandidateSorter, PrefixCandidateGroups, RankingConfig, RankingContext, RankingModel,
-    StaticRankingModel, ABBREVIATION_MIN_LEN, BEAM_WIDTH, BEAM_WORD_CAP, CORRECTION_VARIANT_CAP,
-    INITIAL_COMPLETION_CAP, INITIAL_MAX_LEN, INITIAL_MIN_LEN, SENTENCE_MAX_WORD_CHARS,
-    SENTENCE_TOP_N, TRANSPOSITION_VARIANT_CAP,
+    abbreviation_candidates, apostrophe_candidates, append_abbreviation_group,
+    constrained_segment_candidates, corrected_candidates, en_word_candidates,
+    en_word_candidates_from, generate_candidates, generate_prefix_candidates, initial_candidates,
+    is_abbreviation_input, merge_candidate_groups, prefix_expand_candidates, sentence_candidates,
+    transposed_candidates, Candidate, CandidateSorter, PrefixCandidateGroups, RankingConfig,
+    RankingContext, RankingModel, StaticRankingModel, ABBREVIATION_MIN_LEN,
+    APOSTROPHE_CANDIDATE_CAP, APOSTROPHE_COMBINATION_CAP, APOSTROPHE_MAX_INPUT,
+    APOSTROPHE_MAX_SEGMENTS, APOSTROPHE_PLAN_CAP, BEAM_WIDTH, BEAM_WORD_CAP,
+    CORRECTION_VARIANT_CAP, INITIAL_COMPLETION_CAP, INITIAL_MAX_LEN, INITIAL_MIN_LEN,
+    SENTENCE_MAX_WORD_CHARS, SENTENCE_TOP_N, TRANSPOSITION_VARIANT_CAP,
 };
 pub use char_pinyin::{char_pinyin, CharPinyinEntry, CHAR_PINYIN};
 pub use composite::{any_exists, pack_path, CompositeDictionary};

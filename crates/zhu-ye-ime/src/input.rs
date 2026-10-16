@@ -1729,6 +1729,30 @@ impl InputEngine {
                     main = self.ranking.rank(initials, &context);
                 }
             }
+
+            // T-163 自动隔音（FR-023 简拼路径扩展，行为对齐搜狗/微软拼音）：
+            // 不可切分且主候选仍为空的**长串**（>4 位，超出简拼上限）时，按
+            // 「简拼单字母 ∪ 完整音节」的槽划分自动识别音节边界（`wsshui` →
+            // `w's'shui` → 我是谁）——单字母槽展开常用音节、完整音节槽原样，
+            // 组合串整词命中直接出候选、未命中 3 音节以上再走整句组装。
+            // 与简拼同位兜底（仅主候选为空介入），不污染全拼/整词/前缀路径；
+            // 开关跟随 enable_abbreviation（简拼族整体开关语义）。
+            if self.enable_abbreviation
+                && main.is_empty()
+                && composing.chars().count() >= 3
+                && composing.chars().all(|c| c.is_ascii_lowercase())
+                && segment_all(&self.table, &composing).is_empty()
+            {
+                let apostrophe = zhu_ye_core::apostrophe_candidates(
+                    &self.table,
+                    dictionary.as_ref(),
+                    self.bigram.as_ref(),
+                    &composing,
+                );
+                if !apostrophe.is_empty() {
+                    main = self.ranking.rank(apostrophe, &context);
+                }
+            }
             self.candidates = main;
         }
         // FR-034（场景8）：领域提权——整串完整词命中已启用领域包（D-15）时按 D-13
@@ -3141,6 +3165,49 @@ mod tests {
         assert!(
             texts.contains(&"为什么"),
             "wsm 简拼应出为什么，实际: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 自动隔音wsshui出我是谁() {
+        // T-163：`wsshui` 不可完整切分且超简拼 4 位上限 → 自动隔音
+        // 槽划分 `w's'shui`（简拼 w、s + 完整 shui）→ wo+shi+shui，
+        // 单字词条经整句组装出「我是谁」（对齐搜狗行为）。
+        use zhu_ye_core::dict::{DictionaryEntry, InMemoryDictionary};
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("我", "wo", 88),
+            DictionaryEntry::new("是", "shi", 80),
+            DictionaryEntry::new("谁", "shui", 70),
+        ]);
+        let mut engine =
+            InputEngine::with_bigram(Arc::new(dictionary), Arc::new(InMemoryBigramModel::new()));
+        type_text(&mut engine, "wsshui");
+        let texts: Vec<&str> = engine
+            .candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert!(
+            texts.contains(&"我是谁"),
+            "wsshui 应自动隔音出我是谁，实际: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 自动隔音不污染可切分与简拼路径() {
+        // 可切分串（nihao）走主链路，不被自动隔音改写；3-4 位简拼（wsm）
+        // 仍由 initial_candidates 承担（自动隔音只兜 >4 位长串）。
+        let mut engine = m7_engine();
+        type_text(&mut engine, "nihao");
+        assert!(
+            engine.candidates().iter().any(|c| c.text == "你好"),
+            "nihao 主候选不受自动隔音影响"
+        );
+        let mut engine = m7_engine();
+        type_text(&mut engine, "wsm");
+        assert!(
+            engine.candidates().iter().any(|c| c.text == "为什么"),
+            "wsm 简拼路径不被自动隔音抢占"
         );
     }
 

@@ -392,6 +392,183 @@ pub const INITIAL_MAX_LEN: usize = 4;
 /// 简拼展开组合最多进入结果的总条数。
 pub const INITIAL_COMPLETION_CAP: usize = 32;
 
+/// 自动隔音输入最长长度（T-163，FR-023 简拼扩展）：超过放弃，防槽划分组合爆炸。
+pub const APOSTROPHE_MAX_INPUT: usize = 16;
+/// 自动隔音槽数上限（含简拼单字母槽与完整音节槽）。
+pub const APOSTROPHE_MAX_SEGMENTS: usize = 6;
+/// 槽划分方案数上限（防御性，防止输入串划分过多）。
+pub const APOSTROPHE_PLAN_CAP: usize = 32;
+/// 展开组合拼音串上限（与 `INITIAL_COMPLETION_CAP` 同量级）。
+pub const APOSTROPHE_COMBINATION_CAP: usize = 48;
+/// 自动隔音候选条数上限。
+pub const APOSTROPHE_CANDIDATE_CAP: usize = 10;
+
+/// 自动隔音候选（T-163，FR-023 简拼路径扩展，行为对齐搜狗/微软拼音）：
+/// 输入串**无法完整切分**时（如 `wsshui`），按「简拼单字母 ∪ 完整音节」的槽
+/// 划分自动识别音节边界（`w's'shui`）——单字母槽展开为该字母的常用音节、
+/// 完整音节槽原样保留，拼接出完整拼音串组合后查词典：整词命中直接出候选；
+/// 未命中的 3 音节以上组合串再走整句组装（`sentence_candidates`），
+/// 「我是谁」即由 `woss → wo + shi + shui` 用三个单字词组装而来。
+///
+/// 触发前置由调用方保证（不可完整切分、无整词命中、长度达标、纯小写），本函数
+/// 内部仍做防御：
+/// - 长度不是 `3..=APOSTROPHE_MAX_INPUT` 或含非小写 ASCII → 返回空；
+/// - 可完整切分或整词已命中 → 返回空（不污染全拼/整词路径，两者由主链路承担）；
+/// - 槽划分方案数或展开组合数超上限 → 截断（展开顺序确定：单字母槽先于长音节槽、
+///   简拼表序优先，保证同输入同输出）。
+///
+/// 候选 `source = Static`（与简拼同类）、`pinyin = 展开后的完整拼音串`，
+/// UI 拼音行据此展示完整拼写。
+#[must_use]
+pub fn apostrophe_candidates(
+    table: &SyllableTable,
+    dictionary: &dyn Dictionary,
+    bigram: &dyn BigramModel,
+    pinyin: &str,
+) -> Vec<Candidate> {
+    let length = pinyin.chars().count();
+    if !(INITIAL_MIN_LEN + 1..=APOSTROPHE_MAX_INPUT).contains(&length) {
+        return Vec::new();
+    }
+    if !pinyin.bytes().all(|b| b.is_ascii_lowercase()) {
+        return Vec::new();
+    }
+    // 可完整切分（`wo`/`emo`）或整词命中：主链路承担，本路径不介入。
+    if !segment_all(table, pinyin).is_empty() || !dictionary.lookup(pinyin).is_empty() {
+        return Vec::new();
+    }
+    let plans = slot_plans(table, pinyin, APOSTROPHE_PLAN_CAP);
+    let mut combos: Vec<(String, usize)> = Vec::new();
+    let mut plan_count = 0usize;
+    for plan in plans {
+        plan_count += 1;
+        if plan_count > APOSTROPHE_PLAN_CAP {
+            break;
+        }
+        expand_slot_combinations(table, &plan, &mut combos, APOSTROPHE_COMBINATION_CAP);
+    }
+    if combos.is_empty() {
+        return Vec::new();
+    }
+    let mut collected: Vec<Candidate> = Vec::new();
+    for (combo, syllable_count) in combos {
+        let entries = dictionary.lookup(&combo);
+        if entries.is_empty() {
+            // 未整词命中：3 音节以上组合串走整句组装（同 FR-025 语义）。
+            if syllable_count < 3 {
+                continue;
+            }
+            for mut candidate in sentence_candidates(table, dictionary, bigram, &combo) {
+                if candidate.pinyin.is_none() {
+                    candidate.pinyin = Some(combo.clone());
+                }
+                collected.push(candidate);
+                if collected.len() >= APOSTROPHE_CANDIDATE_CAP {
+                    return collected;
+                }
+            }
+            continue;
+        }
+        for entry in entries {
+            collected.push(candidate_from_entry(&entry).with_pinyin(combo.clone()));
+            if collected.len() >= APOSTROPHE_CANDIDATE_CAP {
+                return collected;
+            }
+        }
+    }
+    collected
+}
+
+/// 自动隔音槽划分遍历器（`T-163`）：持有音节表与结果缓冲，`visit` 深度优先
+/// 枚举输入串的槽划分，每段为完整音节或简拼单字母。
+struct SlotWalker<'a> {
+    table: &'a SyllableTable,
+    plans: Vec<Vec<String>>,
+    cap: usize,
+}
+
+impl SlotWalker<'_> {
+    /// 从 `pos` 起继续枚举；`current` 为已取槽序列。
+    fn visit(&mut self, input: &str, pos: usize, current: &mut Vec<String>) {
+        if self.plans.len() >= self.cap {
+            return;
+        }
+        let bytes = input.as_bytes();
+        if pos == bytes.len() {
+            if (2..=APOSTROPHE_MAX_SEGMENTS).contains(&current.len()) {
+                self.plans.push(current.clone());
+            }
+            return;
+        }
+        // 单字母槽：该字母在简拼表有常用音节才可取。
+        let letter = bytes[pos] as char;
+        if !initial_syllables(letter).is_empty() {
+            current.push(letter.to_string());
+            self.visit(input, pos + 1, current);
+            current.pop();
+        }
+        // 完整音节槽：从长到短枚举（`wsshui` 的 `shui` 优先于 `s`+`hui` 的拆分）。
+        for end in (pos + 2..=bytes.len()).rev() {
+            if self.table.is_complete_syllable(&input[pos..end]) {
+                current.push(input[pos..end].to_owned());
+                self.visit(input, end, current);
+                current.pop();
+            }
+        }
+    }
+}
+
+/// 枚举输入串的全部「自动隔音槽划分」，每段为完整音节或简拼单字母（`T-163`）。
+///
+/// 顺序确定：先单字母槽（短段）后完整音节槽（长段从长到短）；方案按遍历序产出。
+/// 段数少于 2 或超过 [`APOSTROPHE_MAX_SEGMENTS`] 的划分丢弃；方案数受 `cap` 约束。
+fn slot_plans(table: &SyllableTable, input: &str, cap: usize) -> Vec<Vec<String>> {
+    let mut walker = SlotWalker {
+        table,
+        plans: Vec::new(),
+        cap,
+    };
+    let mut current: Vec<String> = Vec::new();
+    walker.visit(input, 0, &mut current);
+    walker.plans
+}
+
+/// 按槽候选音节集做前序笛卡尔积，产出完整拼音串组合（`T-163`）。
+///
+/// 完整音节槽候选集为槽本身；单字母槽候选集为该字母的常用音节表。数量超
+/// `cap` 时截断（保留表序靠前的最常用拼法）。返回与槽数（音节数）配对。
+fn expand_slot_combinations(
+    _table: &SyllableTable,
+    plan: &[String],
+    out: &mut Vec<(String, usize)>,
+    cap: usize,
+) {
+    let mut combos: Vec<String> = vec![String::new()];
+    for segment in plan {
+        let set: Vec<&str> = if segment.len() == 1 {
+            let letter = segment.as_bytes()[0] as char;
+            initial_syllables(letter).to_vec()
+        } else {
+            vec![segment.as_str()]
+        };
+        let mut next: Vec<String> = Vec::new();
+        for prefix in &combos {
+            for syllable in &set {
+                let mut combo = prefix.clone();
+                combo.push_str(syllable);
+                next.push(combo);
+            }
+        }
+        combos = next;
+        if combos.len() > cap {
+            combos.truncate(cap);
+        }
+    }
+    for combo in combos {
+        out.push((combo, plan.len()));
+    }
+}
+
 /// 英文词候选（FR-030，场景6）：查 `EN_WORDS` 前缀得到英文原形候选组。
 ///
 /// 只在调用方确认"整串不可按拼音切分"后调用（与缩写路径同判定，见 `is_abbreviation_input`）；
@@ -937,11 +1114,12 @@ mod tests {
 
     use crate::bigram::InMemoryBigramModel;
     use crate::candidate::{
-        abbreviation_candidates, append_abbreviation_group, constrained_segment_candidates,
-        corrected_candidates, generate_candidates, generate_prefix_candidates, initial_candidates,
-        is_abbreviation_input, merge_candidate_groups, prefix_expand_candidates,
-        sentence_candidates, transposed_candidates, Candidate, CandidateSorter, CandidateSource,
-        RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+        abbreviation_candidates, apostrophe_candidates, append_abbreviation_group,
+        constrained_segment_candidates, corrected_candidates, generate_candidates,
+        generate_prefix_candidates, initial_candidates, is_abbreviation_input,
+        merge_candidate_groups, prefix_expand_candidates, sentence_candidates,
+        transposed_candidates, Candidate, CandidateSorter, CandidateSource, RankingConfig,
+        RankingContext, RankingModel, StaticRankingModel,
     };
     use crate::dict::{DictionaryEntry, InMemoryDictionary};
     use crate::pinyin::SyllableTable;
@@ -1740,6 +1918,90 @@ mod tests {
                 .iter()
                 .map(|c| c.text.as_str())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // ---- 自动隔音候选组（T-163，FR-023 简拼扩展）----
+
+    /// 自动隔音测试词典：单字（我/是/谁）供整句组装，另加干扰两字词。
+    fn apostrophe_dictionary() -> InMemoryDictionary {
+        InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("我", "wo", 100_000),
+            DictionaryEntry::new("是", "shi", 90_000),
+            DictionaryEntry::new("谁", "shui", 80_000),
+            DictionaryEntry::new("试", "shi", 70_000),
+            DictionaryEntry::new("会", "hui", 90_000),
+            DictionaryEntry::new("水", "shui", 75_000),
+        ])
+    }
+
+    #[test]
+    fn 自动隔音wsshui识别为我是谁() {
+        let table = SyllableTable::standard();
+        let dictionary = apostrophe_dictionary();
+        let bigram = InMemoryBigramModel::new();
+        let found = apostrophe_candidates(&table, &dictionary, &bigram, "wsshui");
+        assert!(
+            found.iter().any(|c| c.text == "我是谁"),
+            "wsshui 应隔音切分为 w's'shui → 我是谁（整句组装）: {:?}",
+            found.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            found.iter().all(|c| c.pinyin.is_some()),
+            "自动隔音候选应带完整拼音（用户词学习）"
+        );
+    }
+
+    #[test]
+    fn 自动隔音整词命中优先于整句组装() {
+        let table = SyllableTable::standard();
+        let mut dictionary = apostrophe_dictionary();
+        // 显式整词条：woshishui → 我是谁。
+        dictionary.push(DictionaryEntry::new("我是谁", "woshishui", 60_000));
+        let bigram = InMemoryBigramModel::new();
+        let found = apostrophe_candidates(&table, &dictionary, &bigram, "wsshui");
+        assert!(
+            found
+                .iter()
+                .any(|c| c.text == "我是谁" && c.pinyin.as_deref() == Some("woshishui")),
+            "整词命中时候选拼音为展开串: {:?}",
+            found
+                .iter()
+                .map(|c| (c.text.as_str(), c.pinyin.as_deref().unwrap_or_default()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 自动隔音不污染可切分与整词命中串() {
+        let table = SyllableTable::standard();
+        let dictionary = apostrophe_dictionary();
+        let bigram = InMemoryBigramModel::new();
+        // 可完整切分串由主链路承担。
+        assert!(apostrophe_candidates(&table, &dictionary, &bigram, "nihao").is_empty());
+        assert!(apostrophe_candidates(&table, &dictionary, &bigram, "wo").is_empty());
+        // 整词直接命中输入串时不介入（交给整词命中路径）。
+        let mut whole = apostrophe_dictionary();
+        whole.push(DictionaryEntry::new("无上山水", "wsshui", 5000));
+        assert!(apostrophe_candidates(&table, &whole, &bigram, "wsshui").is_empty());
+    }
+
+    #[test]
+    fn 自动隔音长度与字符门槛() {
+        let table = SyllableTable::standard();
+        let dictionary = apostrophe_dictionary();
+        let bigram = InMemoryBigramModel::new();
+        // 过短：两位简拼（nh）留给简拼路径 initial_candidates。
+        assert!(apostrophe_candidates(&table, &dictionary, &bigram, "nh").is_empty());
+        // 含非小写 ASCII。
+        assert!(apostrophe_candidates(&table, &dictionary, &bigram, "wsshu1").is_empty());
+        assert!(apostrophe_candidates(&table, &dictionary, &bigram, "WSSHUI").is_empty());
+        assert!(apostrophe_candidates(&table, &dictionary, &bigram, "").is_empty());
+        // 单字母槽缺简拼表（零声母之外的坏字母如 i 开头）不 panic 且可空。
+        let empty = apostrophe_candidates(&table, &dictionary, &bigram, "iwo");
+        assert!(
+            empty.iter().all(|c| c.pinyin.is_some()),
+            "防抖：不产出无拼音候选"
         );
     }
 }
