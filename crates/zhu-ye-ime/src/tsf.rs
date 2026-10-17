@@ -35,9 +35,10 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_0, VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN,
-    VK_ESCAPE, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS,
-    VK_OEM_PERIOD, VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
+    ActivateKeyboardLayout, GetKeyState, ACTIVATE_KEYBOARD_LAYOUT_FLAGS, HKL, VIRTUAL_KEY, VK_0,
+    VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_OEM_1,
+    VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
+    VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfEditSession,
@@ -464,6 +465,9 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
                         guard.engine.toggle_mode();
                         guard.engine.mode()
                     };
+                    // T-168：语言栏点击切换同样同步系统键盘布局（Win10 路径；
+                    // 若回调线程非宿主输入线程则布局切换静默无效，不影响输入）。
+                    sync_system_layout(mode);
                     notify_tray_state(mode);
                     Some(mode)
                 });
@@ -824,6 +828,34 @@ fn ctrl_key_down() -> bool {
 #[must_use]
 fn is_ctrl_space(wparam: WPARAM, ctrl_pressed: bool) -> bool {
     ctrl_pressed && VIRTUAL_KEY(wparam.0 as u16).0 == VK_SPACE.0
+}
+
+/// 英文键盘布局句柄（US 00000409；与 T-066 英文布局键映射、T-168 一致）。
+const LAYOUT_EN: usize = 0x0409_0409;
+/// 中文-美式键盘布局句柄（00000804；竹叶中文模式的宿主布局，T-168）。
+const LAYOUT_ZH: usize = 0x0804_0804;
+
+/// 按模式返回应激活的系统键盘布局句柄（T-168）：英文→US、中文→中文美式。
+#[must_use]
+fn system_layout_for(mode: crate::input::InputMode) -> usize {
+    match mode {
+        crate::input::InputMode::Chinese => LAYOUT_ZH,
+        crate::input::InputMode::English => LAYOUT_EN,
+    }
+}
+
+/// 把当前线程的系统键盘布局同步为中英模式对应布局（T-168，对齐搜狗）：
+/// 英文模式切到 US 英文布局——任务栏随即出现系统英文指示（灰"A/"），
+/// 中文模式还原中文-美式布局（指示消失）。仅作用于调用线程（宿主 UI 线程
+/// 的切换路径），布局不可用时静默保持现状，不影响输入闭环。
+fn sync_system_layout(mode: crate::input::InputMode) {
+    let value = system_layout_for(mode);
+    let _ = unsafe {
+        ActivateKeyboardLayout(
+            HKL(value as *mut core::ffi::c_void),
+            ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0),
+        )
+    };
 }
 
 /// 从 `ITfThreadMgr` 取出按键管理器。
@@ -1250,6 +1282,10 @@ fn sync_engine(state: &Arc<SharedEngine>, action: KeyAction) {
             let mode = guard.engine.mode();
             (mode, guard.lang_bar.clone())
         };
+        // T-168：中英模式同步系统键盘布局（英文→US 布局使任务栏出现系统
+        // 英文"A/"指示，与搜狗一致；中文→还原中文布局）。此处覆盖全部
+        // 走 sync_engine 的切换入口（Shift 弹起/Ctrl+Space/设置回调）。
+        sync_system_layout(mode);
         if let Some(handle) = lang_bar {
             handle.set_mode(mode);
         }
@@ -2208,6 +2244,22 @@ mod tests {
         assert!(!is_ctrl_space(space, false), "无 Ctrl 修饰不判定");
         let letter = WPARAM(VK_A.0 as usize);
         assert!(!is_ctrl_space(letter, true), "Ctrl+A 不判定");
+    }
+
+    /// T-168：中英模式对应系统键盘布局（英文→US 0x04090409 使任务栏显示
+    /// 系统英文"A/"指示、中文→中文美式 0x08040804 还原）。
+    #[test]
+    fn 模式对应系统键盘布局() {
+        assert_eq!(
+            system_layout_for(crate::input::InputMode::English),
+            0x0409_0409
+        );
+        assert_eq!(
+            system_layout_for(crate::input::InputMode::Chinese),
+            0x0804_0804
+        );
+        assert_eq!(LAYOUT_EN, 0x0409_0409);
+        assert_eq!(LAYOUT_ZH, 0x0804_0804);
     }
 
     /// T-046：模式切换处理器闭包（Weak<…> 捕获）必须可跨线程。
