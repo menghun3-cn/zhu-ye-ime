@@ -77,6 +77,11 @@ pub struct InputEngine {
     /// 手动音节分隔符位置（T-128）：`composing`（纯拼音查询键）字符边界下标
     /// 升序列表；显示层据此插入 `'` 并约束候选切分，查询键始终是去噪纯拼音。
     manual_seps: Vec<usize>,
+    /// 自动隔音首选槽划分的显示边界（T-163）：由 `refresh_candidates` 在自动
+    /// 隔音候选命中时记录（`wsshui` → `[1,2]` → 页眉 `w's'shui`）；
+    /// 其余候选路径每轮刷新清空——显示跟随候选实际命中，不污染 T-128
+    /// 「最长可切分前缀」退化语义。
+    apostrophe_seps: Vec<usize>,
     candidates: Vec<Candidate>,
     mode: InputMode,
     previous_word: Option<String>,
@@ -206,6 +211,7 @@ impl InputEngine {
             dictionary,
             composing: String::new(),
             manual_seps: Vec::new(),
+            apostrophe_seps: Vec::new(),
             candidates: Vec::new(),
             mode: InputMode::Chinese,
             previous_word: None,
@@ -898,13 +904,17 @@ impl InputEngine {
     /// 插入显示用分隔符 `'`（U+2019，T-134）。自动边界取首选切分
     /// （`segment_all` 首方案）的全部音节边界（用户决策：全部音节边界都
     /// 显示，如 `nihao` → `ni'hao`），仅中文模式参与；无法切分时仅显示
-    /// 手动分隔符（含串尾 `'`）。查询键 `composing` 本身不含分隔符（去噪）。
+    /// 手动分隔符（含串尾 `'`）。T-163：**自动隔音候选命中时**（`apostrophe_seps`
+    /// 由 `refresh_candidates` 记录）叠加首选槽划分边界（`wsshui` →
+    /// `w's'shui`），与 T-128 同一显示口径、不污染「最长可切分前缀」退化语义。
+    /// 查询键 `composing` 本身不含分隔符（去噪）。
     #[must_use]
     pub fn composing_display(&self) -> String {
         let mut boundaries: std::collections::BTreeSet<usize> =
             self.manual_seps.iter().copied().collect();
         if self.mode == InputMode::Chinese {
             boundaries.extend(preferred_segment_boundaries(&self.table, &self.composing));
+            boundaries.extend(self.apostrophe_seps.iter().copied());
         }
         let length = self.composing.len();
         let mut display = String::with_capacity(self.composing.len());
@@ -1582,6 +1592,9 @@ impl InputEngine {
 
     fn refresh_candidates(&mut self) {
         let context = RankingContext::new(self.previous_word.as_deref(), &self.user_dictionary);
+        // T-163：每轮刷新清空自动隔音显示边界，仅在自动隔音候选命中时重设
+        // （显示跟随候选实际命中，避免污染 T-128 退化语义）。
+        self.apostrophe_seps.clear();
         // FR-031（场景6）：组合串进入邮箱/网址格式路径（含 `@` 或 `www.`/`http(s)://` 前缀），
         // 候选 = 至多 3 条补全（.com/.cn/.net 或 .com/.cn/.org），完整串（已含 `.`）直通上屏。
         // pinyin = None 不进入用户词学习；普通中文输入（无 @/www./http 前缀）不介入（D-10）。
@@ -1750,6 +1763,9 @@ impl InputEngine {
                     &composing,
                 );
                 if !apostrophe.is_empty() {
+                    // T-163：候选命中时记录隔音显示边界（页眉 `w's'shui`）。
+                    self.apostrophe_seps =
+                        zhu_ye_core::apostrophe_boundaries(&self.table, &composing);
                     main = self.ranking.rank(apostrophe, &context);
                 }
             }
@@ -3191,6 +3207,27 @@ mod tests {
             texts.contains(&"我是谁"),
             "wsshui 应自动隔音出我是谁，实际: {texts:?}"
         );
+    }
+
+    #[test]
+    fn 自动隔音页眉显示分隔符() {
+        // T-163 显示：wsshui 不可切分时页眉组合串显示 w's'shui（U+2019 口径），
+        // 查询键 composing 不含分隔符（去噪，上屏/删改按原文）。
+        use zhu_ye_core::dict::{DictionaryEntry, InMemoryDictionary};
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("我", "wo", 88),
+            DictionaryEntry::new("是", "shi", 80),
+            DictionaryEntry::new("谁", "shui", 70),
+        ]);
+        let mut engine =
+            InputEngine::with_bigram(Arc::new(dictionary), Arc::new(InMemoryBigramModel::new()));
+        type_text(&mut engine, "wsshui");
+        assert_eq!(
+            engine.composing_display(),
+            "w\u{2019}s\u{2019}shui",
+            "页眉应显示隔音符 w's'shui"
+        );
+        assert_eq!(engine.composing(), "wsshui", "查询键不含分隔符");
     }
 
     #[test]

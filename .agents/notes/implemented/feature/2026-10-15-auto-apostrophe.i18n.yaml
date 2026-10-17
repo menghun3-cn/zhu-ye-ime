@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-10-15-auto-apostrophe.md
 #   git hash-object 2026-10-15-auto-apostrophe.zh.md
-2026-10-15-auto-apostrophe.md: e0cfab43a6f81306f195d1d3e7dd60e319ac2392
-2026-10-15-auto-apostrophe.zh.md: 9328f3002205094f77160b4aaa9adb91337f1b74
+2026-10-15-auto-apostrophe.md: e44f6d9ed56752a64a8fca6afc29d5d0dce81d6e
+2026-10-15-auto-apostrophe.zh.md: 438bcf3cc5fef73c5ac94bf771c539226ae76b9b

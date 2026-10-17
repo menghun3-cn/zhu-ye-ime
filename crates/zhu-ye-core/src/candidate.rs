@@ -407,15 +407,15 @@ pub const APOSTROPHE_CANDIDATE_CAP: usize = 10;
 /// 输入串**无法完整切分**时（如 `wsshui`），按「简拼单字母 ∪ 完整音节」的槽
 /// 划分自动识别音节边界（`w's'shui`）——单字母槽展开为该字母的常用音节、
 /// 完整音节槽原样保留，拼接出完整拼音串组合后查词典：整词命中直接出候选；
-/// 未命中的 3 音节以上组合串再走整句组装（`sentence_candidates`），
-/// 「我是谁」即由 `woss → wo + shi + shui` 用三个单字词组装而来。
+/// 未命中且 3 音节以上的组合串先**整词组合**（每音节词典首条，`woshishui`→
+/// 「我是谁」置顶）再由**整句组装**（`sentence_candidates`）补足非首条组合。
 ///
 /// 触发前置由调用方保证（不可完整切分、无整词命中、长度达标、纯小写），本函数
 /// 内部仍做防御：
 /// - 长度不是 `3..=APOSTROPHE_MAX_INPUT` 或含非小写 ASCII → 返回空；
 /// - 可完整切分或整词已命中 → 返回空（不污染全拼/整词路径，两者由主链路承担）；
-/// - 槽划分方案数或展开组合数超上限 → 截断（展开顺序确定：单字母槽先于长音节槽、
-///   简拼表序优先，保证同输入同输出）。
+/// - 槽划分方案数或展开组合数超上限 → 截断（展开顺序确定：完整音节槽先于
+///   单字母槽、简拼表序优先，保证最优划分先展开、同输入同输出）。
 ///
 /// 候选 `source = Static`（与简拼同类）、`pinyin = 展开后的完整拼音串`，
 /// UI 拼音行据此展示完整拼写。
@@ -454,11 +454,29 @@ pub fn apostrophe_candidates(
     for (combo, syllable_count) in combos {
         let entries = dictionary.lookup(&combo);
         if entries.is_empty() {
-            // 未整词命中：3 音节以上组合串走整句组装（同 FR-025 语义）。
+            // 未整词命中：3 音节以上组合串先走**整词组合**（每音节词典首条，
+            // `woshishui` → 我是谁，得分高自然置顶——真机验收要求首选即
+            // 「我是谁」），再由整句 beam 补足非首条组合（同 FR-025 语义）。
             if syllable_count < 3 {
                 continue;
             }
+            let combined = generate_candidates(table, dictionary, &combo);
+            let combined_texts: std::collections::HashSet<String> =
+                combined.iter().map(|c| c.text.clone()).collect();
+            for mut candidate in combined {
+                if candidate.pinyin.is_none() {
+                    candidate.pinyin = Some(combo.clone());
+                }
+                collected.push(candidate);
+                if collected.len() >= APOSTROPHE_CANDIDATE_CAP {
+                    return collected;
+                }
+            }
             for mut candidate in sentence_candidates(table, dictionary, bigram, &combo) {
+                // 组合组已产出的文本不重复入列（同文本唯一）。
+                if combined_texts.contains(&candidate.text) {
+                    continue;
+                }
                 if candidate.pinyin.is_none() {
                     candidate.pinyin = Some(combo.clone());
                 }
@@ -500,13 +518,6 @@ impl SlotWalker<'_> {
             }
             return;
         }
-        // 单字母槽：该字母在简拼表有常用音节才可取。
-        let letter = bytes[pos] as char;
-        if !initial_syllables(letter).is_empty() {
-            current.push(letter.to_string());
-            self.visit(input, pos + 1, current);
-            current.pop();
-        }
         // 完整音节槽：从长到短枚举（`wsshui` 的 `shui` 优先于 `s`+`hui` 的拆分）。
         for end in (pos + 2..=bytes.len()).rev() {
             if self.table.is_complete_syllable(&input[pos..end]) {
@@ -515,13 +526,25 @@ impl SlotWalker<'_> {
                 current.pop();
             }
         }
+        // 单字母槽：该字母在简拼表有常用音节才可取；**置于完整音节之后**——
+        // T-163 真机排查：先单字母会使 `wsshui` 先出噪声划分 `[w,s,s,hui]`
+        // （我试试会…）抢占候选配额，完整划分 `[w,s,shui]`（→我是谁）轮不到；
+        // 长音节优先保证最优划分先展开。
+        let letter = bytes[pos] as char;
+        if !initial_syllables(letter).is_empty() {
+            current.push(letter.to_string());
+            self.visit(input, pos + 1, current);
+            current.pop();
+        }
     }
 }
 
 /// 枚举输入串的全部「自动隔音槽划分」，每段为完整音节或简拼单字母（`T-163`）。
 ///
-/// 顺序确定：先单字母槽（短段）后完整音节槽（长段从长到短）；方案按遍历序产出。
-/// 段数少于 2 或超过 [`APOSTROPHE_MAX_SEGMENTS`] 的划分丢弃；方案数受 `cap` 约束。
+/// 顺序确定：**完整音节槽（长段从长到短）优先、单字母槽随后**——保证
+/// `wsshui` 先得 `[w,s,shui]` 再得 `[w,s,s,hui]`（噪声划分不抢占候选配额）；
+/// 方案按遍历序产出。段数少于 2 或超过 [`APOSTROPHE_MAX_SEGMENTS`] 的划分
+/// 丢弃；方案数受 `cap` 约束。
 fn slot_plans(table: &SyllableTable, input: &str, cap: usize) -> Vec<Vec<String>> {
     let mut walker = SlotWalker {
         table,
@@ -567,6 +590,33 @@ fn expand_slot_combinations(
     for combo in combos {
         out.push((combo, plan.len()));
     }
+}
+
+/// 自动隔音首选槽划分的**显示边界**（T-163）：返回首选划分中每个非尾音节的
+/// 串尾字节下标，供页眉组合串插入显示分隔符（`wsshui` → 边界 `[1, 2]` →
+/// `w's'shui`，分隔符字符随调用方 T-134 口径采用 U+2019）。
+///
+/// 仅对**不可完整切分**的串有意义（可切分串由 T-128
+/// `preferred_segment_boundaries` 承担）；返回空表示无自动隔音边界。
+#[must_use]
+pub fn apostrophe_boundaries(table: &SyllableTable, input: &str) -> Vec<usize> {
+    // 可切分串的显示边界由 T-128 的 preferred_segment_boundaries 承担，
+    // 本函数只处理不可切分串（否则同一串会出现两套边界口径）。
+    if !segment_all(table, input).is_empty() {
+        return Vec::new();
+    }
+    let Some(plan) = slot_plans(table, input, 1).into_iter().next() else {
+        return Vec::new();
+    };
+    let mut boundaries: Vec<usize> = Vec::with_capacity(plan.len());
+    let mut pos = 0usize;
+    for segment in &plan {
+        pos = pos.saturating_add(segment.len());
+        if pos < input.len() {
+            boundaries.push(pos);
+        }
+    }
+    boundaries
 }
 
 /// 英文词候选（FR-030，场景6）：查 `EN_WORDS` 前缀得到英文原形候选组。
@@ -1114,9 +1164,9 @@ mod tests {
 
     use crate::bigram::InMemoryBigramModel;
     use crate::candidate::{
-        abbreviation_candidates, apostrophe_candidates, append_abbreviation_group,
-        constrained_segment_candidates, corrected_candidates, generate_candidates,
-        generate_prefix_candidates, initial_candidates, is_abbreviation_input,
+        abbreviation_candidates, apostrophe_boundaries, apostrophe_candidates,
+        append_abbreviation_group, constrained_segment_candidates, corrected_candidates,
+        generate_candidates, generate_prefix_candidates, initial_candidates, is_abbreviation_input,
         merge_candidate_groups, prefix_expand_candidates, sentence_candidates,
         transposed_candidates, Candidate, CandidateSorter, CandidateSource, RankingConfig,
         RankingContext, RankingModel, StaticRankingModel,
@@ -1923,15 +1973,27 @@ mod tests {
 
     // ---- 自动隔音候选组（T-163，FR-023 简拼扩展）----
 
-    /// 自动隔音测试词典：单字（我/是/谁）供整句组装，另加干扰两字词。
+    /// 自动隔音测试词典（T-163 真机回归压力形态）：单字（我/是/谁）供整句
+    /// 组装，`shi`/`shui`/`hui` 各配多个同音高频词——模拟真实词典竞争，防止
+    /// 噪声划分 `[w,s,s,hui]`（我试试会…）抢占候选配额（先单字母槽的旧顺序
+    /// 会让「我是谁」轮不到，长音节优先的新顺序保证 `[w,s,shui]` 先行）。
     fn apostrophe_dictionary() -> InMemoryDictionary {
         InMemoryDictionary::from_entries(vec![
             DictionaryEntry::new("我", "wo", 100_000),
             DictionaryEntry::new("是", "shi", 90_000),
+            DictionaryEntry::new("时", "shi", 88_000),
+            DictionaryEntry::new("事", "shi", 86_000),
+            DictionaryEntry::new("市", "shi", 84_000),
+            DictionaryEntry::new("式", "shi", 80_000),
+            DictionaryEntry::new("食", "shi", 70_000),
             DictionaryEntry::new("谁", "shui", 80_000),
-            DictionaryEntry::new("试", "shi", 70_000),
-            DictionaryEntry::new("会", "hui", 90_000),
             DictionaryEntry::new("水", "shui", 75_000),
+            DictionaryEntry::new("睡", "shui", 74_000),
+            DictionaryEntry::new("会", "hui", 90_000),
+            DictionaryEntry::new("回", "hui", 88_000),
+            DictionaryEntry::new("灰", "hui", 85_000),
+            DictionaryEntry::new("绘", "hui", 80_000),
+            DictionaryEntry::new("试", "shi", 70_000),
         ])
     }
 
@@ -1947,9 +2009,31 @@ mod tests {
             found.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
         );
         assert!(
+            found
+                .iter()
+                .any(|c| c.pinyin.as_deref() == Some("woshishui")),
+            "首选划分 [w,s,shui] 须先于噪声划分 [w,s,s,hui] 展开（顺序回归锁定）: {:?}",
+            found
+                .iter()
+                .map(|c| c.pinyin.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>()
+        );
+        assert!(
             found.iter().all(|c| c.pinyin.is_some()),
             "自动隔音候选应带完整拼音（用户词学习）"
         );
+    }
+
+    #[test]
+    fn 自动隔音显示边界按首选槽划分() {
+        let table = SyllableTable::standard();
+        // wsshui → [w,s,shui]：边界 1、2 → 页眉 w's'shui。
+        assert_eq!(apostrophe_boundaries(&table, "wsshui"), vec![1, 2]);
+        // 可切分串无自动隔音边界（T-128 的 preferred_segment_boundaries 负责）。
+        assert!(apostrophe_boundaries(&table, "nihao").is_empty());
+        assert!(apostrophe_boundaries(&table, "").is_empty());
+        // 纯单字母不可切分串有边界（如 ws → [w,s] 边界 1）。
+        assert_eq!(apostrophe_boundaries(&table, "ws"), vec![1]);
     }
 
     #[test]
