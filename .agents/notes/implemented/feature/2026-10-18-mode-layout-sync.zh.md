@@ -54,5 +54,7 @@ Status: implemented
   `git diff --check`。
 - 文档同步：需求规格说明书 FR-004、验收标准 FR-004（系统英文指示/英文
   布局符号两行）、方案设计 §5.3、CHANGELOG [Unreleased]、todos T-168。
-- 部署与真机验证（英文模式出现灰色"A/"、切回中文消失、英文模式 `@`/`:`/`?`
-  输入正确）待进行。
+- 已部署（2026-10-18，PR #211 → develop f74619e）：`zhu_ye_ime_A4277E6B.dll`
+  （2,260,480 B）落地、指针切换、ctfmon 重启（PID 18940），verify-tsf-dll/
+  identity 通过。真机验证（英文模式出现灰色"A/"、切回中文消失、英文模式
+  `@`/`:`/`?` 输入正确）待用户确认。

@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-10-18-mode-layout-sync.md
 #   git hash-object 2026-10-18-mode-layout-sync.zh.md
-2026-10-18-mode-layout-sync.md: 3de0b4c2f5eb981ea93224e479419d29ceb8101c
-2026-10-18-mode-layout-sync.zh.md: c1ddbfce88d8c468b3146c3695aed39aa2e2d06b
+2026-10-18-mode-layout-sync.md: e9121ece7ce7b8c09cc15235114452581cea8ad2
+2026-10-18-mode-layout-sync.zh.md: decb2422bf8a05c569068ce88e66f5c383657b2c
