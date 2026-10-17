@@ -67,5 +67,8 @@ symbol mapping holds naturally.
 - Docs updated: FR-004 (需求规格说明书), acceptance rows (系统英文指示 /
   英文布局符号 under FR-004 in 验收标准), design §5.3, CHANGELOG
   [Unreleased], todos T-168.
-- Deployment and real-host verification (grey "A/" appears on English mode,
-  disappears on Chinese, `@`/`:`/`?` correct in English mode) stay pending.
+- Deployed (2026-10-18, PR #211 → develop f74619e): DLL
+  `zhu_ye_ime_A4277E6B.dll` (2,260,480 B) landed with pointers switched and
+  ctfmon restarted (PID 18940); verify-tsf-dll/identity passed. Real-host
+  verification (grey "A/" on English mode, disappears on Chinese,
+  `@`/`:`/`?` correct in English mode) stays pending.
