@@ -1,0 +1,8 @@
+# Bilingual-pair consistency record: the git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record with the project's
+# translation-pairing verifier:
+#   git hash-object 2026-10-16-ctrl-space-toggle.md
+#   git hash-object 2026-10-16-ctrl-space-toggle.zh.md
+2026-10-16-ctrl-space-toggle.md: ffc89028814228cb33bd6864fefa9b1afc423be7
+2026-10-16-ctrl-space-toggle.zh.md: 9a24a1ca3245f720e08bf41b5134f926cca9ff4d

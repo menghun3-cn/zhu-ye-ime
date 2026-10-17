@@ -497,8 +497,8 @@ impl ITfLangBarItem_Impl for LangBarModeButton_Impl {
 
     fn GetTooltipString(&self) -> Result<windows::core::BSTR> {
         let tip = match self.current_mode() {
-            InputMode::Chinese => "竹叶输入法：中文模式（按 Shift 切换）",
-            InputMode::English => "竹叶输入法：英文模式（按 Shift 切换）",
+            InputMode::Chinese => "竹叶输入法：中文模式（按 Shift / Ctrl+Space 切换）",
+            InputMode::English => "竹叶输入法：英文模式（按 Shift / Ctrl+Space 切换）",
         };
         Ok(windows::core::BSTR::from(tip))
     }
