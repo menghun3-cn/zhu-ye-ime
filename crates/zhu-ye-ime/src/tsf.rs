@@ -546,6 +546,11 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 wparam.0, action
             ));
         }
+        // T-165：Ctrl+Space 中英切换——修饰组合在 `plan_action` 归为 None
+        // （不进入正常键路），必须在此显式接收并转发给 OnKeyDown。
+        if is_ctrl_space(wparam, ctrl_key_down()) {
+            return Ok(BOOL(1));
+        }
         Ok(BOOL(action.is_some() as i32))
     }
 
@@ -589,6 +594,16 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         }
         // 任何非 Shift 键按下 = Shift 组合键（或恢复单独按键）→ 取消待定切换。
         state_lock(self).pending_shift_toggle = false;
+        // T-165：Ctrl+Space 专属中英切换（用户点名，与 Ctrl+Shift 系统输入法
+        // 切换区分）。空闲/组合态均响应，组合内容保留（与语言栏点击同语义）。
+        if is_ctrl_space(wparam, ctrl_key_down()) {
+            sync_engine(self.state(), KeyAction::ToggleMode);
+            refresh_candidate_window(self.state(), None);
+            if should_log(zhu_ye_core::LogLevel::Debug) {
+                debug_log("zhu-ye: ctrl+space ToggleMode");
+            }
+            return Ok(BOOL(1));
+        }
         let Some(action) = action else {
             return Ok(BOOL(0));
         };
@@ -797,6 +812,18 @@ fn digit_index(digit: char) -> usize {
 /// 判断 Shift 修饰键是否按下（英文布局上档字符判定，T-066）。
 fn shift_key_down() -> bool {
     unsafe { GetKeyState(i32::from(VK_SHIFT.0)) < 0 }
+}
+
+/// 判断 Ctrl 修饰键是否按下（Ctrl+Space 中英切换判定，T-165）。
+fn ctrl_key_down() -> bool {
+    unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 }
+}
+
+/// Ctrl+Space 中英切换判定（T-165）：键码为空格且 Ctrl 按下。
+/// 抽出为纯函数便于单测（修饰状态由调用方注入）。
+#[must_use]
+fn is_ctrl_space(wparam: WPARAM, ctrl_pressed: bool) -> bool {
+    ctrl_pressed && VIRTUAL_KEY(wparam.0 as u16).0 == VK_SPACE.0
 }
 
 /// 从 `ITfThreadMgr` 取出按键管理器。
@@ -2171,6 +2198,16 @@ mod tests {
         assert!(to_wide_no_term("").is_empty());
         // 对照：PCWSTR 用的 to_wide 必须带空结尾（供指针类 API 消费）。
         assert_eq!(to_wide("你好").pop(), Some(0));
+    }
+
+    /// T-165：Ctrl+Space 中英切换判定（纯函数）。
+    #[test]
+    fn ctrl空格判定() {
+        let space = WPARAM(VK_SPACE.0 as usize);
+        assert!(is_ctrl_space(space, true), "Ctrl+Space 应判定为中英切换");
+        assert!(!is_ctrl_space(space, false), "无 Ctrl 修饰不判定");
+        let letter = WPARAM(VK_A.0 as usize);
+        assert!(!is_ctrl_space(letter, true), "Ctrl+A 不判定");
     }
 
     /// T-046：模式切换处理器闭包（Weak<…> 捕获）必须可跨线程。
