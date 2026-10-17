@@ -51,4 +51,7 @@ Status: implemented
   `git diff --check`；verify-translation-pairs 与 verify-agent-notes 全绿。
 - 文档同步：需求规格说明书 FR-004、验收标准 FR-004「Ctrl+Space 切换（T-165）」
   行、安装与使用 §5 快捷键表、CHANGELOG [Unreleased]、todos T-165。
-- 部署与真机验收（随 T-163 二轮 DLL 一并交付）待进行。
+- 已部署（2026-10-16，PR #207 → develop e4afddb，随 T-163 二轮修复同批）：
+  `zhu_ye_ime_3079725B.dll`（2,260,480 B）落地、指针切换、ctfmon 重启，
+  verify-tsf-dll/identity 通过。Ctrl+Space 真机验收（新宿主进程窗口）
+  待用户确认。

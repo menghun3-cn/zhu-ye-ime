@@ -132,5 +132,8 @@ dictionary format is untouched (O-06).
   restarted (PID 40784); `verify-tsf-dll` (3/3 exports) and
   `verify-tsf-identity` (7/7) passed on the release binary. User acceptance
   reported 我是谁 missing and no `w's'shui` separator; the ordering/display
-  fixes above were then made and a second-round deployment follows. Real-host
-  retest pending (new host-process window).
+  fixes above were then made. Second-round deployment (with the T-165
+  Ctrl+Space toggle, PR #207 → develop e4afddb, 2026-10-16): DLL
+  `zhu_ye_ime_3079725B.dll` (2,260,480 B) landed, pointers switched, ctfmon
+  restarted (PID 36032), verify-tsf-dll/identity passed. Real-host retest
+  pending (new host-process window).

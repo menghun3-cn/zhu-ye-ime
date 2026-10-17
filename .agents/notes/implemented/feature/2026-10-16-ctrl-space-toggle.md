@@ -63,5 +63,8 @@ composition content is kept):
 - Docs updated: FR-004 (需求规格说明书), acceptance row 「Ctrl+Space 切换
   （T-165）」under FR-004 (验收标准), 安装与使用 §5 shortcut table,
   CHANGELOG [Unreleased], todos T-165.
-- Deployment and real-host verification of the Ctrl+Space toggle stay
-  pending (ships together with the T-163 second-round DLL).
+- Deployed (2026-10-16, PR #207 → develop e4afddb, together with the T-163
+  round-2 fix): DLL `zhu_ye_ime_3079725B.dll` (2,260,480 B) landed with
+  pointers switched and ctfmon restarted; verify-tsf-dll/identity passed.
+  Real-host verification of the Ctrl+Space toggle stays pending (new
+  host-process window).
