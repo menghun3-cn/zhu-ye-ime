@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-10-16-ctrl-space-toggle.md
 #   git hash-object 2026-10-16-ctrl-space-toggle.zh.md
-2026-10-16-ctrl-space-toggle.md: ffc89028814228cb33bd6864fefa9b1afc423be7
-2026-10-16-ctrl-space-toggle.zh.md: 9a24a1ca3245f720e08bf41b5134f926cca9ff4d
+2026-10-16-ctrl-space-toggle.md: 45490d2efee519ddb3c31c639d341914ef78e769
+2026-10-16-ctrl-space-toggle.zh.md: e822cb4655867cfc7f09519f82c08a9db6bd56cd
