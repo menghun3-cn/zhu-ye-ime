@@ -56,5 +56,6 @@ Status: implemented
   布局符号两行）、方案设计 §5.3、CHANGELOG [Unreleased]、todos T-168。
 - 已部署（2026-10-18，PR #211 → develop f74619e）：`zhu_ye_ime_A4277E6B.dll`
   （2,260,480 B）落地、指针切换、ctfmon 重启（PID 18940），verify-tsf-dll/
-  identity 通过。真机验证（英文模式出现灰色"A/"、切回中文消失、英文模式
-  `@`/`:`/`?` 输入正确）待用户确认。
+  identity 通过。**真机验收通过（2026-10-18，用户确认）**：英文模式出现
+  灰色"A/"、切回中文消失、英文模式 `@`/`:`/`?` 输入正确——任务关闭
+  （todos T-168 已完成）。
