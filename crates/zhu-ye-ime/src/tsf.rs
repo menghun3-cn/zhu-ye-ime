@@ -35,10 +35,10 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ActivateKeyboardLayout, GetKeyState, ACTIVATE_KEYBOARD_LAYOUT_FLAGS, HKL, VIRTUAL_KEY, VK_0,
-    VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_OEM_1,
-    VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
-    VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
+    ActivateKeyboardLayout, GetAsyncKeyState, GetKeyState, ACTIVATE_KEYBOARD_LAYOUT_FLAGS, HKL,
+    VIRTUAL_KEY, VK_0, VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE,
+    VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD,
+    VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfEditSession,
@@ -819,8 +819,13 @@ fn shift_key_down() -> bool {
 }
 
 /// 判断 Ctrl 修饰键是否按下（Ctrl+Space 中英切换判定，T-165）。
+///
+/// 用 `GetAsyncKeyState`（同步硬件状态、与线程消息队列无关）：TSF 键盘回调
+/// 只对"截图"经过的按键做 TestKeyDown 询问，Ctrl 的 down 事件本身被放行给
+/// 宿主、未必进入服务线程消息队列，`GetKeyState` 会恒读到"未按下"（T-165
+/// 真机验证 Ctrl+Space 无反应的排查结论）。
 fn ctrl_key_down() -> bool {
-    unsafe { GetKeyState(i32::from(VK_CONTROL.0)) < 0 }
+    unsafe { GetAsyncKeyState(i32::from(VK_CONTROL.0)) < 0 }
 }
 
 /// Ctrl+Space 中英切换判定（T-165）：键码为空格且 Ctrl 按下。
