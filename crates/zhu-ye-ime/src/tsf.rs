@@ -35,10 +35,10 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ActivateKeyboardLayout, GetAsyncKeyState, GetKeyState, ACTIVATE_KEYBOARD_LAYOUT_FLAGS, HKL,
-    VIRTUAL_KEY, VK_0, VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE,
-    VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD,
-    VK_OEM_PLUS, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
+    ActivateKeyboardLayout, GetKeyState, ACTIVATE_KEYBOARD_LAYOUT_FLAGS, HKL, VIRTUAL_KEY, VK_0,
+    VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_OEM_1,
+    VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
+    VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfEditSession,
@@ -46,7 +46,7 @@ use windows::Win32::UI::TextServices::{
     ITfInsertAtSelection, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr,
     ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl,
     ITfThreadMgr, TfAnchor, TF_AE_END, TF_DEFAULT_SELECTION, TF_ES_READWRITE, TF_ES_SYNC,
-    TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
+    TF_IAS_QUERYONLY, TF_MOD_CONTROL, TF_PRESERVEDKEY, TF_SELECTION, TF_SELECTIONSTYLE,
 };
 use windows_core::{
     implement, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, HRESULT, PCWSTR,
@@ -444,6 +444,35 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         let key_sink = self.to_object().to_interface::<ITfKeyEventSink>();
         match unsafe { keystroke_mgr.AdviseKeyEventSink(tid, &key_sink, true) } {
             Ok(()) => {
+                // T-165：用 TSF 保留键（PreserveKey）实现 Ctrl+Space 中英切换——
+                // 键事件回调线程读不到修饰键状态（GetKeyState/GetAsyncKeyState
+                // 实测恒假，且 OnTestKeyDown 不被系统调用），保留键由系统在
+                // 组合键命中时直接回调 OnPreservedKey，绕开键状态读取。
+                // 注册失败不阻断激活（该快捷键降级不可用，Shift 切换不受影响）。
+                let prekey = TF_PRESERVEDKEY {
+                    uVKey: u32::from(VK_SPACE.0),
+                    uModifiers: TF_MOD_CONTROL,
+                };
+                let desc: Vec<u16> = "竹叶输入法：Ctrl+Space 切换中英".encode_utf16().collect();
+                let preserve_result = unsafe {
+                    keystroke_mgr.PreserveKey(
+                        tid,
+                        std::ptr::from_ref(&GUID_CTRL_SPACE_TOGGLE),
+                        &prekey,
+                        &desc,
+                    )
+                };
+                if let Err(err) = preserve_result {
+                    product_log(
+                        zhu_ye_core::LogLevel::Warn,
+                        &format!("zhu-ye: preserve ctrl+space failed {err:?}"),
+                    );
+                } else {
+                    product_log(
+                        zhu_ye_core::LogLevel::Info,
+                        "zhu-ye: preserved key ctrl+space ok",
+                    );
+                }
                 let mut state = state_lock(self);
                 state.tid = tid;
                 state.keystroke_mgr = Some(keystroke_mgr);
@@ -550,11 +579,6 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 wparam.0, action
             ));
         }
-        // T-165：Ctrl+Space 中英切换——修饰组合在 `plan_action` 归为 None
-        // （不进入正常键路），必须在此显式接收并转发给 OnKeyDown。
-        if is_ctrl_space(wparam, ctrl_key_down()) {
-            return Ok(BOOL(1));
-        }
         Ok(BOOL(action.is_some() as i32))
     }
 
@@ -598,16 +622,6 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         }
         // 任何非 Shift 键按下 = Shift 组合键（或恢复单独按键）→ 取消待定切换。
         state_lock(self).pending_shift_toggle = false;
-        // T-165：Ctrl+Space 专属中英切换（用户点名，与 Ctrl+Shift 系统输入法
-        // 切换区分）。空闲/组合态均响应，组合内容保留（与语言栏点击同语义）。
-        if is_ctrl_space(wparam, ctrl_key_down()) {
-            sync_engine(self.state(), KeyAction::ToggleMode);
-            refresh_candidate_window(self.state(), None);
-            if should_log(zhu_ye_core::LogLevel::Debug) {
-                debug_log("zhu-ye: ctrl+space ToggleMode");
-            }
-            return Ok(BOOL(1));
-        }
         let Some(action) = action else {
             return Ok(BOOL(0));
         };
@@ -674,8 +688,17 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnPreservedKey(
         &self,
         _pic: Ref<'_, ITfContext>,
-        _rguid: *const windows::core::GUID,
+        rguid: *const windows::core::GUID,
     ) -> Result<BOOL> {
+        // T-165：Ctrl+Space 经保留键机制回调（PreserveKey 注册，见 Activate）。
+        // 组合键命中时系统直接调用本回调，不依赖键回调线程读修饰键状态
+        // （GetKeyState/GetAsyncKeyState 在 TSF 回调线程实测恒假）。
+        if !rguid.is_null() && unsafe { *rguid } == GUID_CTRL_SPACE_TOGGLE {
+            debug_log("zhu-ye: preserved ctrl+space ToggleMode");
+            sync_engine(self.state(), KeyAction::ToggleMode);
+            refresh_candidate_window(self.state(), None);
+            return Ok(BOOL(1));
+        }
         Ok(BOOL(0))
     }
 }
@@ -818,22 +841,10 @@ fn shift_key_down() -> bool {
     unsafe { GetKeyState(i32::from(VK_SHIFT.0)) < 0 }
 }
 
-/// 判断 Ctrl 修饰键是否按下（Ctrl+Space 中英切换判定，T-165）。
-///
-/// 用 `GetAsyncKeyState`（同步硬件状态、与线程消息队列无关）：TSF 键盘回调
-/// 只对"截图"经过的按键做 TestKeyDown 询问，Ctrl 的 down 事件本身被放行给
-/// 宿主、未必进入服务线程消息队列，`GetKeyState` 会恒读到"未按下"（T-165
-/// 真机验证 Ctrl+Space 无反应的排查结论）。
-fn ctrl_key_down() -> bool {
-    unsafe { GetAsyncKeyState(i32::from(VK_CONTROL.0)) < 0 }
-}
-
-/// Ctrl+Space 中英切换判定（T-165）：键码为空格且 Ctrl 按下。
-/// 抽出为纯函数便于单测（修饰状态由调用方注入）。
-#[must_use]
-fn is_ctrl_space(wparam: WPARAM, ctrl_pressed: bool) -> bool {
-    ctrl_pressed && VIRTUAL_KEY(wparam.0 as u16).0 == VK_SPACE.0
-}
+/// T-165：Ctrl+Space 中英切换的 TSF 保留键 GUID（`PreserveKey` 注册、
+/// `OnPreservedKey` 接收——绕开 TSF 键回调读修饰键状态不可靠的问题）。
+const GUID_CTRL_SPACE_TOGGLE: windows_core::GUID =
+    windows_core::GUID::from_u128(0x7c4b5a19_2e6f_4d81_9a3c_b1d2e3f4a5b6);
 
 /// 英文键盘布局句柄（US 00000409；与 T-066 英文布局键映射、T-168 一致）。
 const LAYOUT_EN: usize = 0x0409_0409;
@@ -2239,16 +2250,6 @@ mod tests {
         assert!(to_wide_no_term("").is_empty());
         // 对照：PCWSTR 用的 to_wide 必须带空结尾（供指针类 API 消费）。
         assert_eq!(to_wide("你好").pop(), Some(0));
-    }
-
-    /// T-165：Ctrl+Space 中英切换判定（纯函数）。
-    #[test]
-    fn ctrl空格判定() {
-        let space = WPARAM(VK_SPACE.0 as usize);
-        assert!(is_ctrl_space(space, true), "Ctrl+Space 应判定为中英切换");
-        assert!(!is_ctrl_space(space, false), "无 Ctrl 修饰不判定");
-        let letter = WPARAM(VK_A.0 as usize);
-        assert!(!is_ctrl_space(letter, true), "Ctrl+A 不判定");
     }
 
     /// T-168：中英模式对应系统键盘布局（英文→US 0x04090409 使任务栏显示
