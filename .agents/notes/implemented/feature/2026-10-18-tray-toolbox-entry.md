@@ -19,14 +19,15 @@ into the panel** (FR-074).
 
 ## Decision
 
-`zhu-ye-tray` gains two mouse entries and one correctness fix:
+`zhu-ye-tray` gains one mouse entry and keeps double-click as it was:
 
 - **Menu item "工具箱(&T)…"** between the status line and "打开设置(&S)…".
   It calls the same toggle path as the hotkey (global single panel, remembered tab
   and position).
-- **Double-click toggles the panel** instead of opening the settings window. The
-  settings window keeps its visible menu item; double-click was the only hidden
-  path to it, and the panel is the entry users currently lack.
+- **Double-click still opens settings**: the first implementation made it toggle the
+  panel, and the user asked for the original behaviour back after accepting the
+  change on 2026-10-18. `WM_LBUTTONDBLCLK` therefore calls `open_settings()`
+  directly; the toolbox never takes the double-click slot.
 - **Click refreshes immediately**: both left and right click now re-read
   `tray-state` before building the menu, so the status line and the tray icon never
   lag behind the 500 ms poll.
@@ -58,9 +59,11 @@ steals focus" (S-11 unchanged). The hotkey path does not take the keyboard at al
 
 - **Single click opens the panel (Sogou-like).** Rejected: single click must stay
   the stable menu entry (status check, exit) — guessing intent from click timing is
-  less reliable than giving left/right click and double click distinct jobs (S-34).
-- **Keep double-click = settings.** Rejected: the panel is the feature users cannot
-  find; settings already has a labelled menu item.
+  less reliable than a plain left/right-click menu (S-34).
+- **Double-click toggles the panel (first implementation).** Reverted: after
+  accepting the change on 2026-10-18 the user asked for double-click to keep opening
+  settings, so the panel keeps only the menu item and the hotkey. Rejected because
+  changing an established gesture costs more than the new feature gains (S-36).
 - **Create the panel directly in the menu handler.** Rejected: the modal menu loop
   blocks paint/click dispatch for the new window, so the panel would appear dead
   until the first click ends the menu (S-35).
@@ -76,22 +79,20 @@ steals focus" (S-11 unchanged). The hotkey path does not take the keyboard at al
 
 ## Consequences
 
-- The panel is reachable by mouse (menu item and double click) in addition to the
-  hotkey; the tray itself is unchanged in shape — one icon, richer menu.
+- The panel is reachable by mouse through the menu item in addition to the hotkey
+  (double-click still opens settings); the tray itself is unchanged in shape — one
+  icon, richer menu.
 - `zhu-ye-tray` now owns a worker thread for its whole lifetime. `Stop` is sent on
   exit and on `WM_DESTROY`; the thread drops the panel (destroying the window) before
   returning. A failure to spawn the thread degrades to "menu item and hotkey report
   an error line in `panel-hotkey.log`", never to a crash.
-- Double-click waits up to 1 s for the queue to go idle before deciding
-  (`wait_panel_state`), so a double click flips the panel exactly once even if a
-  hotkey toggle is still in flight. The cost is a pause only in that rare overlap.
-- `listen_escape` briefly makes the panel the foreground window. Any mouse activity
-  inside the panel ends that window; a user who never touches the panel gets at most
-  1.5 s of "the panel has focus" after a tray double click.
+- `listen_escape` briefly makes the panel the foreground window, and only the menu
+  entry calls it. Any mouse activity inside the panel ends that window; a user who
+  never touches the panel gets at most 1.5 s of "the panel has focus".
 - `WM_ENDSESSION` removes the icon on logoff/shutdown, avoiding ghost icons left in
   the notification area.
-- "Open settings" is now only reachable from the tray menu (previously also by
-  double click). This is deliberate and documented in the user guide.
+- Double-click semantics match the pre-T-169 tray: it opens settings. The panel's only
+  mouse entry is therefore the menu item, and the hotkey stays the primary entry.
 
 ## Testing
 
@@ -104,9 +105,9 @@ steals focus" (S-11 unchanged). The hotkey path does not take the keyboard at al
   `cargo test --workspace`, `git diff --check`,
   `scripts/verify-agent-notes.ps1`, `scripts/verify-translation-pairs.ps1`.
 - Interactive checks (acceptance §23.1) need a real desktop: menu contents and
-  order, single-click refresh, menu-opened panel usability, double-click toggle,
-  single-panel mutex with the settings window, remembered tab/position, and a
-  10-cycle rapid stress run.
+  order, single-click refresh, menu-opened panel usability, re-toggle closing,
+  double-click still opening settings, single-panel mutex with the settings window,
+  remembered tab/position, and a 10-cycle rapid stress run.
 
 ## Related
 

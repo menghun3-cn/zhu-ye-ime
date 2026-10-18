@@ -176,7 +176,7 @@ fn open_panel() -> Option<PanelWindow> {
     let kind = panel_window::remembered_kind();
     match PanelWindow::open(PanelView::new(kind), None) {
         Ok(mut panel) => {
-            // 托盘双击唤出：窗口期内 Esc 可关闭（T-169）。
+            // 托盘菜单「工具箱」唤出：窗口期内 Esc 可关闭（T-169）。
             panel.listen_escape(PANEL_ESCAPE_MS);
             Some(panel)
         }
