@@ -46,7 +46,9 @@ Status: implemented
   进程会新建同名对象并照常运行（用户实测托盘出现两个图标），现以
   `_mutex` 绑定保持在 main 作用域（HANDLE 无 Drop，随进程退出回收）；
   右键菜单
-  （模式状态行 / 打开设置 / 退出），左键单击弹菜单、双击开设置；
+  （模式状态行 / 工具箱 / 打开设置 / 退出），左键单击弹菜单、双击开关工具箱面板
+  （T-169，FR-074：菜单增项与双击语义见
+  [托盘入口直达工具箱](../../implemented/feature/2026-10-18-tray-toolbox-entry.zh.md)）；
   每次 `LoadImageW` 后立即 `DestroyIcon`（Shell 已取得副本）；
 - 部署位与自启：`C:\Program Files\zhu-ye-ime\bin\zhu-ye-tray.exe`
   （worker `copy-exe`，target 需**完整文件名**），HKCU Run 值

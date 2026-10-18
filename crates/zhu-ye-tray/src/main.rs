@@ -12,19 +12,27 @@
 //! 自启），按搜狗/QQ 拼音同款做法持有托盘状态图标：
 //!
 //! - 白"中"（资源 101）= 中文输入模式；
-//! - 白"英"（资源 102）= 英文输入模式；
+//! - 白"英"（资源 102）= 英文输入模式。
 //!
 //! 模式来源：引擎在模式切换时把状态原子写入
 //! `%APPDATA%\zhu-ye-ime\tray-state`（`zhu_ye_core::tray_state`，单行
 //! `Chinese`/`English`），本程序每 500ms 轮询该文件更新图标（原子写保证
-//! 不会读到半文件）。托盘进程退出不影响输入法本体（独立进程、只读状态
-//! 文件、失败静默降级）。
+//! 不会读到半文件）；单击托盘弹菜单时**同步再读一次**，菜单里的状态行
+//! 与图标因此即点即刷新。托盘进程退出不影响输入法本体（独立进程、只读
+//! 状态文件、失败静默降级）。
 //!
 //! 自第十四期（T-151，FR-070）起，托盘同时承担**工具箱面板的全局呼出热键**
 //! 宿主：设置窗口"关窗即退"，唯有托盘进程常驻（HKCU Run 自启），注册表
 //! `RegisterHotKey` 必须由它持有时才可靠。热键按下 → `WM_HOTKEY` →
 //! 全局单面板互斥（窗口类 `ZhuYeSettingsPanel` 唯一）：已打开则关闭（toggle），
 //! 未打开则按上次页签/位置记忆创建（详见 S-30、S-31、S-33）。
+//!
+//! 第十五期（T-169，FR-074）补齐**鼠标入口**：菜单新增"工具箱(&T)…"，双击
+//! 托盘图标直接开关面板。面板创建/关闭一律投递到自持的**串行任务队列线程**
+//! （本文件 [`task`]）执行，托盘主线程只读"面板已开"缓存并投递任务——主线程
+//! 永不被面板消息循环阻塞，面板销毁中途也不会被重入 toggle。
+
+mod task;
 
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -48,16 +56,15 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW,
-    PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TrackPopupMenu, TranslateMessage,
-    CW_USEDEFAULT, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
-    SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_LBUTTONDBLCLK,
-    WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW, PostQuitMessage,
+    RegisterClassW, SetTimer, TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HICON, IMAGE_ICON,
+    LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON,
+    TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
+    WM_DESTROY, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
+    WNDCLASSW,
 };
 
-use zhu_ye_settings::panel::PanelView;
-use zhu_ye_settings::panel_window::{self, PANEL_CLASS_NAME};
+use crate::task::PanelAction;
 
 /// 托盘图标资源 ID（与 build.rs 的 101/102 对应）。
 const ICON_ZH: u16 = 101;
@@ -66,17 +73,24 @@ const ICON_EN: u16 = 102;
 /// 托盘标识与回调消息。
 const TRAY_ID: u32 = 1;
 const WM_TRAY: u32 = WM_APP + 1;
+/// 串行任务队列线程回报"一个面板任务已完成"（见 [`task`]）。
+const WM_TASK_DONE: u32 = WM_APP + 2;
 
 /// 状态轮询周期。
 const POLL_MS: u32 = 500;
+
+/// 托盘双击呼出面板后，Esc 关闭的窗口期（T-169，毫秒）：面板小胜前台并接管
+/// 键盘这么久，鼠标进入面板或到点即交还，回落"点格即上屏、面板不抢焦"。
+const PANEL_ESCAPE_MS: u32 = 1500;
 
 /// 单实例互斥名（会话级：每个登录用户一个托盘，与 HKCU Run 自启一致）。
 const MUTEX_NAME: &str = "Local\\ZhuYeImeTraySingleton";
 const CLASS_NAME: &str = "ZhuYeTrayHostWindow";
 
 /// 菜单项 ID。
-const MENU_OPEN_SETTINGS: usize = 1;
-const MENU_EXIT: usize = 2;
+const MENU_OPEN_PANEL: usize = 1;
+const MENU_OPEN_SETTINGS: usize = 2;
+const MENU_EXIT: usize = 3;
 
 /// 面板呼出热键的注册 ID（本进程内唯一，用于 RegisterHotKey/UnregisterHotKey 配对）。
 const PANEL_HOTKEY_ID: i32 = 0x5A7A;
@@ -86,6 +100,10 @@ struct TrayState {
     window: isize,
     icon_mode: String,
     last_mtime: Option<SystemTime>,
+    /// 工具箱面板当前是否打开（由任务线程回报维护，托盘线程只读，T-169）。
+    panel_open: bool,
+    /// 是否已有面板任务在任务队列里排队/执行（回报后清零）。
+    task_pending: bool,
 }
 
 static TRAY: Mutex<Option<TrayState>> = Mutex::new(None);
@@ -221,52 +239,74 @@ fn register_panel_hotkey(window: HWND) -> bool {
         return true;
     }
     // 无控制台（windows_subsystem）：失败原因落到 `%APPDATA%\zhu-ye-ime\panel-hotkey.log`。
-    if let Some(mut path) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) {
-        path.push("zhu-ye-ime");
-        let _ = std::fs::create_dir_all(&path);
-        path.push("panel-hotkey.log");
-        let message = format!(
-            "[error] 面板呼出热键注册失败（modifiers={modifiers:#x}, vk={vk:#x}），可能被其他程序占用；静默降级为仅托盘菜单可用\n",
-        );
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, message.as_bytes()));
-    }
+    log_panel_hotkey(&format!(
+        "[error] 面板呼出热键注册失败（modifiers={modifiers:#x}, vk={vk:#x}），可能被其他程序占用；静默降级为托盘菜单/双击可用\n",
+    ));
     false
 }
 
-/// 呼出热键递达：面板已打开（任意进程）→ 关闭；未打开 → 按上次页签/位置创建
-/// （S-31 全局单面板：窗口类 `ZhuYeSettingsPanel` 全局唯一）。
-fn toggle_panel() {
-    let class: Vec<u16> = PANEL_CLASS_NAME.encode_utf16().collect();
-    match unsafe { FindWindowW(PCWSTR(class.as_ptr()), None) } {
-        Ok(existing) if !existing.is_invalid() => {
-            // 已打开：PostMessage(WM_CLOSE) 关闭（面板侧保持不变动窗口语义）。
-            unsafe {
-                let _ = PostMessageW(Some(existing), WM_CLOSE, WPARAM(0), LPARAM(0));
+/// 追加一行面板相关日志（`%APPDATA%\zhu-ye-ime\panel-hotkey.log`，失败静默）。
+fn log_panel_hotkey(message: &str) {
+    let Some(mut path) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) else {
+        return;
+    };
+    path.push("zhu-ye-ime");
+    let _ = std::fs::create_dir_all(&path);
+    path.push("panel-hotkey.log");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, message.as_bytes()));
+}
+
+/// 面板已开（本进程任务线程持有）时请求关闭；未开则投递创建任务（T-169 串行队列）。
+fn request_panel_toggle() {
+    let open = TRAY
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|state| state.panel_open))
+        .unwrap_or(false);
+    request_panel(if open {
+        PanelAction::Close
+    } else {
+        PanelAction::Open
+    });
+}
+
+/// 投递一个面板任务并置"排队中"标记（防止双击在回报到达前重复投递）。
+fn request_panel(action: PanelAction) {
+    if task::dispatch(action) {
+        if let Ok(mut guard) = TRAY.lock() {
+            if let Some(state) = guard.as_mut() {
+                state.task_pending = true;
             }
         }
-        _ => {
-            // 未打开：按记忆的页签/位置创建；托盘为宿主时不通知面板关闭事件。
-            let kind = panel_window::remembered_kind();
-            if let Err(error) = panel_window::PanelWindow::open(PanelView::new(kind), None) {
-                if let Some(mut path) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) {
-                    path.push("zhu-ye-ime");
-                    path.push("panel-hotkey.log");
-                    let message = format!("[error] 呼出面板失败：{error}\n",);
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(path)
-                        .and_then(|mut file| {
-                            std::io::Write::write_all(&mut file, message.as_bytes())
-                        });
-                }
-            }
-        }
+    } else {
+        log_panel_hotkey("[error] 工具箱任务队列线程不可用，面板打开/关闭请求被丢弃\n");
     }
+}
+
+/// 等任务队列回报面板状态（带超时）：只用于**双击**的分支判断，保证
+/// "双击 = 面板状态恰好翻转一次"，不会在回报迟到时与热键互相覆盖。
+fn wait_panel_state(timeout_ms: u32) -> Option<bool> {
+    let mut waited = 0;
+    while waited < timeout_ms {
+        let pending = TRAY
+            .lock()
+            .ok()
+            .map(|guard| guard.as_ref().is_some_and(|state| state.task_pending))
+            .unwrap_or(false);
+        if !pending {
+            return TRAY
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|state| state.panel_open));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        waited += 5;
+    }
+    None
 }
 
 /// 打开设置窗口：与托盘同目录的 `zhu-ye-settings.exe`（worker copy-exe 部署位）。
@@ -317,8 +357,11 @@ fn open_settings() {
     }
 }
 
-/// 右键菜单（左键单击同弹，便于查看当前模式）。
+/// 弹出托盘菜单（左键/右键单击）。弹出前同步刷新模式，保证状态行与图标
+/// 即点即见新值；菜单内**只收集动作**，`TrackPopupMenu` 返回（模态循环结束）
+/// 后再执行——面板窗口需要自己的消息循环，不能在菜单模态循环里创建（T-169）。
 fn show_menu(window: HWND) {
+    refresh_mode(window);
     let mode = read_mode();
     let status = if mode == zhu_ye_core::tray_state::MODE_ENGLISH {
         w!("模式：英文输入")
@@ -328,15 +371,18 @@ fn show_menu(window: HWND) {
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
         return;
     };
+    let mut point = POINT::default();
     unsafe {
         let _ = AppendMenuW(menu, MF_GRAYED, 0, status);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN_PANEL, w!("工具箱(&T)…"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN_SETTINGS, w!("打开设置(&S)…"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("退出(&X)"));
-        let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
-        let _ = TrackPopupMenu(
+    }
+    let command = unsafe {
+        TrackPopupMenu(
             menu,
             TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
             point.x,
@@ -344,8 +390,44 @@ fn show_menu(window: HWND) {
             None,
             window,
             None,
-        );
-        let _ = DestroyMenu(menu);
+        )
+        .0
+    };
+    let _ = unsafe { DestroyMenu(menu) };
+    // 模态菜单已收起：这时才允许创建面板。
+    #[allow(clippy::cast_sign_loss)]
+    let picked = command as usize;
+    if picked == MENU_OPEN_PANEL {
+        request_panel_toggle();
+    } else if picked == MENU_OPEN_SETTINGS {
+        open_settings();
+    } else if picked == MENU_EXIT {
+        request_exit(window);
+    }
+}
+
+/// 退出：移除图标、注销热键、结束任务队列线程后退出消息循环。
+fn request_exit(window: HWND) {
+    remove_tray_icon(window);
+    unsafe {
+        let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
+    }
+    task::request_shutdown();
+    unsafe { PostQuitMessage(0) };
+}
+
+/// 同步刷新模式与图标：读状态文件，模式变化才 `NIM_MODIFY`（单击/轮询共用）。
+fn refresh_mode(window: HWND) {
+    let mode = read_mode();
+    let mut guard = match TRAY.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let Some(state) = guard.as_mut() else {
+        return;
+    };
+    if mode != state.icon_mode && set_tray_icon(window, &mode, true).is_ok() {
+        state.icon_mode = mode;
     }
 }
 
@@ -440,6 +522,8 @@ fn main() -> windows::core::Result<()> {
         window: window.0 as isize,
         icon_mode: mode,
         last_mtime: None,
+        panel_open: false,
+        task_pending: false,
     };
     // 启动即记一次 mtime，避免第一帧重复更新图标。
     if let Some(path) = state_path() {
@@ -448,6 +532,12 @@ fn main() -> windows::core::Result<()> {
         }
     }
     *TRAY.lock().unwrap() = Some(state);
+    // 串行任务队列线程（T-169）：面板的创建/关闭全在它上面执行。
+    if let Err(error) = task::start(window) {
+        log_panel_hotkey(&format!(
+            "[error] 工具箱任务队列线程启动失败：{error}；降级为仅热键可用\n"
+        ));
+    }
 
     let _ = unsafe { SetTimer(Some(window), 1, POLL_MS, None) };
     unsafe {
@@ -457,6 +547,7 @@ fn main() -> windows::core::Result<()> {
             DispatchMessageW(&message);
         }
     }
+    task::request_shutdown();
     Ok(())
 }
 
@@ -468,23 +559,42 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_TRAY => match lparam.0 as u32 {
+            // 单击（左/右）= 菜单：状态行即点即刷新，动作在菜单收起后执行（T-169）。
             WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(window),
-            WM_LBUTTONDBLCLK => open_settings(),
-            _ => {}
-        },
-        WM_COMMAND => match wparam.0 & 0xFFFF {
-            id if id == MENU_OPEN_SETTINGS => open_settings(),
-            id if id == MENU_EXIT => {
-                remove_tray_icon(window);
-                unsafe {
-                    let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
-                }
-                PostQuitMessage(0);
+            // 双击 = 开关工具箱面板（T-169，FR-074）：等任务队列空闲再判断，保证只翻一次。
+            WM_LBUTTONDBLCLK => {
+                let open = wait_panel_state(1000)
+                    .or_else(|| {
+                        TRAY.lock()
+                            .ok()
+                            .and_then(|guard| guard.as_ref().map(|state| state.panel_open))
+                    })
+                    .unwrap_or(false);
+                request_panel(if open {
+                    PanelAction::Close
+                } else {
+                    PanelAction::Open
+                });
             }
             _ => {}
         },
-        WM_HOTKEY => toggle_panel(),
+        WM_TASK_DONE => {
+            // 任务线程回报（lparam 非 0 = 面板当前打开）：只更新缓存，不碰面板窗口。
+            if let Ok(mut guard) = TRAY.lock() {
+                if let Some(state) = guard.as_mut() {
+                    state.panel_open = lparam.0 != 0;
+                    state.task_pending = false;
+                }
+            }
+        }
+        WM_HOTKEY => request_panel_toggle(),
         WM_TIMER => poll(),
+        // 登录注销/关机：尽量移除图标，避免通知区残留幽灵图标。
+        WM_ENDSESSION => {
+            if wparam.0 != 0 {
+                remove_tray_icon(window);
+            }
+        }
         WM_DESTROY => {
             unsafe {
                 let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
@@ -494,4 +604,71 @@ unsafe extern "system" fn window_proc(
         _ => return DefWindowProcW(window, message, wparam, lparam),
     }
     LRESULT(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 菜单序列（T-169）：状态 → 分隔 → 面板 → 设置 → 分隔 → 退出。
+    #[test]
+    fn 菜单项标识唯一且面板优先于设置() {
+        let ids = [MENU_OPEN_PANEL, MENU_OPEN_SETTINGS, MENU_EXIT];
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
+        // 顺带固定菜单顺序：工具箱 → 打开设置 → 退出。
+        let max_index = ids
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, id)| **id)
+            .map(|(index, _)| index);
+        assert_eq!(max_index, Some(2), "退出应为最后一项");
+        assert_eq!(
+            ids.iter().copied().min(),
+            Some(MENU_OPEN_PANEL),
+            "工具箱应排在最前"
+        );
+    }
+
+    /// 菜单命令只在 `TrackPopupMenu` 返回后执行：源码契约——`TrackPopupMenu` 的
+    /// 调用必须先于动作分发，且两者之间只做收起菜单。
+    #[test]
+    fn 菜单动作在模态菜单收起后执行() {
+        // 同样只看生产代码：本测试文件自身也调用 `TrackPopupMenu(`。
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().expect("源码可分段");
+        let track = production
+            .find("TrackPopupMenu(")
+            .expect("必须调用 TrackPopupMenu");
+        let tail = &production[track..];
+        let dispatch = tail
+            .find("if picked == MENU_OPEN_PANEL")
+            .expect("分发代码存在");
+        let between = &tail[..dispatch];
+        assert!(
+            between.contains("DestroyMenu"),
+            "TrackPopupMenu 与分发之间应先收起菜单"
+        );
+        for action in [
+            "request_panel_toggle()",
+            "open_settings()",
+            "request_exit(window)",
+        ] {
+            let index = tail.find(action).expect("三个菜单动作都要分发");
+            assert!(index > dispatch, "菜单动作 {action} 必须在菜单收起后执行");
+        }
+    }
+
+    /// 面板创建不经托盘主线程：`PanelWindow::open` 只允许出现在 task 模块里。
+    #[test]
+    fn 面板创建隔离在任务队列线程() {
+        let source = include_str!("main.rs");
+        // 只看生产代码：`cfg(test)` 之后是本模块自身，不参与该契约。
+        let production = source.split("#[cfg(test)]").next().expect("源码可分段");
+        assert!(
+            !production.contains("PanelWindow::open"),
+            "托盘主线程不得直接创建面板（S-35：模态菜单期间会收不到消息）"
+        );
+    }
 }
