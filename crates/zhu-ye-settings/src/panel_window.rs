@@ -32,15 +32,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect, LoadCursorW, PostMessageW,
-    PostQuitMessage, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-    GWLP_USERDATA, GWL_EXSTYLE, HWND_TOPMOST, IDC_ARROW, MA_ACTIVATE, MA_NOACTIVATE,
-    SPI_GETWORKAREA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE,
-    WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_SETTINGCHANGE, WM_THEMECHANGED,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_POPUP,
+    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, HWND_TOPMOST, IDC_ARROW,
+    MA_ACTIVATE, MA_NOACTIVATE, SPI_GETWORKAREA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE,
+    WM_PAINT, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_POPUP,
 };
 
 use zhu_ye_ui::{UiRect, UiThemeKind, BASE_DPI};
@@ -136,6 +136,8 @@ impl PanelWindow {
             );
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let _ = UpdateWindow(hwnd);
+            // T-169：托盘双击唤起的入口登记了 Esc 窗口期——显示后进入（其它入口为 0，无事发生）。
+            begin_escape_window(hwnd);
             Ok(Self { hwnd })
         }
     }
@@ -144,6 +146,25 @@ impl PanelWindow {
     #[must_use]
     pub const fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// 让浏览态面板接管键盘一小段时间（T-169）：托盘双击呼出后，用户可再按一次
+    /// Esc 关闭面板。窗口期到点或鼠标进入面板即交还 NOACTIVATE，回到点格即上屏。
+    pub fn listen_escape(&mut self, milliseconds: u32) {
+        if self.hwnd.is_invalid() || milliseconds == 0 {
+            return;
+        }
+        unsafe {
+            if let Some(state) = panel_state_mut(self.hwnd) {
+                state.escape_for_milliseconds = milliseconds;
+            }
+            end_escape_window(self.hwnd);
+            let state = panel_state_mut(self.hwnd);
+            if state.is_some() {
+                let _ = SetForegroundWindow(self.hwnd);
+                let _ = SetTimer(Some(self.hwnd), ESCAPE_WINDOW_TIMER, milliseconds, None);
+            }
+        }
     }
 }
 
@@ -320,6 +341,9 @@ struct PanelState {
     target_hwnd: HWND,
     /// 独立消息循环场景（截图模式）在面板关闭后 `PostQuitMessage`。
     quit_on_close: bool,
+    /// 浏览态 Esc 关闭窗口期（T-169，毫秒）：托盘双击呼出后临时接管键盘，
+    /// 计时到点或鼠标进入面板即交还；`0` = 不接管（默认）。
+    escape_for_milliseconds: u32,
 }
 
 impl PanelState {
@@ -345,6 +369,7 @@ impl PanelState {
             search_active: false,
             target_hwnd: HWND::default(),
             quit_on_close,
+            escape_for_milliseconds: 0,
         }
     }
 
@@ -426,11 +451,16 @@ unsafe extern "system" fn panel_proc(
                 let _ = ScreenToClient(hwnd, &mut point);
                 if let Some(state) = panel_state_mut(hwnd) {
                     if hit_search_box(hwnd, state, point.x, point.y) {
-                        if !state.search_active {
-                            state.search_active = true;
-                            state.target_hwnd = GetForegroundWindow();
-                            // 移除 NOACTIVATE 使本次点击可激活窗口。
-                            set_no_activate(hwnd, false);
+                        // 进入搜索态要独占键盘：先结束 T-169 的 Esc 窗口期，
+                        // 否则点击松手后会有一小段"点格即上屏"的窗口抢焦点。
+                        end_escape_window(hwnd);
+                        if let Some(state) = panel_state_mut(hwnd) {
+                            if !state.search_active {
+                                state.search_active = true;
+                                state.target_hwnd = GetForegroundWindow();
+                                // 移除 NOACTIVATE 使本次点击可激活窗口。
+                                set_no_activate(hwnd, false);
+                            }
                         }
                         return LRESULT(MA_ACTIVATE as isize);
                     }
@@ -527,6 +557,11 @@ unsafe extern "system" fn panel_proc(
                             }
                             _ => {}
                         }
+                    } else if vk == u32::from(VK_ESCAPE.0) && state.escape_for_milliseconds != 0 {
+                        // T-169 浏览态 Esc：托盘双击呼出后的窗口期内，Esc 直接关闭面板
+                        // （托盘宿主无还焦目标，退出时不还原前台窗口）。
+                        end_escape_window(hwnd);
+                        close_panel(hwnd);
                     }
                 }
             }
@@ -544,6 +579,12 @@ unsafe extern "system" fn panel_proc(
                     dwHoverTime: 0,
                 };
                 let _ = TrackMouseEvent(&mut track);
+                // T-169：鼠标进面板即结束 Esc 窗口期，回落"点击即上屏、面板不抢焦"。
+                if panel_state_mut(hwnd)
+                    .is_some_and(|state| state.escape_for_milliseconds != 0 && !state.search_active)
+                {
+                    end_escape_window(hwnd);
+                }
                 if let Some(state) = panel_state_mut(hwnd) {
                     let next = hover_index(hwnd, state, x, y);
                     if next != state.hover {
@@ -562,6 +603,13 @@ unsafe extern "system" fn panel_proc(
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }
+            }
+            LRESULT(0)
+        }
+        // T-169：浏览态 Esc 窗口期到点即交还键盘，回到"点击即上屏、面板不抢焦"。
+        message if message == WM_TIMER && wparam.0 == ESCAPE_WINDOW_TIMER => {
+            unsafe {
+                end_escape_window(hwnd);
             }
             LRESULT(0)
         }
@@ -732,6 +780,35 @@ unsafe fn leave_search(hwnd: HWND, state: &mut PanelState, clear: bool) {
     state.hover = None;
     set_no_activate(hwnd, true);
     unsafe { invalidate(hwnd) };
+}
+
+/// 浏览态 Esc 关闭窗口期的定时器 ID（面板独立循环，与托盘 `WM_TIMER` 无关）。
+const ESCAPE_WINDOW_TIMER: usize = 0x5A79;
+
+/// 进入浏览态 Esc 窗口期（T-169）：托盘双击呼出后用户可再按 Esc 关闭面板。
+///
+/// 窗口期时长由 `PanelWindow::listen_escape` 写入 `escape_for_milliseconds`；
+/// 设置窗口入口从不进入（那里有自己的关闭路径与还焦目标），行为与 T-151 一致。
+unsafe fn begin_escape_window(hwnd: HWND) {
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+    let Some(milliseconds) =
+        (unsafe { panel_state_mut(hwnd) }).map(|state| state.escape_for_milliseconds)
+    else {
+        return;
+    };
+    if milliseconds == 0 {
+        return;
+    }
+    let _ = unsafe { SetTimer(Some(hwnd), ESCAPE_WINDOW_TIMER, milliseconds, None) };
+}
+
+/// 结束浏览态 Esc 窗口期：交还 NOACTIVATE（点格即上屏），撤掉定时器。
+unsafe fn end_escape_window(hwnd: HWND) {
+    if let Some(state) = unsafe { panel_state_mut(hwnd) } {
+        state.escape_for_milliseconds = 0;
+    }
+    let _ = unsafe { KillTimer(Some(hwnd), ESCAPE_WINDOW_TIMER) };
+    unsafe { set_no_activate(hwnd, true) };
 }
 
 /// 开关面板窗口的 `WS_EX_NOACTIVATE`（搜索态启用键盘时临时移除，S-32）。
