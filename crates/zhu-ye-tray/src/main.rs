@@ -27,10 +27,10 @@
 //! 全局单面板互斥（窗口类 `ZhuYeSettingsPanel` 唯一）：已打开则关闭（toggle），
 //! 未打开则按上次页签/位置记忆创建（详见 S-30、S-31、S-33）。
 //!
-//! 第十五期（T-169，FR-074）补齐**鼠标入口**：菜单新增"工具箱(&T)…"，双击
-//! 托盘图标直接开关面板。面板创建/关闭一律投递到自持的**串行任务队列线程**
-//! （本文件 [`task`]）执行，托盘主线程只读"面板已开"缓存并投递任务——主线程
-//! 永不被面板消息循环阻塞，面板销毁中途也不会被重入 toggle。
+//! 第十五期（T-169，FR-074）补齐**鼠标入口**：菜单新增"工具箱(&T)…"（双击托盘
+//! 仍是打开设置，保持用户既有习惯）。面板创建/关闭一律投递到自持的**串行任务
+//! 队列线程**（本文件 [`task`]）执行，托盘主线程只读"面板已开"缓存并投递任务——
+//! 主线程永不被面板消息循环阻塞，面板销毁中途也不会被重入 toggle。
 
 mod task;
 
@@ -79,8 +79,8 @@ const WM_TASK_DONE: u32 = WM_APP + 2;
 /// 状态轮询周期。
 const POLL_MS: u32 = 500;
 
-/// 托盘双击呼出面板后，Esc 关闭的窗口期（T-169，毫秒）：面板小胜前台并接管
-/// 键盘这么久，鼠标进入面板或到点即交还，回落"点格即上屏、面板不抢焦"。
+/// 从托盘菜单「工具箱」呼出面板后，Esc 关闭的窗口期（T-169，毫秒）：面板小胜前台
+/// 并接管键盘这么久，鼠标进入面板或到点即交还，回落"点格即上屏、面板不抢焦"。
 const PANEL_ESCAPE_MS: u32 = 1500;
 
 /// 单实例互斥名（会话级：每个登录用户一个托盘，与 HKCU Run 自启一致）。
@@ -102,8 +102,6 @@ struct TrayState {
     last_mtime: Option<SystemTime>,
     /// 工具箱面板当前是否打开（由任务线程回报维护，托盘线程只读，T-169）。
     panel_open: bool,
-    /// 是否已有面板任务在任务队列里排队/执行（回报后清零）。
-    task_pending: bool,
 }
 
 static TRAY: Mutex<Option<TrayState>> = Mutex::new(None);
@@ -240,7 +238,7 @@ fn register_panel_hotkey(window: HWND) -> bool {
     }
     // 无控制台（windows_subsystem）：失败原因落到 `%APPDATA%\zhu-ye-ime\panel-hotkey.log`。
     log_panel_hotkey(&format!(
-        "[error] 面板呼出热键注册失败（modifiers={modifiers:#x}, vk={vk:#x}），可能被其他程序占用；静默降级为托盘菜单/双击可用\n",
+        "[error] 面板呼出热键注册失败（modifiers={modifiers:#x}, vk={vk:#x}），可能被其他程序占用；静默降级为托盘菜单可用\n",
     ));
     false
 }
@@ -274,39 +272,11 @@ fn request_panel_toggle() {
     });
 }
 
-/// 投递一个面板任务并置"排队中"标记（防止双击在回报到达前重复投递）。
+/// 投递一个面板任务（热键与菜单「工具箱」两个入口共用）。
 fn request_panel(action: PanelAction) {
-    if task::dispatch(action) {
-        if let Ok(mut guard) = TRAY.lock() {
-            if let Some(state) = guard.as_mut() {
-                state.task_pending = true;
-            }
-        }
-    } else {
+    if !task::dispatch(action) {
         log_panel_hotkey("[error] 工具箱任务队列线程不可用，面板打开/关闭请求被丢弃\n");
     }
-}
-
-/// 等任务队列回报面板状态（带超时）：只用于**双击**的分支判断，保证
-/// "双击 = 面板状态恰好翻转一次"，不会在回报迟到时与热键互相覆盖。
-fn wait_panel_state(timeout_ms: u32) -> Option<bool> {
-    let mut waited = 0;
-    while waited < timeout_ms {
-        let pending = TRAY
-            .lock()
-            .ok()
-            .map(|guard| guard.as_ref().is_some_and(|state| state.task_pending))
-            .unwrap_or(false);
-        if !pending {
-            return TRAY
-                .lock()
-                .ok()
-                .and_then(|guard| guard.as_ref().map(|state| state.panel_open));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        waited += 5;
-    }
-    None
 }
 
 /// 打开设置窗口：与托盘同目录的 `zhu-ye-settings.exe`（worker copy-exe 部署位）。
@@ -523,7 +493,6 @@ fn main() -> windows::core::Result<()> {
         icon_mode: mode,
         last_mtime: None,
         panel_open: false,
-        task_pending: false,
     };
     // 启动即记一次 mtime，避免第一帧重复更新图标。
     if let Some(path) = state_path() {
@@ -561,21 +530,9 @@ unsafe extern "system" fn window_proc(
         WM_TRAY => match lparam.0 as u32 {
             // 单击（左/右）= 菜单：状态行即点即刷新，动作在菜单收起后执行（T-169）。
             WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(window),
-            // 双击 = 开关工具箱面板（T-169，FR-074）：等任务队列空闲再判断，保证只翻一次。
-            WM_LBUTTONDBLCLK => {
-                let open = wait_panel_state(1000)
-                    .or_else(|| {
-                        TRAY.lock()
-                            .ok()
-                            .and_then(|guard| guard.as_ref().map(|state| state.panel_open))
-                    })
-                    .unwrap_or(false);
-                request_panel(if open {
-                    PanelAction::Close
-                } else {
-                    PanelAction::Open
-                });
-            }
+            // 双击 = 打开设置（T-169：双击语义按用户要求保持不变，不占用给工具箱；
+            // 工具箱鼠标入口是菜单项，另有 Ctrl+Alt+E 热键）。
+            WM_LBUTTONDBLCLK => open_settings(),
             _ => {}
         },
         WM_TASK_DONE => {
@@ -583,7 +540,6 @@ unsafe extern "system" fn window_proc(
             if let Ok(mut guard) = TRAY.lock() {
                 if let Some(state) = guard.as_mut() {
                     state.panel_open = lparam.0 != 0;
-                    state.task_pending = false;
                 }
             }
         }
