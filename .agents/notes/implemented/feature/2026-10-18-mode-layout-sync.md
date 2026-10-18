@@ -70,5 +70,6 @@ symbol mapping holds naturally.
 - Deployed (2026-10-18, PR #211 → develop f74619e): DLL
   `zhu_ye_ime_A4277E6B.dll` (2,260,480 B) landed with pointers switched and
   ctfmon restarted (PID 18940); verify-tsf-dll/identity passed. Real-host
-  verification (grey "A/" on English mode, disappears on Chinese,
-  `@`/`:`/`?` correct in English mode) stays pending.
+  acceptance passed (2026-10-18, user confirmed): grey "A/" appears on
+  English mode and disappears on Chinese, `@`/`:`/`?` correct in English
+  mode; the task is closed (todos T-168 done).
