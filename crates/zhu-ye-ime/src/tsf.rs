@@ -662,10 +662,23 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             shift_key_down(),
             self.state(),
         );
-        // T-114 后续：Shift 键按下不立即切换中英——空闲态非重复 Shift 只进入
-        // 待定切换（弹起时再判定"单独按下"），组合态/长按直接放行宿主，
-        // 避免 Shift+`?`/`+` 等组合输入时顺带切走中文模式。
+        // T-114 后续 / T-172：Shift 键按下——
+        // - **组合态**（候选已出）：对齐搜狗，**上屏当前候选并切到英文模式**
+        //   （上屏动作在编辑会话内完成：`handle_space` 上屏选中候选并记用户
+        //   词；随后引擎切英文，系统布局联动 T-168）；
+        // - **空闲态**：非重复 Shift 只进入待定切换（弹起时判定单独按下）；
+        // - 组合态 Shift+`?`/`+` 等后续组合输入：Shift-down 已上屏后，其余
+        //   键按常规处理（组合已结束，不再被吞）。
         if code == VK_SHIFT.0 {
+            if compose_shift_commit(&mut state_lock(self).engine) {
+                // 组合态已上屏：更新候选窗并切英文。
+                refresh_candidate_window(self.state(), None);
+                sync_engine(self.state(), KeyAction::ToggleMode);
+                if should_log(zhu_ye_core::LogLevel::Debug) {
+                    debug_log("zhu-ye: shift-down commit-and-english (combinational)");
+                }
+                return Ok(BOOL(1));
+            }
             if action == Some(KeyAction::ToggleMode) {
                 state_lock(self).pending_shift_toggle = true;
                 if should_log(zhu_ye_core::LogLevel::Debug) {
@@ -931,6 +944,19 @@ fn is_ctrl_space_up(ctrl_age_ms: Option<u64>, ctrl_down: bool, intervened: bool)
 
 /// T-165：连打窗口——Ctrl 弹起到 Space 弹起的最大间隔（毫秒）。
 const CTRL_SPACE_UP_WINDOW_MS: u64 = 200;
+
+/// T-172：组合态 Shift 上屏——候选已出（`engine.is_active()`）时按搜狗语义
+/// 立即上屏当前选中候选（`handle_space`：提交选中并记用户词）。返回是否
+/// 处理（组合态为真）；空闲态返回 false 由调用方走既有待定切换路径。
+/// 抽出为函数便于单测（模式切换由调用方统一走 sync_engine）。
+#[must_use]
+fn compose_shift_commit(engine: &mut InputEngine) -> bool {
+    if !engine.is_active() {
+        return false;
+    }
+    let _ = engine.handle_space();
+    true
+}
 
 /// 判断 Shift 修饰键是否按下（英文布局上档字符判定，T-066）。
 fn shift_key_down() -> bool {
@@ -2373,6 +2399,20 @@ mod tests {
             !is_ctrl_space_up(Some(80), false, true),
             "干预过且刚弹起也不判定"
         );
+    }
+
+    /// T-172：组合态 Shift 直接上屏当前选中候选（搜狗语义）；空闲态不处理。
+    #[test]
+    fn 组合态shift上屏选中空闲态不处理() {
+        let mut engine = create_engine(None);
+        assert!(!compose_shift_commit(&mut engine), "空闲态不处理");
+        for c in "nihao".chars() {
+            let _ = engine.handle_letter(c);
+        }
+        assert!(engine.is_active(), "输入后应处于组合态");
+        assert!(!engine.candidates().is_empty(), "组合态应有候选");
+        assert!(compose_shift_commit(&mut engine), "组合态应上屏");
+        assert!(!engine.is_active(), "上屏后组合结束");
     }
 
     /// T-168：中英模式对应系统键盘布局（英文→US 0x04090409 使任务栏显示
