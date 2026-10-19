@@ -35,12 +35,11 @@
 mod task;
 
 use std::ffi::c_void;
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::System::Threading::{
     CreateMutexW, CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
@@ -49,22 +48,20 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, VK_CONTROL, VK_F24, VK_SPACE,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW,
-    PostQuitMessage, RegisterClassW, SetTimer, SetWindowsHookExW, TrackPopupMenu, TranslateMessage,
-    UnhookWindowsHookEx, CW_USEDEFAULT, HHOOK, HICON, IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR,
-    MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN,
-    TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
-    WM_DESTROY, WM_ENDSESSION, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
+    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW, PostQuitMessage,
+    RegisterClassW, SetTimer, TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HICON, IMAGE_ICON,
+    LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON,
+    TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
+    WM_DESTROY, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
+    WNDCLASSW,
 };
 
 use crate::task::PanelAction;
@@ -97,12 +94,6 @@ const MENU_EXIT: usize = 3;
 
 /// 面板呼出热键的注册 ID（本进程内唯一，用于 RegisterHotKey/UnregisterHotKey 配对）。
 const PANEL_HOTKEY_ID: i32 = 0x5A7A;
-
-/// T-165：Ctrl 按下状态（LL 键盘钩子回调维护；钩子在托盘消息线程单线程
-/// 执行，原子类型仅为跨线程防御性正确）。
-static CTRL_PRESSED: AtomicBool = AtomicBool::new(false);
-/// T-165：LL 键盘钩子句柄（指针值存储保持 Send；托盘常驻期间持有）。
-static KEYBOARD_HOOK: Mutex<Option<isize>> = Mutex::new(None);
 
 /// 托盘运行状态（经全局静态供窗口回调访问；窗口句柄以指针值存储以保持 Send）。
 struct TrayState {
@@ -267,54 +258,6 @@ fn log_panel_hotkey(message: &str) {
         .and_then(|mut file| std::io::Write::write_all(&mut file, message.as_bytes()));
 }
 
-/// T-165：LL 键盘钩子回调——跟踪 Ctrl 按下状态；检测到 Ctrl+Space 时注入
-/// 无修饰转义键 F24（竹叶 TSF 识别后切中英）。**不吞键**（CallNextHookEx
-/// 放行），系统把 Ctrl+Space 的保留键路由照常给搜狗，双方中英切换互不干扰。
-unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && lparam.0 != 0 {
-        let kbd = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        let vk = kbd.vkCode as u16;
-        let msg = wparam.0 as u32;
-        let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-        if vk == VK_CONTROL.0 {
-            CTRL_PRESSED.store(down, std::sync::atomic::Ordering::SeqCst);
-        } else if vk == VK_SPACE.0 && down && CTRL_PRESSED.load(std::sync::atomic::Ordering::SeqCst)
-        {
-            keybd_event(VK_F24.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-            keybd_event(VK_F24.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        }
-    }
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
-}
-
-/// 安装 LL 键盘钩子（T-165）。失败（罕见）静默降级为仅 Shift 切换。
-fn install_keyboard_hook() -> bool {
-    let hmod = unsafe { GetModuleHandleW(None) }
-        .ok()
-        .map(|m| HINSTANCE(m.0));
-    match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod, 0) } {
-        Ok(hook) => {
-            if let Ok(mut guard) = KEYBOARD_HOOK.lock() {
-                *guard = Some(hook.0 as isize);
-            }
-            true
-        }
-        Err(err) => {
-            log_panel_hotkey(&format!("[error] 键盘钩子安装失败 {err:?}\n"));
-            false
-        }
-    }
-}
-
-/// 注销 LL 键盘钩子（退出时）。
-fn uninstall_keyboard_hook() {
-    if let Ok(mut guard) = KEYBOARD_HOOK.lock() {
-        if let Some(hook) = guard.take() {
-            let _ = unsafe { UnhookWindowsHookEx(HHOOK(hook as *mut c_void)) };
-        }
-    }
-}
-
 /// 面板已开（本进程任务线程持有）时请求关闭；未开则投递创建任务（T-169 串行队列）。
 fn request_panel_toggle() {
     let open = TRAY
@@ -439,7 +382,6 @@ fn request_exit(window: HWND) {
     unsafe {
         let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
     }
-    uninstall_keyboard_hook();
     task::request_shutdown();
     unsafe { PostQuitMessage(0) };
 }
@@ -546,8 +488,6 @@ fn main() -> windows::core::Result<()> {
     set_tray_icon(window, &mode, false)?;
     // 面板呼出热键（FR-070）：注册失败（占用/系统拒绝）不阻断托盘启动。
     register_panel_hotkey(window);
-    // T-165：LL 键盘钩子（Ctrl+Space 检测 + F24 转义注入，不吞键、不抢搜狗）。
-    install_keyboard_hook();
     let mut state = TrayState {
         window: window.0 as isize,
         icon_mode: mode,
@@ -615,7 +555,6 @@ unsafe extern "system" fn window_proc(
             unsafe {
                 let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
             }
-            uninstall_keyboard_hook();
             PostQuitMessage(0);
         }
         _ => return DefWindowProcW(window, message, wparam, lparam),

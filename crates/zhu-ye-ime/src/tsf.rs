@@ -36,8 +36,8 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ActivateKeyboardLayout, GetKeyState, ACTIVATE_KEYBOARD_LAYOUT_FLAGS, HKL, VIRTUAL_KEY, VK_0,
-    VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE, VK_F24, VK_MENU,
-    VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
+    VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_OEM_1,
+    VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
     VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
@@ -215,6 +215,15 @@ struct EngineState {
     /// Shift 键按下（Shift+`?`/`+` 等组合）则取消。只有单独按下并弹起的
     /// Shift 才切换中英模式。
     pending_shift_toggle: bool,
+    /// T-165：Ctrl 键按下状态（事件驱动，与 Shift 待定切换同理）。依据：
+    /// 系统把 Ctrl+Space 的 **KEYDOWN 作为 IME 开关保留组合吃掉**（TSF 收
+    /// 不到 Space 的 down），但 **Ctrl 的 down/up 与 Space 的 KEYUP 都到达
+    /// 键回调**（哨兵日志实证：`DOWN 0x11`/`UP 0x20`/`UP 0x11`）。因此
+    /// `OnKeyDown(VK_CONTROL)` 置位、`OnKeyUp(VK_CONTROL)` 清除，
+    /// `OnKeyUp(VK_SPACE)` 在置位期间判定为 Ctrl+Space → 切换（Ctrl 先松
+    /// 开/后松开均覆盖：Space 弹起瞬间 Ctrl 通常仍按住；先松 Ctrl 的乱序
+    /// 属罕见，误判无害）。
+    ctrl_down: bool,
 }
 
 /// T-046：跨线程共享的引擎状态（语言栏点击切换模式需要）。
@@ -318,6 +327,7 @@ impl EngineState {
             candidate_window: CandidateWindow::with_theme(configured_theme_preference()),
             lang_bar: None,
             pending_shift_toggle: false,
+            ctrl_down: false,
         }
     }
 
@@ -333,6 +343,7 @@ impl EngineState {
             candidate_window: configured_candidate_window(),
             lang_bar: None,
             pending_shift_toggle: false,
+            ctrl_down: false,
         }
     }
 }
@@ -619,15 +630,11 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
 
     fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         let code = VIRTUAL_KEY(wparam.0 as u16).0;
-        // T-165：F24 转义键 = 托盘 LL 键盘钩子检测到 Ctrl+Space 后注入的
-        // 无修饰键（系统把 Ctrl+Space 作为 IME 开关保留、TSF 收不到它的
-        // KEYDOWN，且保留键只路由给先注册的搜狗；钩子不吞键、搜狗照常
-        // 收到，竹叶通过 F24 自切——互不干扰）。
-        if code == VK_F24.0 {
-            debug_log("zhu-ye: ctrl+space (F24 escape) ToggleMode");
-            sync_engine(self.state(), KeyAction::ToggleMode);
-            refresh_candidate_window(self.state(), None);
-            return Ok(BOOL(1));
+        // T-165：Ctrl 键 down 事件驱动置位（Ctrl+Space 的判定依据；Ctrl 本身
+        // 无输入语义，放行宿主）。
+        if code == VK_CONTROL.0 {
+            state_lock(self).ctrl_down = true;
+            return Ok(BOOL(0));
         }
         let action = plan_action(
             wparam,
@@ -699,11 +706,27 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         Ok(BOOL(1))
     }
     fn OnKeyUp(&self, _pic: Ref<'_, ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+        let code = VIRTUAL_KEY(wparam.0 as u16).0;
+        // T-165：Ctrl 弹起清除状态（Space 弹起判定用；Ctrl 无输入语义放行）。
+        if code == VK_CONTROL.0 {
+            state_lock(self).ctrl_down = false;
+            return Ok(BOOL(0));
+        }
+        // T-165：Ctrl+Space 的 KEYDOWN 被系统 IME 开关层吃掉（TSF 收不到
+        // Space 的 down），但 Space 的 KEYUP 会到达（哨兵日志实证）——
+        // 在 Ctrl 处于按下状态期间收到 Space 弹起即判定为 Ctrl+Space，
+        // 与 Shift 弹起判定同一套事件驱动机制（Ctrl 先松开再松 Space 的
+        // 乱序属罕见，该情况不切换、无害）。
+        if code == VK_SPACE.0 && is_ctrl_space_up(code, state_lock(self).ctrl_down) {
+            state_lock(self).ctrl_down = false;
+            debug_log("zhu-ye: ctrl+space ToggleMode (space-up)");
+            sync_engine(self.state(), KeyAction::ToggleMode);
+            refresh_candidate_window(self.state(), None);
+            return Ok(BOOL(1));
+        }
         // T-114 后续：只有"单独按下并弹起"的 Shift 才切换中英——弹起瞬间判定
         // 待定切换是否仍在（期间有非 Shift 键按下则已被取消）。
-        if VIRTUAL_KEY(wparam.0 as u16).0 == VK_SHIFT.0
-            && shift_up_should_toggle(&mut state_lock(self))
-        {
+        if code == VK_SHIFT.0 && shift_up_should_toggle(&mut state_lock(self)) {
             sync_engine(self.state(), KeyAction::ToggleMode);
             refresh_candidate_window(self.state(), None);
             if should_log(zhu_ye_core::LogLevel::Debug) {
@@ -862,6 +885,13 @@ fn digit_index(digit: char) -> usize {
         '0' => 9,
         d => d as usize - '1' as usize,
     }
+}
+
+/// T-165：Ctrl+Space 弹起判定——`code` 为空格（Space 的 KEYUP）且 Ctrl
+/// 按下状态为真（事件驱动；抽取为纯函数便于单测）。
+#[must_use]
+fn is_ctrl_space_up(code: u16, ctrl_down: bool) -> bool {
+    ctrl_down && code == VK_SPACE.0
 }
 
 /// 判断 Shift 修饰键是否按下（英文布局上档字符判定，T-066）。
@@ -2278,6 +2308,18 @@ mod tests {
         assert!(to_wide_no_term("").is_empty());
         // 对照：PCWSTR 用的 to_wide 必须带空结尾（供指针类 API 消费）。
         assert_eq!(to_wide("你好").pop(), Some(0));
+    }
+
+    /// T-165：Ctrl+Space 弹起判定（事件驱动状态机：Space 的 KEYUP 到达 TSF
+    /// 且 Ctrl 处于按下状态 → 切换；普通空格/无 Ctrl 不判定）。
+    #[test]
+    fn ctrl空格弹起判定() {
+        assert!(
+            is_ctrl_space_up(VK_SPACE.0, true),
+            "Ctrl 按下时 Space 弹起应判定"
+        );
+        assert!(!is_ctrl_space_up(VK_SPACE.0, false), "无 Ctrl 不判定");
+        assert!(!is_ctrl_space_up(VK_A.0, true), "Ctrl+字母弹起不判定");
     }
 
     /// T-168：中英模式对应系统键盘布局（英文→US 0x04090409 使任务栏显示
