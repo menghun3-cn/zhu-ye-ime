@@ -12,16 +12,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::user_dict::{UserDictionary, UserWord};
+use crate::user_dict::{UserDictionary, UserTransition, UserWord};
 
 /// 当前用户词库文件格式版本。
-pub const USER_DICT_FORMAT_VERSION: u32 = 1;
+///
+/// v2（T-174）新增 `transitions` 段（用户级二元语法）；v1 文件读取时
+/// **无损迁移**（词条保留、转移置空）并原子重写为 v2。
+pub const USER_DICT_FORMAT_VERSION: u32 = 2;
+
+/// 最低可迁移版本（T-174）。
+///
+/// 低于该版本的文件**无法**无损迁移（无版本字段的早期格式），按损坏处理
+/// （备份 `.bak` 后重建空库）。
+pub const MIN_MIGRATABLE_USER_DICT_VERSION: u32 = 1;
 
 /// 磁盘文件格式容器；`entries` 由 `words_sorted` 产出，顺序确定。
 #[derive(Debug, Serialize, Deserialize)]
 struct FileFormat {
     version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     entries: Vec<UserWord>,
+    /// 用户级二元转移（T-174）；v1 文件无此段，读取时置空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    transitions: Vec<UserTransition>,
 }
 
 /// 当前 Unix 时间秒；仅供 IME/CLI 记录选择时间使用。
@@ -53,6 +66,11 @@ pub enum UserWordsProbe {
 }
 
 /// 只读探测用户词库文件；见 [`UserWordsProbe`]。
+///
+/// **版本语义（T-174）**：v1（无 `transitions` 段）**可无损迁移**为 v2，
+/// 因此**不算损坏**——若把 v1 判为损坏，设置窗口的「一级修复」会建议重建
+/// 并丢掉用户全部词条。只有**低于可迁移版本**（当前为 v0，即无版本字段的
+/// 早期格式）才按损坏处理，与 `load` 的恢复语义保持一致。
 #[must_use]
 pub fn probe_user_words_file(path: &Path) -> UserWordsProbe {
     let bytes = match fs::read(path) {
@@ -68,10 +86,10 @@ pub fn probe_user_words_file(path: &Path) -> UserWordsProbe {
         UserWordsProbe::NewerVersion {
             found: format.version,
         }
-    } else if format.version == USER_DICT_FORMAT_VERSION {
+    } else if format.version >= MIN_MIGRATABLE_USER_DICT_VERSION {
         UserWordsProbe::Ok
     } else {
-        // 与 `load` 的恢复语义一致：低版本视为损坏，备份重建。
+        // 低于可迁移版本：与 `load` 的恢复语义一致，视为损坏（备份重建）。
         UserWordsProbe::Corrupt
     }
 }
@@ -99,6 +117,11 @@ impl UserDictStore {
     }
 
     /// 加载用户词库；文件不存在返回空库，内容损坏时备份并重建空库。
+    ///
+    /// **版本迁移（T-174）**：v1 文件（无 `transitions` 段）读取时按「词条完整
+    /// 保留、转移置空」升级为 v2 并原子重写，**词条零丢失**；低于可迁移
+    /// 版本（v0）按损坏处理（备份重建），版本高于当前支持时拒绝读（避免
+    /// 丢内容）。
     pub fn load(&self) -> Result<UserDictionary> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
@@ -126,10 +149,21 @@ impl UserDictStore {
                 self.path.display()
             )));
         }
-        if format.version < USER_DICT_FORMAT_VERSION {
+        if format.version < MIN_MIGRATABLE_USER_DICT_VERSION {
+            // 低于可迁移版本（无版本字段的早期格式）：按损坏处理（备份重建）。
             return self.recover_corrupt();
         }
-        Ok(UserDictionary::from_entries(format.entries))
+        if format.version < USER_DICT_FORMAT_VERSION {
+            // v1 → v2 无损迁移：词条保留、转移置空，落盘为 v2。
+            let migrated =
+                UserDictionary::from_entries_and_transitions(format.entries, format.transitions);
+            self.save(&migrated)?;
+            return Ok(migrated);
+        }
+        Ok(UserDictionary::from_entries_and_transitions(
+            format.entries,
+            format.transitions,
+        ))
     }
 
     /// 原子保存用户词库：先写同目录临时文件，再替换目标文件。
@@ -137,6 +171,7 @@ impl UserDictStore {
         let format = FileFormat {
             version: USER_DICT_FORMAT_VERSION,
             entries: dictionary.words_sorted(),
+            transitions: dictionary.transitions_sorted(),
         };
         let bytes = serde_json::to_vec_pretty(&format)
             .map_err(|error| Error::UserDictionary(format!("序列化用户词库失败: {error}")))?;
@@ -268,6 +303,62 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// T-174：v1 文件读取时**无损迁移**为 v2——词条完整保留、转移置空，
+    /// 且磁盘文件被原子重写为 v2。
+    #[test]
+    fn v1文件无损迁移为v2() {
+        let (store, dir) = store_in("migrate-v1");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            store.path(),
+            r#"{"version": 1, "entries": [{"word": "竹叶", "pinyin": "zhuye", "frequency": 3, "last_used": 100}]}"#,
+        )
+        .unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.frequency("竹叶", "zhuye"), 3, "v1 词条必须完整保留");
+        assert_eq!(loaded.transition_count(), 0, "v1 无转移段");
+
+        // 磁盘文件已升级为 v2。
+        let text = fs::read_to_string(store.path()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["version"], 2, "文件应被重写为 v2");
+        assert_eq!(value["entries"][0]["word"], "竹叶", "重写后词条仍在");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// T-174：v2 文件的转移段往返保持一致。
+    #[test]
+    fn v2转移段往返一致() {
+        let (store, dir) = store_in("roundtrip-v2");
+        let mut dict = UserDictionary::new();
+        dict.record_selection("你好", "nihao", 1);
+        dict.record_transition("我说", "你好", "nihao", 2);
+        store.save(&dict).unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.transition_frequency("我说", "你好"), 1);
+        assert_eq!(loaded.frequency("你好", "nihao"), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// T-174：v1 之后的旧版本（v0）仍按损坏处理（备份重建），保持既有语义。
+    #[test]
+    fn v0文件按损坏处理备份重建() {
+        let (store, dir) = store_in("v0");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            store.path(),
+            r#"{"version": 0, "entries": [{"word": "竹叶", "pinyin": "zhuye", "frequency": 3}]}"#,
+        )
+        .unwrap();
+
+        let loaded = store.load().unwrap();
+        assert!(loaded.is_empty(), "v0 视为损坏并重建空库");
+        assert!(store.path().with_extension("bak").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn 损坏文件备份并重建空库() {
         let (store, dir) = store_in("corrupt");
@@ -318,9 +409,15 @@ mod tests {
         assert!(!path.with_extension("bak").exists(), "探针不得备份或重建");
         assert!(path.exists());
 
-        // 低于当前版本：与 load 的恢复语义一致视为损坏。
+        // 低于可迁移版本（v0，无版本字段的早期格式）：与 load 的恢复语义
+        // 一致视为损坏。
         fs::write(path, r#"{"version": 0, "entries": []}"#).unwrap();
         assert_eq!(probe_user_words_file(path), UserWordsProbe::Corrupt);
+
+        // v1：可无损迁移为 v2，**不算损坏**——否则设置窗口的「一级修复」会
+        // 建议重建并丢掉用户全部词条。
+        fs::write(path, r#"{"version": 1, "entries": []}"#).unwrap();
+        assert_eq!(probe_user_words_file(path), UserWordsProbe::Ok);
 
         // 高于当前版本：应升级读取方，不属于"改名重建"场景。
         fs::write(path, r#"{"version": 99, "entries": []}"#).unwrap();

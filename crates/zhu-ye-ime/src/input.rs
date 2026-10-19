@@ -1566,8 +1566,16 @@ impl InputEngine {
     }
 
     fn record_user_word(&mut self, text: &str, pinyin: &str) {
-        self.user_dictionary
-            .record_selection(text, pinyin, unix_now());
+        // T-174 第 2 层：记录「前词 → 当前词」的个人转移。调用点在
+        // `commit_candidate` 中、且**早于** `previous_word` 被本次上屏词覆盖，
+        // 因此此处 `self.previous_word` 仍是**上屏前**的前词——正是转移的来源。
+        // 首词（无前词）不构成转移，由 `record_transition` 自身忽略空前词。
+        let now = unix_now();
+        if let Some(previous) = self.previous_word.as_deref() {
+            self.user_dictionary
+                .record_transition(previous, text, pinyin, now);
+        }
+        self.user_dictionary.record_selection(text, pinyin, now);
         if let Some(store) = &self.user_store {
             // 保存失败不打断输入；词条仍保留在内存中供本次会话排序。
             let _ = store.save(&self.user_dictionary);
@@ -1906,6 +1914,24 @@ impl InputEngine {
                 self.candidates = prepend_group(constrained, main);
             }
         }
+        // T-173 第 1/3 层：用户词**独立候选组**前置——用户词不再只作为加分项
+        // 与全局词频竞争（实测「逆势」用户用过 6 次仍被「你是」词典频次 5010
+        // 压到第 17 位），而是独立成组、组内只按个人偏好排序。
+        // 位置：手动分隔符组（T-128 硬边界＝最强意图）之后，其余追加组之前。
+        // 第 3 层：词典未收录的用户词（生造词）由 core 侧按「该拼音在词典无
+        // 整词命中」准入，保证这类词也能出现在候选里。
+        if !self.composing.is_empty() && !self.user_dictionary.is_empty() {
+            let user_group = zhu_ye_core::candidate::user_group_candidates(
+                &self.user_dictionary,
+                self.dictionary.as_ref(),
+                &self.composing,
+                self.previous_word.as_deref(),
+            );
+            if !user_group.is_empty() {
+                let main = std::mem::take(&mut self.candidates);
+                self.candidates = prepend_group(user_group, main);
+            }
+        }
         // FR-029（场景7）：整串拼音等于别名时把 emoji 追加到候选**尾部**；
         // 只占队尾、不参与排序（score 取 i64::MIN），保证 T-057 命中率不回退。
         if let Some(emoji) = zhu_ye_core::emoji_for(&self.composing) {
@@ -1947,6 +1973,22 @@ impl InputEngine {
     #[must_use]
     pub fn user_dictionary(&self) -> &UserDictionary {
         &self.user_dictionary
+    }
+
+    /// 用户词库可变引用（T-173/T-174）。
+    ///
+    /// 供设置窗口直接编辑词条、以及调用方注入个人化偏好使用；修改后调用方
+    /// 需自行 `refresh_candidates` 才会影响候选显示。
+    pub fn user_dictionary_mut(&mut self) -> &mut UserDictionary {
+        &mut self.user_dictionary
+    }
+
+    /// 设置参与上下文排序的前词（T-174 用户级二元语法的上下文入口）。
+    ///
+    /// 正常输入流中前词由上屏自动维护（`commit_candidate` 等）；此接口供
+    /// 需要显式设定上下文的场景（如宿主恢复会话、测试构造）。
+    pub fn set_previous_word(&mut self, previous: Option<&str>) {
+        self.previous_word = previous.map(str::to_owned);
     }
 }
 
@@ -2769,23 +2811,156 @@ mod tests {
     }
 
     #[test]
-    fn 用户词选择多次后提升候选排序() {
+    fn 用户词选择一次即置顶独立候选组() {
+        // T-173 第 1 层：用户词不再只作为加分项与全局词频竞争，而是**独立
+        // 候选组**前置——用过一次即置顶（搜狗范式）。旧实现需累积到足够权重
+        // 才能压过全局常用词，本测试改为验证新语义。
         let dir = temp_dir("user-promote");
         let store = UserDictStore::new(dir.join("user_words.json"));
         let mut engine = InputEngine::with_user_store(m1_seed_dictionary(), store.clone());
 
+        // 初始：种子词典里「你好」(100) 远高于「尼好」(1)，「你好」在前。
         type_text(&mut engine, "nihao");
         assert_eq!(engine.candidates()[0].text, "你好");
+        assert_eq!(
+            engine.candidates()[0].source,
+            zhu_ye_core::candidate::CandidateSource::Static
+        );
+
+        // 选中第 2 个候选「尼好」并上屏 → 进入用户词库。
         engine.select_index(1);
+
+        // 再输同一拼音：「尼好」作为用户词独立成组，**立即置顶**（不再需要
+        // 累积多次），且来源标为 User。
         type_text(&mut engine, "nihao");
-        engine.select_index(1);
-        type_text(&mut engine, "nihao");
-        engine.select_index(1);
-        type_text(&mut engine, "nihao");
-        assert_eq!(engine.candidates()[0].text, "尼好");
+        assert_eq!(
+            engine.candidates()[0].text,
+            "尼好",
+            "用户词用过一次即应置顶"
+        );
         assert_eq!(
             engine.candidates()[0].source,
             zhu_ye_core::candidate::CandidateSource::User
+        );
+        // 组内第二位仍是全局静态候选（「你好」）。
+        assert_eq!(engine.candidates()[1].text, "你好");
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// T-173 第 3 层：词典未收录的用户词（生造词）也能进入候选并置顶。
+    #[test]
+    fn 词典外用户词进入候选并置顶() {
+        let dir = temp_dir("made-up-word");
+        let store = UserDictStore::new(dir.join("user_words.json"));
+        // 种子词典里没有「你觉得」这个词条（生造词场景）。
+        let mut engine = InputEngine::with_user_store(m1_seed_dictionary(), store.clone());
+
+        // 先让「你觉得」进入用户词库。
+        engine
+            .user_dictionary_mut()
+            .record_selection("你觉得", "nijuede", 1);
+        engine
+            .user_dictionary_mut()
+            .record_selection("你觉得", "nijuede", 2);
+
+        type_text(&mut engine, "nijuede");
+        assert_eq!(
+            engine.candidates()[0].text,
+            "你觉得",
+            "词典未收录的用户词也应出现在候选中"
+        );
+        assert_eq!(
+            engine.candidates()[0].source,
+            zhu_ye_core::candidate::CandidateSource::User
+        );
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// T-174 第 2 层：上屏两个词后记录「前词→当前词」转移；首词不记。
+    #[test]
+    fn 上屏记录二元转移() {
+        let dir = temp_dir("transition");
+        let store = UserDictStore::new(dir.join("user_words.json"));
+        let mut engine = InputEngine::with_user_store(m1_seed_dictionary(), store.clone());
+
+        // 上屏第一个词（无前词 → 不构成转移）。
+        type_text(&mut engine, "nihao");
+        engine.select_index(0);
+        assert_eq!(
+            engine.user_dictionary().transition_count(),
+            0,
+            "首词无前词，不应记录转移"
+        );
+
+        // 再上屏第二个词（前词 = 第一个词 → 记录转移）。
+        type_text(&mut engine, "nihao");
+        engine.select_index(0);
+        assert_eq!(
+            engine.user_dictionary().transition_count(),
+            1,
+            "第二个词应记录一条转移"
+        );
+        assert_eq!(
+            engine
+                .user_dictionary()
+                .transition_frequency("你好", "你好"),
+            1,
+            "转移为「你好→你好」"
+        );
+        drop(engine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// T-174 第 2 层：同一拼音下，有上下文转移的候选排在无转移候选之前。
+    #[test]
+    fn 上下文转移提升用户词组内次序() {
+        let dir = temp_dir("transition-order");
+        let store = UserDictStore::new(dir.join("user_words.json"));
+        let mut engine = InputEngine::with_user_store(m1_seed_dictionary(), store.clone());
+
+        // 种子词典 `nihao` 有「你好」(100) 与「尼好」(1)；两者都收录，故都
+        // 属第 1 层（词典已收录的用户词）——都会进入用户词组。
+        engine
+            .user_dictionary_mut()
+            .record_selection("你好", "nihao", 1);
+        engine
+            .user_dictionary_mut()
+            .record_selection("你好", "nihao", 2);
+        engine
+            .user_dictionary_mut()
+            .record_selection("尼好", "nihao", 1);
+        // 上下文：前词「我说」后习惯接「尼好」。
+        engine
+            .user_dictionary_mut()
+            .record_transition("我说", "尼好", "nihao", 1);
+
+        // 无上下文时按个人频次排：你好(2×48=96) > 尼好(1×48=48)。
+        type_text(&mut engine, "nihao");
+        let user_sources: Vec<_> = engine
+            .candidates()
+            .iter()
+            .filter(|c| c.source == zhu_ye_core::candidate::CandidateSource::User)
+            .map(|c| c.text.clone())
+            .collect();
+        assert_eq!(user_sources, vec!["你好".to_owned(), "尼好".to_owned()]);
+
+        // 有上下文时：尼好 得 1×48+1×64=112 > 你好 96 → 尼好 在前。
+        // 注意顺序：先设前词、再清组合态（Esc 不清前词），最后重新输入。
+        engine.handle_escape();
+        engine.set_previous_word(Some("我说"));
+        type_text(&mut engine, "nihao");
+        let user_sources: Vec<_> = engine
+            .candidates()
+            .iter()
+            .filter(|c| c.source == zhu_ye_core::candidate::CandidateSource::User)
+            .map(|c| c.text.clone())
+            .collect();
+        assert_eq!(
+            user_sources,
+            vec!["尼好".to_owned(), "你好".to_owned()],
+            "有上下文转移时尼好应排在你好之前"
         );
         drop(engine);
         std::fs::remove_dir_all(dir).unwrap();
@@ -3351,6 +3526,65 @@ mod tests {
             "zheng\u{2019}que",
             "页眉应显示校正形式 zheng'que"
         );
+    }
+
+    /// T-173/T-174（真实词典 + 真实用户词库端到端，ignored）：验证三层
+    /// 个人化在**部署位真实数据**下的实际效果。
+    ///
+    /// 需本机存在 `%ProgramFiles%\zhu-ye-ime\tsf\dictionary.zyct` 与
+    /// `%APPDATA%\zhu-ye-ime\user_words.json`。
+    #[test]
+    #[ignore = "需部署位真实词典与用户词库"]
+    fn 真实数据下用户词置顶与生造词兜底() {
+        let dict_path =
+            std::path::PathBuf::from(r"C:\Program Files\zhu-ye-ime\tsf\dictionary.zyct");
+        if !dict_path.exists() {
+            eprintln!("跳过：部署位词典不存在");
+            return;
+        }
+        let dictionary: Arc<dyn Dictionary> = Arc::new(
+            zhu_ye_core::dict_loader::DictionaryFile::open(&dict_path).expect("词典应可打开"),
+        );
+        let store = zhu_ye_core::user_store::UserDictStore::new(
+            std::env::var_os("APPDATA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+                .join("zhu-ye-ime")
+                .join("user_words.json"),
+        );
+        let user = store.load().expect("用户词库应可加载");
+        if user.is_empty() {
+            eprintln!("跳过：用户词库为空");
+            return;
+        }
+        eprintln!("用户词库 {} 条", user.len());
+
+        // 逐个拼音打印候选次序与来源，供人工判读。
+        for pinyin in [
+            "nishi",
+            "niyou",
+            "nihao",
+            "nijuede",
+            "nijueseruhe",
+            "shenme",
+        ] {
+            let bigram: Arc<dyn zhu_ye_core::bigram::BigramModel> = Arc::new(
+                zhu_ye_core::dict_loader::DictionaryFile::open(&dict_path).expect("词典应可打开"),
+            );
+            let mut engine =
+                InputEngine::with_user_store_and_bigram(dictionary.clone(), store.clone(), bigram);
+            type_text(&mut engine, pinyin);
+            eprintln!("=== {pinyin} ===");
+            for (index, candidate) in engine.candidates().iter().take(5).enumerate() {
+                eprintln!(
+                    " {:>2}. {:<10} source={:?} 用户频次={}",
+                    index + 1,
+                    candidate.text,
+                    candidate.source,
+                    user.frequency_by_word(&candidate.text)
+                );
+            }
+        }
     }
 
     #[test]
