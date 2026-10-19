@@ -258,6 +258,79 @@ fn combine_segments(dictionary: &dyn Dictionary, segments: &[String]) -> Option<
     Some(Candidate::new(combined, total).with_pinyin(combined_pinyin))
 }
 
+/// 用户词组内「用户频次」的单次权重（T-173 第 1 层）。
+///
+/// 与全局排序的 `user_weight` 保持同一量级，便于两类信号在同一组内比较。
+pub const USER_GROUP_FREQUENCY_WEIGHT: u64 = 48;
+
+/// 用户词组内「上下文转移频次」的单次权重（T-174 第 2 层）。
+///
+/// 大于 `USER_GROUP_FREQUENCY_WEIGHT`——「特定上下文下的偏好」优先于
+/// 「无条件的偏好」。
+pub const USER_GROUP_TRANSITION_WEIGHT: u64 = 64;
+
+/// 生成用户词独立候选组（T-173 第 1 层 + 第 3 层）。
+///
+/// 用户词不再只作为**加分项**参与全局词频竞争，而是作为**独立候选组**
+/// 返回——组内排序**只**使用个人信号（用户频次、上下文转移频次），
+/// **不掺入词典频次**。这正是搜狗「输入过的词下次排最前」的实现范式：
+/// 全局常用词（「你是」词典频次 5010）压不过个人偏好时，用户词仍是首候选。
+///
+/// - `pinyin`：组合串的完整拼音（等值匹配，不做前缀匹配——避免碎片拼音误注）；
+/// - `previous`：当前前词（用于第 2 层的上下文转移加分），为空表示无上下文；
+/// - `dictionary`：静态词典查询口——用于第 3 层判定某用户词是否**已被词典
+///   收录**。词典已收录的词由基础候选正常产出（不重复注入）；词典未收录的
+///   生造词（实测本机用户词库 235 条中 11 条属此类）只有当该拼音在词典
+///   **无整词命中**时才注入，保证这类词仍能出现在候选里。
+///
+/// 组内分：`用户频次×48 + 上下文转移频次×64`（同分按词文本稳定定序）。
+/// 返回的候选来源统一为 [`CandidateSource::User`]。
+#[must_use]
+pub fn user_group_candidates(
+    user_dictionary: &UserDictionary,
+    dictionary: &dyn Dictionary,
+    pinyin: &str,
+    previous: Option<&str>,
+) -> Vec<Candidate> {
+    if pinyin.is_empty() {
+        return Vec::new();
+    }
+    // 该拼音在静态词典中的整词命中集合（第 3 层准入判定）。
+    let static_hits: std::collections::HashSet<String> = dictionary
+        .lookup(pinyin)
+        .into_iter()
+        .map(|entry| entry.word)
+        .collect();
+    let mut collected: Vec<Candidate> = Vec::new();
+    for entry in user_dictionary.words_by_pinyin(pinyin) {
+        // 第 1 层：词典**已收录**的用户词照样注入（组内置顶）——这正是
+        // 「逆势」类场景：它在词典里（频次 2850）但被全局常用词「你是」
+        // （5010）压制，需要独立候选组把它提到前面。
+        //
+        // 第 3 层：词典**未收录**的生造词（实测本机 235 条用户词中 11 条）
+        // 仅当该拼音在词典**无整词命中**时注入——否则基础候选已能覆盖该
+        // 拼音，注入生造词只会挤占正常候选的位置。
+        if !static_hits.contains(&entry.word) && !static_hits.is_empty() {
+            continue;
+        }
+        let user_frequency = user_dictionary.frequency_by_word(&entry.word);
+        let transition_frequency = previous.map_or(0, |prev| {
+            user_dictionary.transition_frequency(prev, &entry.word)
+        });
+        let score = user_frequency
+            .saturating_mul(USER_GROUP_FREQUENCY_WEIGHT)
+            .saturating_add(transition_frequency.saturating_mul(USER_GROUP_TRANSITION_WEIGHT))
+            .min(i64::MAX as u64);
+        collected.push(
+            Candidate::new(entry.word.clone(), i64::try_from(score).unwrap_or(i64::MAX))
+                .with_pinyin(entry.pinyin.clone())
+                .with_source(CandidateSource::User),
+        );
+    }
+    collected.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.text.cmp(&b.text)));
+    collected
+}
+
 /// 显式音节边界下的组合候选（T-128，音节分隔符）：取满足 `hard` 硬边界的
 /// 第一种切分方案（与自动分隔使用的"首选切分"语义一致）按每音节词典首条
 /// 拼成**单一**组合候选返回。
@@ -1182,8 +1255,9 @@ mod tests {
         append_abbreviation_group, constrained_segment_candidates, corrected_candidates,
         generate_candidates, generate_prefix_candidates, initial_candidates, is_abbreviation_input,
         merge_candidate_groups, prefix_expand_candidates, sentence_candidates,
-        transposed_candidates, Candidate, CandidateSorter, CandidateSource, RankingConfig,
-        RankingContext, RankingModel, StaticRankingModel,
+        transposed_candidates, user_group_candidates, Candidate, CandidateSorter, CandidateSource,
+        RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+        USER_GROUP_FREQUENCY_WEIGHT, USER_GROUP_TRANSITION_WEIGHT,
     };
     use crate::dict::{DictionaryEntry, InMemoryDictionary};
     use crate::pinyin::SyllableTable;
@@ -1208,6 +1282,85 @@ mod tests {
             DictionaryEntry::new("九九六", "996", 5000),
             DictionaryEntry::new("内卷", "neijuan", 5000),
         ])
+    }
+
+    /// T-173 第 1 层：用户词独立候选组——组内只按个人偏好排序，
+    /// **不掺入词典频次**（这是与全局排序的本质区别）。
+    #[test]
+    fn 用户词组只按个人偏好排序不掺入词典频次() {
+        // 词典里「你是」频次远高于「逆势」，但用户词组只看个人频次。
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("你是", "nishi", 5010),
+            DictionaryEntry::new("逆势", "nishi", 2850),
+        ]);
+        let mut user = UserDictionary::new();
+        user.record_selection("逆势", "nishi", 1);
+        let group = user_group_candidates(&user, &dictionary, "nishi", None);
+        assert_eq!(group.len(), 1);
+        assert_eq!(group[0].text, "逆势");
+        assert_eq!(group[0].source, CandidateSource::User);
+        assert_eq!(
+            group[0].score,
+            i64::try_from(USER_GROUP_FREQUENCY_WEIGHT).unwrap(),
+            "组内分只由个人频次决定"
+        );
+    }
+
+    /// T-173 第 3 层：词典未收录的用户词（生造词）能进入候选组。
+    #[test]
+    fn 词典外用户词注入候选组() {
+        // 词典完全没有「nijuede」这个词条。
+        let dictionary =
+            InMemoryDictionary::from_entries(vec![DictionaryEntry::new("你好", "nihao", 100)]);
+        let mut user = UserDictionary::new();
+        user.record_selection("你觉得", "nijuede", 1);
+        let group = user_group_candidates(&user, &dictionary, "nijuede", None);
+        assert_eq!(group.len(), 1, "词典外的用户词应被注入");
+        assert_eq!(group[0].text, "你觉得");
+        assert_eq!(group[0].source, CandidateSource::User);
+    }
+
+    /// T-173 第 3 层：词典**已有整词命中**时，词典外的生造词不注入
+    /// （否则会挤占正常候选的位置）。
+    #[test]
+    fn 词典有命中时不注入词典外用户词() {
+        let dictionary =
+            InMemoryDictionary::from_entries(vec![DictionaryEntry::new("你好", "nihao", 100)]);
+        let mut user = UserDictionary::new();
+        user.record_selection("你觉得", "nihao", 1);
+        let group = user_group_candidates(&user, &dictionary, "nihao", None);
+        assert!(group.is_empty(), "词典有整词命中时生造词不注入");
+    }
+
+    /// T-174 第 2 层：上下文转移频次参与用户词组打分并可反超无条件偏好。
+    #[test]
+    fn 用户词组计入上下文转移频次() {
+        let dictionary =
+            InMemoryDictionary::from_entries(vec![DictionaryEntry::new("你好", "nihao", 100)]);
+        let mut user = UserDictionary::new();
+        user.record_selection("你好", "nihao", 1);
+        user.record_transition("我说", "你好", "nihao", 1);
+        let without_context = user_group_candidates(&user, &dictionary, "nihao", None);
+        let with_context = user_group_candidates(&user, &dictionary, "nihao", Some("我说"));
+        assert_eq!(
+            without_context[0].score,
+            i64::try_from(USER_GROUP_FREQUENCY_WEIGHT).unwrap()
+        );
+        assert_eq!(
+            with_context[0].score,
+            i64::try_from(USER_GROUP_FREQUENCY_WEIGHT + USER_GROUP_TRANSITION_WEIGHT).unwrap(),
+            "有上下文时得分更高"
+        );
+    }
+
+    /// T-173：空拼音与无匹配时返回空组（不介入既有路径，零漂移）。
+    #[test]
+    fn 用户词组空输入返回空() {
+        let dictionary =
+            InMemoryDictionary::from_entries(vec![DictionaryEntry::new("你好", "nihao", 100)]);
+        let user = UserDictionary::new();
+        assert!(user_group_candidates(&user, &dictionary, "", None).is_empty());
+        assert!(user_group_candidates(&user, &dictionary, "nishi", None).is_empty());
     }
 
     #[test]
