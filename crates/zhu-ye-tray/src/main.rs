@@ -48,7 +48,8 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
+    keybd_event, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_KEYUP, MOD_CONTROL, MOD_NOREPEAT, VK_F24, VK_SPACE,
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -94,6 +95,10 @@ const MENU_EXIT: usize = 3;
 
 /// 面板呼出热键的注册 ID（本进程内唯一，用于 RegisterHotKey/UnregisterHotKey 配对）。
 const PANEL_HOTKEY_ID: i32 = 0x5A7A;
+/// Ctrl+Space 中英切换热键的注册 ID（T-165 转义桥：系统把 Ctrl+Space 作为
+/// IME 开关保留组合、TSF 收不到 Space-down，由托盘以系统热键抢得后注入
+/// 无修饰转义键 F24，TSF 收到后切换中英）。
+const CTRL_SPACE_HOTKEY_ID: i32 = 0x5A7B;
 
 /// 托盘运行状态（经全局静态供窗口回调访问；窗口句柄以指针值存储以保持 Send）。
 struct TrayState {
@@ -243,6 +248,24 @@ fn register_panel_hotkey(window: HWND) -> bool {
     false
 }
 
+/// 注册 Ctrl+Space 中英切换热键（T-165 转义桥）。失败（被其他程序占用）时写
+/// 一行日志并静默降级（Shift 切换不受影响）。
+fn register_ctrl_space_hotkey(window: HWND) -> bool {
+    let result = unsafe {
+        RegisterHotKey(
+            Some(window),
+            CTRL_SPACE_HOTKEY_ID,
+            HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_NOREPEAT.0),
+            u32::from(VK_SPACE.0),
+        )
+    };
+    if result.is_ok() {
+        return true;
+    }
+    log_panel_hotkey("[error] Ctrl+Space 热键注册失败，可能被其他程序占用；降级为仅 Shift 切换\n");
+    false
+}
+
 /// 追加一行面板相关日志（`%APPDATA%\zhu-ye-ime\panel-hotkey.log`，失败静默）。
 fn log_panel_hotkey(message: &str) {
     let Some(mut path) = std::env::var_os("APPDATA").map(std::path::PathBuf::from) else {
@@ -381,6 +404,7 @@ fn request_exit(window: HWND) {
     remove_tray_icon(window);
     unsafe {
         let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
+        let _ = UnregisterHotKey(Some(window), CTRL_SPACE_HOTKEY_ID);
     }
     task::request_shutdown();
     unsafe { PostQuitMessage(0) };
@@ -488,6 +512,9 @@ fn main() -> windows::core::Result<()> {
     set_tray_icon(window, &mode, false)?;
     // 面板呼出热键（FR-070）：注册失败（占用/系统拒绝）不阻断托盘启动。
     register_panel_hotkey(window);
+    // T-165：Ctrl+Space 中英切换热键（转义桥）。托盘常驻期间持有；
+    // 托盘退出时 UnregisterHotKey（WM_DESTROY/request_exit）。
+    register_ctrl_space_hotkey(window);
     let mut state = TrayState {
         window: window.0 as isize,
         icon_mode: mode,
@@ -543,7 +570,18 @@ unsafe extern "system" fn window_proc(
                 }
             }
         }
-        WM_HOTKEY => request_panel_toggle(),
+        WM_HOTKEY => match wparam.0 as i32 {
+            PANEL_HOTKEY_ID => request_panel_toggle(),
+            // T-165 转义桥：Ctrl+Space 被系统作为 IME 开关保留组合（TSF 收不到
+            // Space 的 KEYDOWN），托盘热键抢得后注入无修饰转义键 F24，TSF
+            // 识别 F24 后切换中英（F24 会被托盘活动时焦点中的宿主收到并转给
+            // TSF，多数应用无 F24 快捷键）。
+            CTRL_SPACE_HOTKEY_ID => unsafe {
+                keybd_event(VK_F24.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+                keybd_event(VK_F24.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+            },
+            _ => {}
+        },
         WM_TIMER => poll(),
         // 登录注销/关机：尽量移除图标，避免通知区残留幽灵图标。
         WM_ENDSESSION => {
@@ -554,6 +592,7 @@ unsafe extern "system" fn window_proc(
         WM_DESTROY => {
             unsafe {
                 let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
+                let _ = UnregisterHotKey(Some(window), CTRL_SPACE_HOTKEY_ID);
             }
             PostQuitMessage(0);
         }
