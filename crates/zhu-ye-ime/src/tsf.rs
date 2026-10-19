@@ -220,10 +220,17 @@ struct EngineState {
     /// 不到 Space 的 down），但 **Ctrl 的 down/up 与 Space 的 KEYUP 都到达
     /// 键回调**（哨兵日志实证：`DOWN 0x11`/`UP 0x20`/`UP 0x11`）。因此
     /// `OnKeyDown(VK_CONTROL)` 置位、`OnKeyUp(VK_CONTROL)` 清除，
-    /// `OnKeyUp(VK_SPACE)` 在置位期间判定为 Ctrl+Space → 切换（Ctrl 先松
-    /// 开/后松开均覆盖：Space 弹起瞬间 Ctrl 通常仍按住；先松 Ctrl 的乱序
-    /// 属罕见，误判无害）。
+    /// `OnKeyUp(VK_SPACE)` 在置位期间判定为 Ctrl+Space → 切换。
     ctrl_down: bool,
+    /// T-165 连打增强：Ctrl 弹起时刻（`None` = 不在窗口期）；快速连按
+    /// Ctrl+Space 时"先松 Ctrl 后松 Space"会让 Space 弹起晚于 Ctrl 弹起，
+    /// 此时用 Ctrl 弹起后 **200ms 窗口**兜底判定（搜狗基于 down 事件无此
+    /// 时序问题，我们只能拿到 up 事件，需窗口补偿）。
+    ctrl_up_at: Option<std::time::SystemTime>,
+    /// T-165 连打增强：Ctrl 按下期间是否出现过**其它键**（Ctrl+字母/符号
+    /// 等组合）——若出现过，之后的 Space 弹起**不**判为 Ctrl+Space
+    /// （避免 Ctrl+C 复制后立刻按空格被误判切换）。
+    ctrl_intervened: bool,
 }
 
 /// T-046：跨线程共享的引擎状态（语言栏点击切换模式需要）。
@@ -328,6 +335,8 @@ impl EngineState {
             lang_bar: None,
             pending_shift_toggle: false,
             ctrl_down: false,
+            ctrl_up_at: None,
+            ctrl_intervened: false,
         }
     }
 
@@ -344,6 +353,8 @@ impl EngineState {
             lang_bar: None,
             pending_shift_toggle: false,
             ctrl_down: false,
+            ctrl_up_at: None,
+            ctrl_intervened: false,
         }
     }
 }
@@ -631,10 +642,18 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         let code = VIRTUAL_KEY(wparam.0 as u16).0;
         // T-165：Ctrl 键 down 事件驱动置位（Ctrl+Space 的判定依据；Ctrl 本身
-        // 无输入语义，放行宿主）。
+        // 无输入语义，放行宿主）。按下即重置连打窗口状态。
         if code == VK_CONTROL.0 {
-            state_lock(self).ctrl_down = true;
+            let mut state = state_lock(self);
+            state.ctrl_down = true;
+            state.ctrl_up_at = None;
+            state.ctrl_intervened = false;
             return Ok(BOOL(0));
+        }
+        // T-165 连打增强：Ctrl 按住期间出现其它键（Ctrl+字母/符号等组合）
+        // → 标记干预，之后的 Space 弹起不再判为 Ctrl+Space（防误切）。
+        if code != VK_SPACE.0 && state_lock(self).ctrl_down {
+            state_lock(self).ctrl_intervened = true;
         }
         let action = plan_action(
             wparam,
@@ -707,22 +726,36 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     }
     fn OnKeyUp(&self, _pic: Ref<'_, ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
         let code = VIRTUAL_KEY(wparam.0 as u16).0;
-        // T-165：Ctrl 弹起清除状态（Space 弹起判定用；Ctrl 无输入语义放行）。
+        // T-165：Ctrl 弹起记录时刻并清除按下态（Space 弹起判定与连打窗口用）。
         if code == VK_CONTROL.0 {
-            state_lock(self).ctrl_down = false;
+            let mut state = state_lock(self);
+            state.ctrl_down = false;
+            state.ctrl_up_at = Some(std::time::SystemTime::now());
             return Ok(BOOL(0));
         }
         // T-165：Ctrl+Space 的 KEYDOWN 被系统 IME 开关层吃掉（TSF 收不到
         // Space 的 down），但 Space 的 KEYUP 会到达（哨兵日志实证）——
-        // 在 Ctrl 处于按下状态期间收到 Space 弹起即判定为 Ctrl+Space，
-        // 与 Shift 弹起判定同一套事件驱动机制（Ctrl 先松开再松 Space 的
-        // 乱序属罕见，该情况不切换、无害）。
-        if code == VK_SPACE.0 && is_ctrl_space_up(code, state_lock(self).ctrl_down) {
-            state_lock(self).ctrl_down = false;
-            debug_log("zhu-ye: ctrl+space ToggleMode (space-up)");
-            sync_engine(self.state(), KeyAction::ToggleMode);
-            refresh_candidate_window(self.state(), None);
-            return Ok(BOOL(1));
+        // Space 弹起时按「Ctrl 仍按住 ∨ 刚弹起（≤200ms 连打窗口）」且无
+        // Ctrl 组合干预 → 判定 Ctrl+Space 切换；与 Shift 弹起切换同一套
+        // 事件驱动机制。
+        if code == VK_SPACE.0 {
+            let mut state = state_lock(self);
+            let ctrl_age_ms = state.ctrl_up_at.map(|at| {
+                std::time::SystemTime::now()
+                    .duration_since(at)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(u64::MAX)
+            });
+            if is_ctrl_space_up(ctrl_age_ms, state.ctrl_down, state.ctrl_intervened) {
+                state.ctrl_down = false;
+                state.ctrl_up_at = None;
+                state.ctrl_intervened = false;
+                drop(state);
+                debug_log("zhu-ye: ctrl+space ToggleMode (space-up)");
+                sync_engine(self.state(), KeyAction::ToggleMode);
+                refresh_candidate_window(self.state(), None);
+                return Ok(BOOL(1));
+            }
         }
         // T-114 后续：只有"单独按下并弹起"的 Shift 才切换中英——弹起瞬间判定
         // 待定切换是否仍在（期间有非 Shift 键按下则已被取消）。
@@ -887,12 +920,17 @@ fn digit_index(digit: char) -> usize {
     }
 }
 
-/// T-165：Ctrl+Space 弹起判定——`code` 为空格（Space 的 KEYUP）且 Ctrl
-/// 按下状态为真（事件驱动；抽取为纯函数便于单测）。
+/// T-165：Ctrl+Space 弹起判定——Space 的 KEYUP 到达且要么 Ctrl 仍按住、
+/// 要么 Ctrl 在 `CTRL_SPACE_UP_WINDOW_MS` 内刚弹起（快速连按时"先松 Ctrl
+/// 后松 Space"的时序补偿）；`intervened`（Ctrl 期间出现过其它键）时永不
+/// 判定（防 Ctrl+C 后空格误切）。抽取为纯函数便于单测。
 #[must_use]
-fn is_ctrl_space_up(code: u16, ctrl_down: bool) -> bool {
-    ctrl_down && code == VK_SPACE.0
+fn is_ctrl_space_up(ctrl_age_ms: Option<u64>, ctrl_down: bool, intervened: bool) -> bool {
+    !intervened && (ctrl_down || ctrl_age_ms.is_some_and(|age| age <= CTRL_SPACE_UP_WINDOW_MS))
 }
+
+/// T-165：连打窗口——Ctrl 弹起到 Space 弹起的最大间隔（毫秒）。
+const CTRL_SPACE_UP_WINDOW_MS: u64 = 200;
 
 /// 判断 Shift 修饰键是否按下（英文布局上档字符判定，T-066）。
 fn shift_key_down() -> bool {
@@ -2311,15 +2349,30 @@ mod tests {
     }
 
     /// T-165：Ctrl+Space 弹起判定（事件驱动状态机：Space 的 KEYUP 到达 TSF
-    /// 且 Ctrl 处于按下状态 → 切换；普通空格/无 Ctrl 不判定）。
+    /// 且 Ctrl 仍按住，或在 200ms 连打窗口内刚弹起、且无 Ctrl 组合干预）。
     #[test]
     fn ctrl空格弹起判定() {
         assert!(
-            is_ctrl_space_up(VK_SPACE.0, true),
-            "Ctrl 按下时 Space 弹起应判定"
+            is_ctrl_space_up(None, true, false),
+            "Ctrl 按住时 Space 弹起应判定"
         );
-        assert!(!is_ctrl_space_up(VK_SPACE.0, false), "无 Ctrl 不判定");
-        assert!(!is_ctrl_space_up(VK_A.0, true), "Ctrl+字母弹起不判定");
+        assert!(
+            is_ctrl_space_up(Some(120), false, false),
+            "Ctrl 弹起 200ms 内应判定（快速连打）"
+        );
+        assert!(
+            !is_ctrl_space_up(Some(300), false, false),
+            "超 200ms 窗口不判定"
+        );
+        assert!(!is_ctrl_space_up(None, false, false), "无 Ctrl 不判定");
+        assert!(
+            !is_ctrl_space_up(None, true, true),
+            "Ctrl 组合干预过不判定（Ctrl+字母后空格）"
+        );
+        assert!(
+            !is_ctrl_space_up(Some(80), false, true),
+            "干预过且刚弹起也不判定"
+        );
     }
 
     /// T-168：中英模式对应系统键盘布局（英文→US 0x04090409 使任务栏显示
