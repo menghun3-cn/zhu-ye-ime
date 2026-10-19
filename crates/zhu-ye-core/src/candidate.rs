@@ -812,17 +812,31 @@ pub fn transposed_candidates(
     }
     let mut collected: Vec<Candidate> = Vec::new();
     let mut seen_pinyin: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for variant in transposition_variants(pinyin) {
+    // T-172b：两阶段枚举变体——**可完整切分**的变体优先（错位串真正的
+    // 修正目标，如 `zhegnque→zhengque` 可切分），再补不可切分变体的前缀
+    // 补全（低价值、易被噪声占满额度）。单阶段顺序枚举会让靠前的无效变体
+    // 抢光额度（实测 `zhegnque` 只出「则/咋/责」而漏掉「正确」）。
+    let variants = transposition_variants(pinyin);
+    let mut segmented: Vec<&String> = Vec::new();
+    let mut unsegmented: Vec<&String> = Vec::new();
+    for variant in &variants {
         if !seen_pinyin.insert(variant.clone()) {
             continue;
         }
-        let variant_candidates = if segment_all(table, &variant).is_empty() {
-            let groups = generate_prefix_candidates(table, dictionary, &variant, completion_cap);
+        if segment_all(table, variant).is_empty() {
+            unsegmented.push(variant);
+        } else {
+            segmented.push(variant);
+        }
+    }
+    for variant in segmented.into_iter().chain(unsegmented) {
+        let variant_candidates = if segment_all(table, variant).is_empty() {
+            let groups = generate_prefix_candidates(table, dictionary, variant, completion_cap);
             let mut all = groups.completions;
             all.extend(groups.completed);
             all
         } else {
-            generate_candidates(table, dictionary, &variant)
+            generate_candidates(table, dictionary, variant)
         };
         for mut candidate in variant_candidates {
             candidate.source = CandidateSource::Corrected;

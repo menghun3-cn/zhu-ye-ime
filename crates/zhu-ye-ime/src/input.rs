@@ -9,7 +9,7 @@ use std::path::Path;
 
 use zhu_ye_core::bigram::{BigramModel, EmptyBigramModel};
 use zhu_ye_core::candidate::{
-    Candidate, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
+    Candidate, CandidateSource, RankingConfig, RankingContext, RankingModel, StaticRankingModel,
 };
 use zhu_ye_core::dict::{Dictionary, InMemoryDictionary};
 use zhu_ye_core::pinyin::{segment_all, SyllableTable};
@@ -910,6 +910,12 @@ impl InputEngine {
     /// 查询键 `composing` 本身不含分隔符（去噪）。
     #[must_use]
     pub fn composing_display(&self) -> String {
+        // T-172b：错位串命中校正词时，页眉显示**校正后的拼音**（按音节边界
+        // 加分隔符，如 `zhegnque` → `zheng'que`），对齐搜狗的"自动校正预判
+        // 显示"；未命中校正词时沿用原显示（手动/自动分隔符）。
+        if let Some(display) = self.corrected_display() {
+            return display;
+        }
         let mut boundaries: std::collections::BTreeSet<usize> =
             self.manual_seps.iter().copied().collect();
         if self.mode == InputMode::Chinese {
@@ -929,6 +935,45 @@ impl InputEngine {
             display.push(SYLLABLE_SEP_DISPLAY);
         }
         display
+    }
+
+    /// T-172b：校正显示串——首候选为错序校正词（`CandidateSource::Corrected`）
+    /// 且其正确拼音可完整切分时，返回带音节分隔符的校正拼音（如
+    /// `zhegnque` → `zheng'que`）；不满足条件返回 `None`。
+    fn corrected_display(&self) -> Option<String> {
+        if self.mode != InputMode::Chinese {
+            return None;
+        }
+        let candidate = self.candidates.first()?;
+        if candidate.source != CandidateSource::Corrected {
+            return None;
+        }
+        let pinyin = candidate.pinyin.as_ref()?;
+        // 仅当校正拼音是**当前输入串的字母重排**（同长度、字符多重集相同）
+        // 才采用校正显示——避免退格后残留旧候选把页眉劫持（如 `nihao` 退格
+        // 成 `niha`，旧候选「你好」仍在，不应显示成 `ni'hao`）。
+        if pinyin.len() != self.composing.len() {
+            return None;
+        }
+        let mut current: Vec<char> = self.composing.chars().collect();
+        let mut corrected: Vec<char> = pinyin.chars().collect();
+        current.sort_unstable();
+        corrected.sort_unstable();
+        if current != corrected {
+            return None;
+        }
+        let boundaries = preferred_segment_boundaries(&self.table, pinyin);
+        if boundaries.is_empty() {
+            return None;
+        }
+        let mut display = String::with_capacity(pinyin.len());
+        for (index, c) in pinyin.char_indices() {
+            if index > 0 && boundaries.contains(&index) {
+                display.push(SYLLABLE_SEP_DISPLAY);
+            }
+            display.push(c);
+        }
+        Some(display)
     }
 
     /// Backspace 删除最后一个拼音字母；无组合时返回 `false`。
@@ -1233,14 +1278,19 @@ impl InputEngine {
         self.is_active().then(|| self.composing.clone())
     }
 
-    /// T-115 后续：错序容错追加组（主候选不足一页且 `enable_fuzzy` 时）。
+    /// T-115 后续：错序容错组（`enable_fuzzy` 时）。
     /// 与 M7 纠错（FR-024）互补：FR-024 只能处理可完整切分串（模糊替换/
     /// 少字母补全），错位串（`zhegnq→zhengq` 等）不可切分故漏掉——本组
     /// 枚举相邻字母交换变体出候选，标注 Corrected、pinyin=变体（正确拼音）。
     /// 主链路与前缀路径共用本入口，防止任一路径漏接。
+    ///
+    /// T-172b：校正组**置顶**（对齐搜狗——错序串的校正词优先展示）。触发
+    /// 条件由"主候选不足一页"改为"**输入串不可完整切分**"：真实词典下错位
+    /// 串会先命中前缀补全（`zhegnque` → 这/者/遮…）填满一页，旧的页数门
+    /// 会把校正组整组挡掉（用户看不到「正确」）。
     #[must_use]
-    fn append_transposed_group(&self, mut main: Vec<Candidate>, composing: &str) -> Vec<Candidate> {
-        if self.enable_fuzzy && main.len() < self.page_size {
+    fn append_transposed_group(&self, main: Vec<Candidate>, composing: &str) -> Vec<Candidate> {
+        if self.enable_fuzzy && segment_all(&self.table, composing).is_empty() {
             // 注：`composing` 为去噪拼音（手动分隔符在 `manual_seps`），因此
             // 带分隔符串（`zhegn'que`）同样在此整串换位（`zhegnque→zhengque`），
             // 显示层按 `manual_seps` 插回 `'`（T-172 测试固化）。
@@ -1251,7 +1301,7 @@ impl InputEngine {
                 PREFIX_COMPLETION_CAP,
             );
             if !transposed.is_empty() {
-                main = append_group(main, transposed);
+                return prepend_group(transposed, main);
             }
         }
         main
@@ -3243,6 +3293,63 @@ mod tests {
                 .iter()
                 .any(|(text, pinyin)| text == "正确" && pinyin == "zhengque"),
             "应校正出 正确/zhengque，实际: {corrected:?}"
+        );
+    }
+
+    #[test]
+    fn 错位串校正词置顶且页眉显示校正形式() {
+        // T-172b：`zhegnque` 命中校正词「正确」时——① 校正词置顶（用户第一
+        // 屏可见，对齐搜狗）；② 页眉显示校正后的拼音形式 `zheng'que`。
+        use zhu_ye_core::dict::{DictionaryEntry, InMemoryDictionary};
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("正确", "zhengque", 75),
+            DictionaryEntry::new("正", "zheng", 70),
+            DictionaryEntry::new("确", "que", 60),
+        ]);
+        let mut engine =
+            InputEngine::with_bigram(Arc::new(dictionary), Arc::new(InMemoryBigramModel::new()));
+        type_text(&mut engine, "zhegnque");
+        let first = engine.candidates().first().cloned();
+        let first = first.expect("错位串应有候选");
+        assert_eq!(first.text, "正确", "校正词应置顶为首候选");
+        assert_eq!(
+            first.source,
+            zhu_ye_core::candidate::CandidateSource::Corrected,
+            "首候选应标注为校正来源"
+        );
+        assert_eq!(
+            engine.composing_display(),
+            "zheng\u{2019}que",
+            "页眉应显示校正形式 zheng'que"
+        );
+    }
+
+    /// T-172b（真实词典端到端，ignored）：部署位真实词典下 `zhegnque` 的
+    /// 首候选应为校正词「正确」、页眉显示 `zheng'que`。需本机存在
+    /// `%ProgramFiles%\zhu-ye-ime\tsf\dictionary.zyct`。
+    #[test]
+    #[ignore = "需部署位真实词典"]
+    fn 真实词典下错位串zhegnque出正确并显示校正形式() {
+        let path = std::path::PathBuf::from(r"C:\Program Files\zhu-ye-ime\tsf\dictionary.zyct");
+        if !path.exists() {
+            eprintln!("跳过：部署位词典不存在");
+            return;
+        }
+        let dictionary: Arc<dyn Dictionary> =
+            Arc::new(zhu_ye_core::dict_loader::DictionaryFile::open(&path).expect("词典应可打开"));
+        let mut engine = InputEngine::new(dictionary);
+        type_text(&mut engine, "zhegnque");
+        let first = engine.candidates().first().cloned().expect("应有候选");
+        assert_eq!(first.text, "正确", "真实词典下首候选应为「正确」");
+        assert_eq!(
+            first.source,
+            zhu_ye_core::candidate::CandidateSource::Corrected,
+            "首候选应标注为校正来源"
+        );
+        assert_eq!(
+            engine.composing_display(),
+            "zheng\u{2019}que",
+            "页眉应显示校正形式 zheng'que"
         );
     }
 

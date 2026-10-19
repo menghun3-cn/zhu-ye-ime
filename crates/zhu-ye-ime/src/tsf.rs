@@ -655,7 +655,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         if code != VK_SPACE.0 && state_lock(self).ctrl_down {
             state_lock(self).ctrl_intervened = true;
         }
-        let action = plan_action(
+        let mut action = plan_action(
             wparam,
             lparam,
             key_modifiers_down(),
@@ -663,32 +663,29 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             self.state(),
         );
         // T-114 后续 / T-172：Shift 键按下——
-        // - **组合态**（候选已出）：对齐搜狗，**上屏当前候选并切到英文模式**
-        //   （上屏动作在编辑会话内完成：`handle_space` 上屏选中候选并记用户
-        //   词；随后引擎切英文，系统布局联动 T-168）；
-        // - **空闲态**：非重复 Shift 只进入待定切换（弹起时判定单独按下）；
-        // - 组合态 Shift+`?`/`+` 等后续组合输入：Shift-down 已上屏后，其余
-        //   键按常规处理（组合已结束，不再被吞）。
+        // - **组合态**（候选已出）：对齐搜狗，**把拼音原文上屏**（与 Enter 同
+        //   语义：`nihao` 上屏 `nihao` 而非首候选）并切到英文模式；上屏经
+        //   TSF 编辑会话完成（文本真正写入文档）；
+        // - **空闲态**：非重复 Shift 只进入待定切换（弹起时判定单独按下）。
         if code == VK_SHIFT.0 {
-            if compose_shift_commit(&mut state_lock(self).engine) {
-                // 组合态已上屏：更新候选窗并切英文。
-                refresh_candidate_window(self.state(), None);
-                sync_engine(self.state(), KeyAction::ToggleMode);
-                if should_log(zhu_ye_core::LogLevel::Debug) {
-                    debug_log("zhu-ye: shift-down commit-and-english (combinational)");
+            let combinational = state_lock(self).engine.is_active();
+            let shifted = shift_down_action(combinational, action);
+            if !combinational {
+                if shifted == Some(KeyAction::ToggleMode) {
+                    state_lock(self).pending_shift_toggle = true;
+                    if should_log(zhu_ye_core::LogLevel::Debug) {
+                        debug_log("zhu-ye: shift-down pending (lone-shift armed)");
+                    }
                 }
-                return Ok(BOOL(1));
+                return Ok(BOOL(0));
             }
-            if action == Some(KeyAction::ToggleMode) {
-                state_lock(self).pending_shift_toggle = true;
-                if should_log(zhu_ye_core::LogLevel::Debug) {
-                    debug_log("zhu-ye: shift-down pending (lone-shift armed)");
-                }
-            }
-            return Ok(BOOL(0));
+            // 组合态：改写为 Enter 动作（拼音原文上屏），走常规编辑会话路径。
+            action = shifted;
         }
-        // 任何非 Shift 键按下 = Shift 组合键（或恢复单独按键）→ 取消待定切换。
-        state_lock(self).pending_shift_toggle = false;
+        if code != VK_SHIFT.0 {
+            // 任何非 Shift 键按下 = Shift 组合键（或恢复单独按键）→ 取消待定切换。
+            state_lock(self).pending_shift_toggle = false;
+        }
         let Some(action) = action else {
             return Ok(BOOL(0));
         };
@@ -717,6 +714,9 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         let tid = state_lock(self).tid;
         let state = Arc::clone(self.state());
         let session_context = context.clone();
+        // T-172：组合态 Shift 的动作被改写为 Enter（原文上屏）——会话成功后
+        // 追加切英文（搜狗语义：上屏拼音原文后进入英文模式）。
+        let shift_to_english = code == VK_SHIFT.0 && state_lock(self).engine.is_active();
         let session: ITfEditSession = EditSession {
             callback: Mutex::new(Some(Box::new(move |ec| {
                 apply_action(&state, &session_context, ec, action)
@@ -734,6 +734,13 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         if session_failed {
             sync_engine(self.state(), action);
             refresh_candidate_window(self.state(), None);
+        }
+        if shift_to_english {
+            sync_engine(self.state(), KeyAction::ToggleMode);
+            refresh_candidate_window(self.state(), None);
+            if should_log(zhu_ye_core::LogLevel::Debug) {
+                debug_log("zhu-ye: shift-down commit-raw-and-english (combinational)");
+            }
         }
         Ok(BOOL(1))
     }
@@ -945,17 +952,17 @@ fn is_ctrl_space_up(ctrl_age_ms: Option<u64>, ctrl_down: bool, intervened: bool)
 /// T-165：连打窗口——Ctrl 弹起到 Space 弹起的最大间隔（毫秒）。
 const CTRL_SPACE_UP_WINDOW_MS: u64 = 200;
 
-/// T-172：组合态 Shift 上屏——候选已出（`engine.is_active()`）时按搜狗语义
-/// 立即上屏当前选中候选（`handle_space`：提交选中并记用户词）。返回是否
-/// 处理（组合态为真）；空闲态返回 false 由调用方走既有待定切换路径。
-/// 抽出为函数便于单测（模式切换由调用方统一走 sync_engine）。
+/// T-172：Shift 键按下时的动作改写——组合态（`combinational`）时按搜狗
+/// 语义把**拼音原文**上屏（返回 `Enter`，与回车同语义：`nihao` 上屏
+/// `nihao` 而非首候选）；空闲态沿用原动作（`ToggleMode` 走待定切换）。
+/// 抽出为纯函数便于单测。
 #[must_use]
-fn compose_shift_commit(engine: &mut InputEngine) -> bool {
-    if !engine.is_active() {
-        return false;
+fn shift_down_action(combinational: bool, action: Option<KeyAction>) -> Option<KeyAction> {
+    if combinational {
+        Some(KeyAction::Enter)
+    } else {
+        action
     }
-    let _ = engine.handle_space();
-    true
 }
 
 /// 判断 Shift 修饰键是否按下（英文布局上档字符判定，T-066）。
@@ -2401,18 +2408,38 @@ mod tests {
         );
     }
 
-    /// T-172：组合态 Shift 直接上屏当前选中候选（搜狗语义）；空闲态不处理。
+    /// T-172：组合态 Shift 把拼音原文上屏（改写为 Enter 动作）；空闲态沿用
+    /// 原动作（待定切换）。
     #[test]
-    fn 组合态shift上屏选中空闲态不处理() {
+    fn 组合态shift改写为原文上屏空闲态不变() {
+        assert_eq!(
+            shift_down_action(true, Some(KeyAction::ToggleMode)),
+            Some(KeyAction::Enter),
+            "组合态应改写为 Enter（拼音原文上屏）"
+        );
+        assert_eq!(
+            shift_down_action(false, Some(KeyAction::ToggleMode)),
+            Some(KeyAction::ToggleMode),
+            "空闲态沿用 ToggleMode（待定切换）"
+        );
+        assert_eq!(
+            shift_down_action(false, None),
+            None,
+            "空闲态无动作保持 None"
+        );
+    }
+
+    /// T-172：Enter 提交的是**拼音原文**（`nihao`），不是首候选。
+    #[test]
+    fn 回车提交拼音原文而非首候选() {
         let mut engine = create_engine(None);
-        assert!(!compose_shift_commit(&mut engine), "空闲态不处理");
         for c in "nihao".chars() {
             let _ = engine.handle_letter(c);
         }
         assert!(engine.is_active(), "输入后应处于组合态");
-        assert!(!engine.candidates().is_empty(), "组合态应有候选");
-        assert!(compose_shift_commit(&mut engine), "组合态应上屏");
-        assert!(!engine.is_active(), "上屏后组合结束");
+        assert_eq!(engine.preview_enter(), Some("nihao".to_string()));
+        let _ = engine.handle_enter();
+        assert!(!engine.is_active(), "回车后组合结束");
     }
 
     /// T-168：中英模式对应系统键盘布局（英文→US 0x04090409 使任务栏显示
