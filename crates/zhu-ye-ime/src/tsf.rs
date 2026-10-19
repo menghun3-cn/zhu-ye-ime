@@ -36,8 +36,8 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ActivateKeyboardLayout, GetKeyState, ACTIVATE_KEYBOARD_LAYOUT_FLAGS, HKL, VIRTUAL_KEY, VK_0,
-    VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE, VK_F24, VK_MENU,
-    VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
+    VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_OEM_1,
+    VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
     VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
@@ -447,13 +447,20 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
                 // T-165：用 TSF 保留键（PreserveKey）实现 Ctrl+Space 中英切换——
                 // 键事件回调线程读不到修饰键状态（GetKeyState/GetAsyncKeyState
                 // 实测恒假，且 OnTestKeyDown 不被系统调用），保留键由系统在
-                // 组合键命中时直接回调 OnPreservedKey，绕开键状态读取。
+                // 组合键命中时直接回调 OnPreservedKey（与搜狗同机制：系统把
+                // Ctrl+Space 路由给**当前激活**的输入法，互不抢占）。
                 // 注册失败不阻断激活（该快捷键降级不可用，Shift 切换不受影响）。
                 let prekey = TF_PRESERVEDKEY {
                     uVKey: u32::from(VK_SPACE.0),
                     uModifiers: TF_MOD_CONTROL,
                 };
                 let desc: Vec<u16> = "竹叶输入法：Ctrl+Space 切换中英".encode_utf16().collect();
+                // 幂等注册：同一线程管理器/会话可能重复 Activate（切来切去），
+                // 先注销再注册，避免 0x80040506（重复注册）导致后续收不到回调。
+                let _ = unsafe {
+                    keystroke_mgr
+                        .UnpreserveKey(std::ptr::from_ref(&GUID_CTRL_SPACE_TOGGLE), &prekey)
+                };
                 let preserve_result = unsafe {
                     keystroke_mgr.PreserveKey(
                         tid,
@@ -534,6 +541,17 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
             handle.unregister();
             product_log(zhu_ye_core::LogLevel::Info, "zhu-ye: langbar removed");
         }
+        // T-165：注销保留键注册（与 Activate 的 PreserveKey 配对，避免
+        // 组合键注册残留导致其它输入法/下次激活收不到回调）。
+        if let Some(keystroke_mgr) = state.keystroke_mgr.as_ref() {
+            let prekey = TF_PRESERVEDKEY {
+                uVKey: u32::from(VK_SPACE.0),
+                uModifiers: TF_MOD_CONTROL,
+            };
+            let _ = unsafe {
+                keystroke_mgr.UnpreserveKey(std::ptr::from_ref(&GUID_CTRL_SPACE_TOGGLE), &prekey)
+            };
+        }
         if let Some(keystroke_mgr) = state.keystroke_mgr.take() {
             let _ = unsafe { keystroke_mgr.UnadviseKeyEventSink(state.tid) };
         }
@@ -601,15 +619,6 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
 
     fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         let code = VIRTUAL_KEY(wparam.0 as u16).0;
-        // T-165：F24 转义键 = 托盘热键抢到的 Ctrl+Space（系统把该组合作为
-        // IME 开关保留、TSF 收不到 Space 的 KEYDOWN；托盘 RegisterHotKey
-        // 抢得后注入无修饰 F24，此处识别并切换中英）。
-        if code == VK_F24.0 {
-            debug_log("zhu-ye: ctrl+space (F24 escape) ToggleMode");
-            sync_engine(self.state(), KeyAction::ToggleMode);
-            refresh_candidate_window(self.state(), None);
-            return Ok(BOOL(1));
-        }
         let action = plan_action(
             wparam,
             lparam,
