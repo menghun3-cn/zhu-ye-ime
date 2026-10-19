@@ -182,6 +182,13 @@
 | G-078 | T-091 | 产品化日志目录（FR-060）：D-72（默认 warn 热路径零写）/D-73（哨兵双轨）决策确认；core log_level/file_log 纯 std + config log_level 宽松解析（不升版本）+ tsf 53 调用点分级 + 11 热路径守卫 + 产品目录 `%LOCALAPPDATA%\ai-zhu-ye-ime\logs\ime.log` + settings 联动；workspace 全绿、host-e2e 11 组 PASS、eval 零回退；PR #60 @54e25bd | 2026-10-04 |
 | G-079 | T-112 等 | v0.1.2 同版本补发整体验收（PR #121/#123/#124/#125/#126）：发布链缺口全补齐——批六托盘纳入构建/打包/安装/卸载（zip 四件套→六件套守卫，PR #124）、批四带调拼音旁挂表 dictionary.zyct.tones 纳入发布包+安装+守卫（PR #125）、CC-CEDICT 第三次+第四次 pin 重锁（DFC286BB→00E6C188，四次人工审查）；CI 补发构建 run #37723763247 success（fetch-sources 全通过、zip 22.65MB、上传 v0.1.2 资产+feed-v0.1.2 镜像）；host-e2e 断言同步批二行为后 28/28 全绿（PR #126）；用户机 worker 部署 9/9（DLL F143C14E/词典三件套/三 exe/ctfmon）+ 托盘单实例复核；VM 部署（tsf-b6 f143c14e 注册切换 + 词典 swap + packs 预置）+ 整体 UI 验收 v4 57 项全绿（托盘单实例/三态图标、空格上屏「你好」、Enter 拼音原文、日期/金额/v/emoji/错位/混输电池、Shift 双翻转+英文直通、设置入口、T-091 哨兵 shift-up ToggleMode×2）；验收标准 §5 发布检查清单勾选；todos T-061/T-067 标注已完成（T-077 更新页交互/抓包、T-078 干净机安装卸载演练、T-080 剩余项另行跟踪） | 2026-10-08 |
 
+## 里程碑 M15-搜狗体验对齐
+
+| 归档号 | 任务 | 产物与结论 | 日期 |
+| --- | --- | --- | --- |
+| G-080 | T-165 | Ctrl+Space 中英切换（T-165）：初版基于 `GetKeyState` 的实现真机失效——哨兵日志实证 TSF 回调内修饰键状态恒为「未按下」且 Ctrl+Space 的**按下**被系统输入法切换层吃掉，改为 **Space 弹起判定**（`is_ctrl_space_up`：无干预键 ∧（Ctrl 仍按住 ∨ Ctrl 在 200 ms 内刚弹起）），并加 200 ms 连打窗口覆盖「先松 Ctrl 后松 Space」的快打时序；放弃并留档 GetKeyState/GetAsyncKeyState、PreserveKey+OnPreservedKey（系统派发给先注册者）、托盘 RegisterHotKey 桥接（全局独占伤搜狗）、托盘低层钩子+合成 F24（观测不到注入键）四条路径；用户验收通过（「ctrl+space已经支持切换中英模式」+ 快打复验） | 2026-10-19 |
+| G-081 | T-172 | 组合态 Shift 上屏原文 + 错序校正置顶（T-172）：① 组合态 Shift 改写为 `KeyAction::Enter` 走**编辑会话**上屏拼音原文（`nihao` 而非首候选，用户明确纠正过）并切英文——初版直接调 `handle_space()` 只改引擎状态、文本不入文档；② 错序容错三因修复（校正组触发门「主候选不足一页」被真实词典的前缀补全填满 → 改为「输入不可完整切分」并**置顶**；core 换位变体按位置顺序枚举使额度被不可切分噪声吃光 → 改为**可切分变体优先**；页眉显示校正形式 `zheng'que`（带字母重排校验防退格后旧候选劫持））；真实词典端到端测试固化（修复前首候选「这」→ 修复后「正确」）；PR #225/#226 合入，release DLL `zhu_ye_ime_17D5DED4.dll` 部署并经用户复验通过 | 2026-10-19 |
+
 ## 周期任务观察登记
 
 | 归档号 | 任务 | 轮次 | 内容与结论 | 日期 |
