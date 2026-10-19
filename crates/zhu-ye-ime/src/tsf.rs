@@ -36,8 +36,8 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ActivateKeyboardLayout, GetKeyState, ACTIVATE_KEYBOARD_LAYOUT_FLAGS, HKL, VIRTUAL_KEY, VK_0,
-    VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE, VK_MENU, VK_OEM_1,
-    VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
+    VK_2, VK_9, VK_A, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DOWN, VK_ESCAPE, VK_F24, VK_MENU,
+    VK_OEM_1, VK_OEM_2, VK_OEM_5, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
     VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::TextServices::{
@@ -600,6 +600,16 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     }
 
     fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
+        let code = VIRTUAL_KEY(wparam.0 as u16).0;
+        // T-165：F24 转义键 = 托盘热键抢到的 Ctrl+Space（系统把该组合作为
+        // IME 开关保留、TSF 收不到 Space 的 KEYDOWN；托盘 RegisterHotKey
+        // 抢得后注入无修饰 F24，此处识别并切换中英）。
+        if code == VK_F24.0 {
+            debug_log("zhu-ye: ctrl+space (F24 escape) ToggleMode");
+            sync_engine(self.state(), KeyAction::ToggleMode);
+            refresh_candidate_window(self.state(), None);
+            return Ok(BOOL(1));
+        }
         let action = plan_action(
             wparam,
             lparam,
@@ -607,7 +617,6 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             shift_key_down(),
             self.state(),
         );
-        let code = VIRTUAL_KEY(wparam.0 as u16).0;
         // T-114 后续：Shift 键按下不立即切换中英——空闲态非重复 Shift 只进入
         // 待定切换（弹起时再判定"单独按下"），组合态/长按直接放行宿主，
         // 避免 Shift+`?`/`+` 等组合输入时顺带切走中文模式。
