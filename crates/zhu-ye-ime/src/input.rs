@@ -1241,6 +1241,9 @@ impl InputEngine {
     #[must_use]
     fn append_transposed_group(&self, mut main: Vec<Candidate>, composing: &str) -> Vec<Candidate> {
         if self.enable_fuzzy && main.len() < self.page_size {
+            // 注：`composing` 为去噪拼音（手动分隔符在 `manual_seps`），因此
+            // 带分隔符串（`zhegn'que`）同样在此整串换位（`zhegnque→zhengque`），
+            // 显示层按 `manual_seps` 插回 `'`（T-172 测试固化）。
             let transposed = zhu_ye_core::transposed_candidates(
                 &self.table,
                 self.dictionary.as_ref(),
@@ -3206,6 +3209,40 @@ mod tests {
         assert!(
             texts.contains(&"我是谁"),
             "wsshui 应自动隔音出我是谁，实际: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn 带分隔符错位串zhegnque出正确() {
+        // T-172：错位串带手动分隔符 `zhegn'que` → 应校正识别为 `zheng'que`，
+        // 候选出「正确」，且变体拼音带原分隔位置（展示用）。
+        use zhu_ye_core::dict::{DictionaryEntry, InMemoryDictionary};
+        let dictionary = InMemoryDictionary::from_entries(vec![
+            DictionaryEntry::new("正确", "zhengque", 75),
+            DictionaryEntry::new("正", "zheng", 70),
+            DictionaryEntry::new("确", "que", 60),
+        ]);
+        let mut engine =
+            InputEngine::with_bigram(Arc::new(dictionary), Arc::new(InMemoryBigramModel::new()));
+        type_text(&mut engine, "zhegn");
+        engine.insert_separator();
+        type_text(&mut engine, "que");
+        assert_eq!(
+            engine.composing(),
+            "zhegnque",
+            "查询键为去噪拼音（分隔符在 seps）"
+        );
+        let corrected: Vec<(String, String)> = engine
+            .candidates()
+            .iter()
+            .filter(|c| c.source == zhu_ye_core::candidate::CandidateSource::Corrected)
+            .map(|c| (c.text.clone(), c.pinyin.clone().unwrap_or_default()))
+            .collect();
+        assert!(
+            corrected
+                .iter()
+                .any(|(text, pinyin)| text == "正确" && pinyin == "zhengque"),
+            "应校正出 正确/zhengque，实际: {corrected:?}"
         );
     }
 
