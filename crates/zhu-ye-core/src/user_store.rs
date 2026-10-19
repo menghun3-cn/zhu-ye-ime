@@ -119,9 +119,10 @@ impl UserDictStore {
     /// 加载用户词库；文件不存在返回空库，内容损坏时备份并重建空库。
     ///
     /// **版本迁移（T-174）**：v1 文件（无 `transitions` 段）读取时按「词条完整
-    /// 保留、转移置空」升级为 v2 并原子重写，**词条零丢失**；低于可迁移
-    /// 版本（v0）按损坏处理（备份重建），版本高于当前支持时拒绝读（避免
-    /// 丢内容）。
+    /// 保留、转移置空」在**内存中**升级为 v2，**词条零丢失**；读取本身**不
+    /// 写盘**（只读访问者不应有副作用），磁盘升级发生在下一次 `save`——保存
+    /// 一律写当前版本（v2），迁移因此仍自动完成。低于可迁移版本（v0）按损坏
+    /// 处理（备份重建），版本高于当前支持时拒绝读（避免丢内容）。
     pub fn load(&self) -> Result<UserDictionary> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
@@ -154,11 +155,16 @@ impl UserDictStore {
             return self.recover_corrupt();
         }
         if format.version < USER_DICT_FORMAT_VERSION {
-            // v1 → v2 无损迁移：词条保留、转移置空，落盘为 v2。
-            let migrated =
-                UserDictionary::from_entries_and_transitions(format.entries, format.transitions);
-            self.save(&migrated)?;
-            return Ok(migrated);
+            // v1 → v2 无损迁移：**只在内存中**升级（词条保留、转移置空）。
+            //
+            // 此处**不写盘**——`load` 是读操作，让只读访问者（CLI `user list`、
+            // 设置窗口的状态检查）触发写入是副作用污染。磁盘升级发生在下一次
+            // `save` 时：保存一律写当前版本（v2），迁移因此仍然自动完成，且
+            // 词条零丢失。
+            return Ok(UserDictionary::from_entries_and_transitions(
+                format.entries,
+                format.transitions,
+            ));
         }
         Ok(UserDictionary::from_entries_and_transitions(
             format.entries,
@@ -303,8 +309,9 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// T-174：v1 文件读取时**无损迁移**为 v2——词条完整保留、转移置空，
-    /// 且磁盘文件被原子重写为 v2。
+    /// T-174：v1 文件读取时**无损迁移**为 v2——词条完整保留、转移置空；
+    /// 读取本身**不写盘**（只读访问者无副作用），磁盘升级在下次 `save` 时
+    /// 完成。
     #[test]
     fn v1文件无损迁移为v2() {
         let (store, dir) = store_in("migrate-v1");
@@ -319,11 +326,18 @@ mod tests {
         assert_eq!(loaded.frequency("竹叶", "zhuye"), 3, "v1 词条必须完整保留");
         assert_eq!(loaded.transition_count(), 0, "v1 无转移段");
 
-        // 磁盘文件已升级为 v2。
+        // 读取不写盘：磁盘仍是 v1（只读访问者不应产生副作用）。
         let text = fs::read_to_string(store.path()).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["version"], 2, "文件应被重写为 v2");
+        assert_eq!(value["version"], 1, "load 不应改写磁盘文件");
+
+        // 下次保存按当前版本（v2）写出，迁移随之完成，词条仍在。
+        store.save(&loaded).unwrap();
+        let text = fs::read_to_string(store.path()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["version"], 2, "保存后应写为 v2");
         assert_eq!(value["entries"][0]["word"], "竹叶", "重写后词条仍在");
+        assert_eq!(value["entries"][0]["frequency"], 3, "词频不丢");
         fs::remove_dir_all(dir).unwrap();
     }
 

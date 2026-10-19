@@ -77,13 +77,17 @@ candidates.
 ### On-disk format
 
 `user_words.json` moves to version 2 with a `transitions` section. A v1 file
-is migrated losslessly on read — the word entries are preserved, the transfer
-table starts empty, and the file is atomically rewritten as v2. `v0` (no
-version field) remains a corrupt file, handled by the existing backup-and-
-rebuild path. The read-only probe `probe_user_words_file` treats v1 as
-healthy for the same reason: classifying a migratable file as corrupt would
-make the settings window's level-1 repair offer to rebuild the file and throw
-away every word the user has learned.
+is migrated losslessly on read — the word entries are preserved and the
+transfer table starts empty. The read itself does **not** write: `load` is a
+read operation, and letting a read-only caller (the CLI's `user list`, the
+settings window's status check) rewrite the file is side-effect pollution.
+The disk upgrade happens on the next `save`, which always writes the current
+version, so the migration still completes on its own and no word is lost.
+`v0` (no version field) remains a corrupt file, handled by the existing
+backup-and-rebuild path. The read-only probe `probe_user_words_file` treats
+v1 as healthy for the same reason: classifying a migratable file as corrupt
+would make the settings window's level-1 repair offer to rebuild the file and
+throw away every word the user has learned.
 
 ## Alternatives considered
 
@@ -116,6 +120,12 @@ away every word the user has learned.
   the normal candidates for a common pinyin, displacing what the user most
   likely wants. Injection is restricted to the case where the global path
   cannot produce the pinyin at all.
+- **Rewrite the file to v2 inside `load`**: the first implementation did this
+  and it was rejected during the real-data check. `load` is a read operation,
+  and the CLI's `user list` and the settings window's status check both call
+  it — a read that rewrites the user's file is side-effect pollution, and it
+  made a plain listing command modify on-disk state. The upgrade now happens
+  on the next `save`, which always writes the current version.
 
 ## Consequences
 
@@ -147,9 +157,10 @@ away every word the user has learned.
 - Core unit tests: transfer recording, empty previous word is not a
   transfer, cap eviction drops the lowest-frequency oldest entry, rebuild
   filters invalid transfers, reset clears the transfer table.
-- Core unit tests: v1 file migrates losslessly to v2 and the file on disk is
-  rewritten as v2; v2 transfer section round-trips; v0 is still treated as
-  corrupt; the probe reports v1 as healthy and v0 as corrupt.
+- Core unit tests: v1 file migrates losslessly to v2 in memory and `load`
+  leaves the file untouched; the next `save` writes v2 with the word entries
+  intact; v2 transfer section round-trips; v0 is still treated as corrupt;
+  the probe reports v1 as healthy and v0 as corrupt.
 - IME unit tests: a word used once is immediately the first candidate with
   source `User`; a dictionary-external word enters the candidates; the
   transfer table records only commits that have a previous word; a context
