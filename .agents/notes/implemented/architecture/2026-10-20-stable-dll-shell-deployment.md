@@ -123,6 +123,58 @@ carries 「以下程序使用了Sogou输入法,要避免重启,请先关闭这�
 「立即重启」/「稍后重启」, so the shell's version switch does not cover
 every process either.
 
+### The shell-layer premise was measured and holds
+
+Whether the shell layer can work depends on one thing: **does the host ask
+TSF for the text service class factory again when the input method is
+switched?** That was measured on this machine.
+
+A call counter was added to `DllGetClassObject` and the probe build was
+deployed under the stable name (`zhu_ye_ime.dll`, SHA-256 `08BD6566…`). A
+program that imitates a TSF host then walked the full chain —
+`LoadLibrary → DllGetClassObject → CreateInstance → ActivateEx →
+Deactivate` — and called
+`ITfInputProcessorProfileMgr::DeactivateProfile` after the first round to
+simulate an input method switch. The sentinel log
+(`C:\zhu-ye-test\tsf-debug.log`) recorded:
+
+```
+[1792463916] pid=33100 zhu-ye: DllGetClassObject call#1   ← round one
+[1792463917] pid=33100 zhu-ye: DllGetClassObject call#2   ← round two
+[1792463917] pid=33100 zhu-ye: DllGetClassObject call#3   ← after the profile switch
+```
+
+**The class factory is requested again every time a text service is
+created, including after an input method profile switch.** The same holds
+for a real host: msedge (PID 24300) mapped the stable `zhu_ye_ime.dll` and
+recorded `call#1`.
+
+This establishes the premise the shell layer needs: **the shell can decide
+which implementation a session uses each time it is asked for a class
+factory.** The host does not have to be reopened — it switches the input
+method and switches back, asks the shell for a fresh class factory, and the
+shell hands it the current implementation.
+
+A companion in-process module experiment confirmed the shell's ability to
+change versions: implementations at different paths are independent modules
+(`LoadLibrary(v1)` and `LoadLibrary(v2)` yield different handles), and
+`FreeLibrary` followed by `LoadLibrary` yields the module at that path.
+
+### Two points the shell layer still has to settle
+
+1. **COM object lifetime.** The host holds interface pointers, so the
+   shell must not unload an implementation while the host still holds
+   pointers into it — that would crash on the next call. The correct
+   strategy is therefore **per-session pinning**: the implementation
+   returned by a given `DllGetClassObject` stays loaded for as long as that
+   text service lives, and a new version takes effect only in the next
+   session. The cost is that a host that has used an old version keeps one
+   extra DLL's worth of memory mapped.
+2. **Reading the version pointer.** The shell must resolve the current
+   version **per process** rather than baking it in, or different hosts
+   would disagree about the version. Sogou achieves the same thing through
+   the `Software\SogouInput` registry key.
+
 ## Alternatives considered
 
 - **Keep the versioned filename and only change the cleanup**: this fixes
