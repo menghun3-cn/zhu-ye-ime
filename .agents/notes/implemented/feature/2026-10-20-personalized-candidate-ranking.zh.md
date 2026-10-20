@@ -69,6 +69,7 @@ frequency` 转移。转移表以**高于无条件频次**的权重计入同一�
 v1 同样报健康：把**可迁移**的文件判为损坏，会让设置窗口的一级修复建议重建该文件，
 从而丢掉用户已积累的全部词条。
 
+
 ## Alternatives considered
 
 - **调高 `user_weight` 让个人信号压过词典**：算术上可行，但这个旋钮是全局的。大到
@@ -108,6 +109,23 @@ v1 同样报健康：把**可迁移**的文件判为损坏，会让设置窗口�
 - `InputEngine::user_dictionary_mut` 与 `InputEngine::set_previous_word` 公开，供宿主
   显式注入个人偏好与上下文。
 
+### 已知缺陷 —— v1 宿主会覆盖 v2 文件
+
+`user_words.json` 是**所有宿主共享的单个文件**。T-174 把格式升到 v2（新增
+`transitions` 段），但**已发布的 v1 DLL** 没有 `transitions` 字段，其 `save`
+会重写整个文件。任何仍持有 v1 DLL 的宿主，因此会在下次上屏时把文件降级：
+`version` 写回 `1`，`transitions` 段被整体丢弃。
+
+2026-10-20 实测：9 个常驻进程持有 v1 构建（`explorer`、`msedge`、
+`msedgewebview2`、`Weixin`、`Feishu`、`WindowsTerminal`、`DeepSeek Harness`、
+`notepad++`、`Snipaste`），因此 `transitions` 段每次上屏都被抹除，个人转移
+始终无法落盘。词条本身从未丢失——被反复丢弃的只是转移段。
+
+用户决定暂不处理 v1，专注 v2 正确性；长期方向是壳层架构（T-176）配合重启
+系统，使所有宿主都经由壳层加载当前实现。
+
+要阻止 v1 宿主写入，只能让它找不到该文件——例如把 v2 文件换名
+（`user_words.v2.json`）。该取舍本次未采纳。
 ## Verification
 
 - core 单测：用户词组只按个人频次排序；词典外用户词被注入；词典有命中时不注入；

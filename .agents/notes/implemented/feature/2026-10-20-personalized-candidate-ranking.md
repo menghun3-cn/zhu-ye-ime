@@ -89,6 +89,7 @@ v1 as healthy for the same reason: classifying a migratable file as corrupt
 would make the settings window's level-1 repair offer to rebuild the file and
 throw away every word the user has learned.
 
+
 ## Alternatives considered
 
 - **Raise `user_weight` so the personal signal out-scales the dictionary**:
@@ -149,6 +150,30 @@ throw away every word the user has learned.
 - `InputEngine::user_dictionary_mut` and `InputEngine::set_previous_word` are
   public so a host can seed personal preferences and a context explicitly.
 
+### Known defect — a v1 host overwrites the v2 file
+
+`user_words.json` is a **single file shared by every host**. T-174 raised the
+format to v2 (adding the `transitions` section), but an already-published
+**v1 DLL** has no `transitions` field and its `save` rewrites the whole file.
+Any host still holding a v1 DLL therefore downgrades the file on its next
+commit: `version` goes back to `1` and the entire `transitions` section is
+discarded.
+
+Measured on 2026-10-20: nine long-lived processes held v1 builds
+(`explorer`, `msedge`, `msedgewebview2`, `Weixin`, `Feishu`,
+`WindowsTerminal`, `DeepSeek Harness`, `notepad++`, `Snipaste`), so the
+`transitions` section was erased on every commit and personal transitions
+never persisted. Word entries themselves were never lost — only the
+transition section was repeatedly discarded.
+
+The user decided not to address v1 now and to concentrate on v2 correctness.
+The long-term direction is the shell architecture (T-176) plus a system
+restart, so that every host loads the shell and therefore the current
+implementation.
+
+A v1 host can only be prevented from writing by making the file unreachable
+to it — for example by moving the v2 file to a different name
+(`user_words.v2.json`). That trade-off was not taken yet.
 ## Verification
 
 - Core unit tests: user words ordered by personal frequency only; dictionary
