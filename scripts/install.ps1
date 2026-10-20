@@ -134,17 +134,26 @@ foreach ($pack in @('it.zyct', 'med.zyct', 'slang.zyct')) {
     }
 }
 
-# ---- 2. 复制 TSF DLL（版本化）与基础词典（沿用原事务与回滚） ----
-$dllHash8 = (Get-FileHash -LiteralPath $sourceDll -Algorithm SHA256).Hash.Substring(0, 8).ToLowerInvariant()
-$newDllName = "zhu-ye-ime-$dllHash8.dll"
-$targetDll = Join-Path $InstallDir $newDllName
+# ---- 2. 复制 TSF DLL（固定名壳 + 版本归档，T-175）与基础词典 ----
+# T-175：宿主永远加载 <InstallDir>\zhu_ye_ime.dll（固定名），注册表指针恒定；
+# 升级用 ReplaceFileW 原子替换固定名（正在被映射时同样成功），各版本实现
+# 归档在 versions\<sha8>\ 下。
 $previousDll = Get-TsfInprocServerDefault
 if ($previousDll) {
     Write-Host "当前注册版本: $previousDll"
 }
 
 $null = New-Item -ItemType Directory -Path $InstallDir -Force
-Copy-Item -LiteralPath $sourceDll -Destination $targetDll -Force
+try {
+    $dllInstall = Install-TsfStableDll -SourceDll $sourceDll -InstallDir $InstallDir
+} catch {
+    throw "TSF DLL 部署失败（注册表未改动）: $($_.Exception.Message)"
+}
+$targetDll = $dllInstall.InstalledPath
+Write-Host "已部署固定名壳 DLL: $targetDll（版本 $($dllInstall.VersionId)）"
+if ($dllInstall.Replaced) {
+    Write-Host '已用 ReplaceFileW 原子替换固定名（已打开的宿主继续用旧版，新开的宿主立即用新版）。'
+}
 
 try {
     & (Join-Path $PSScriptRoot 'verify-tsf-dll.ps1') -DllPath $targetDll
@@ -262,18 +271,14 @@ $shortcut.Description = '竹叶输入法设置：工具箱、常用设置、关�
 $shortcut.Save()
 Write-Host "已创建快捷方式: $startMenu"
 
-# ---- 7. 延迟清理旧版本 DLL（含历史版本、固定名与 .zy-del 迁移残留） ----
-$staleDlls = @(Get-ChildItem -LiteralPath $InstallDir -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like 'zhu-ye-ime*.dll*' -and $_.FullName -ne $targetDll } |
-    ForEach-Object { $_.FullName })
-if ($staleDlls.Count -gt 0) {
-    Write-Host "清理旧版本 DLL（$($staleDlls.Count) 个）："
-    Add-TsfDelayedCleanup -Paths $staleDlls
-}
+# ---- 7. 清理旧布局版本化 DLL 与过期版本归档（T-175） ----
+# 固定名壳接管后，旧布局的 zhu-ye-ime-<sha8>.dll / zhu_ye_ime_<sha8>.dll
+# 永不再被加载；versions\ 下超过保留份数的旧归档同样回收。
+Remove-TsfOldVersionDlls -InstallDir $InstallDir -KeepVersionId $dllInstall.VersionId | Out-Null
 
 Write-Host "安装完成: $targetDll"
 if ($previousDll -and $previousDll -ne $targetDll) {
-    Write-Host "已从 $previousDll 升级；旧版本 DLL 将在系统重启后自动清理。"
+    Write-Host "已从 $previousDll 升级为固定名壳；旧版本文件将在系统重启后自动清理。"
 }
 Write-Host '输入法已在系统中注册；可在 设置 -> 时间和语言 -> 语言和区域 中切换到竹叶输入法。'
 Write-Host "设置窗口: $(Join-Path $exeDir 'zhu-ye-settings.exe')"

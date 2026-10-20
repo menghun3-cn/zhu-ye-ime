@@ -65,6 +65,22 @@ renames to `<name>.zy-del` and sweeps on the next install/uninstall.
 Rejected: the first load could come from an old image; the module-anchor lookup is
 cheap (once, at engine creation) and always reflects the actually-loaded module.
 
+## Superseded in part (T-175)
+
+The **versioned-file-name deployment** described above is superseded by the
+stable shell layout: the host loads `zhu_ye_ime.dll` whose name never changes,
+and the registry pointer never changes either. Upgrades replace that one file
+with `ReplaceFileW` and archive the version under `versions\<sha8>\`. See
+[Stable DLL shell deployment](2026-10-20-stable-dll-shell-deployment.md).
+
+The **dictionary module-anchor lookup** described above remains current and
+unchanged — it resolves the install directory from the address of the running
+module, so it works under any file name, including the stable shell. The
+deferred cleanup mechanism (`Add-TsfDelayedCleanup`, `*.zy-del` rename plus
+reboot-time sweep) is also unchanged and is still what the stable shell
+deployment uses for files that a running host holds open.
+
+
 ## Consequences
 
 Versioned deployment is exercised on the VM as v4 → v5 without any lock fight,
