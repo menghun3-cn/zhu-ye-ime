@@ -412,3 +412,29 @@ function Remove-TsfOldVersionDlls {
     }
     return $stale
 }
+
+# 重启 ctfmon（Windows 输入法框架进程）。
+#
+# 背景（T-176 实测）：ctfmon 会缓存语言档的 `IconFile` 路径与已加载的 TSF DLL。
+# 部署位文件名变更（T-175 固定名壳统一为 `zhu-ye-ime.dll`）或 DLL 被替换后，
+# 缓存指向的旧路径已不存在，任务栏输入法指示器就取不到「竹」图标而显示空白。
+# 资源本身完好（PE 内 `RT_GROUP_ICON` 在位、`ExtractAssociatedIcon` 成功），
+# 只是 ctfmon 没重新读注册表。
+#
+# 重启代价：输入法框架瞬间重建，正在进行的输入会中断不到 1 秒；不影响用户数据。
+function Restart-TsfFramework {
+    $before = @(Get-Process ctfmon -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+    Stop-Process -Name ctfmon -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    if (-not (Get-Process ctfmon -ErrorAction SilentlyContinue)) {
+        Start-Process "$env:SystemRoot\System32\ctfmon.exe" -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 800
+    $after = @(Get-Process ctfmon -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+    if ($after.Count -gt 0) {
+        Write-Host "已重启 ctfmon（$($before -join ',') -> $($after -join ',')），输入法指示器图标将重新加载。"
+        return $true
+    }
+    Write-Warning 'ctfmon 重启后未检测到进程；输入法指示器图标可能需要注销后恢复。'
+    return $false
+}
