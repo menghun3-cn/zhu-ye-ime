@@ -96,6 +96,47 @@ Windows 为其保留的内存页里执行旧代码，直到进程退出。
 Sogou输入法,要避免重启,请先关闭这些程序.」与「立即重启」/「稍后重启」，
 所以壳的版本切换也不是覆盖所有进程。
 
+### 壳层前提已实测成立
+
+壳层方案要成立，取决于一件事：**宿主切换输入法时，是否会重新向 TSF 请求
+text service 的类工厂**。本机已用探针实测确认。
+
+做法是在 `DllGetClassObject` 里加一行调用计数日志，部署探针版 DLL
+（固定名 `zhu_ye_ime.dll`，SHA-256 `08BD6566…`），再用一个模拟 TSF 宿主的
+程序走 `LoadLibrary → DllGetClassObject → CreateInstance → ActivateEx →
+Deactivate` 的完整链路，并在一轮之后调用
+`ITfInputProcessorProfileMgr::DeactivateProfile` 模拟切换输入法。
+
+哨兵日志（`C:\zhu-ye-test\tsf-debug.log`）实测记录：
+
+```
+[1792463916] pid=33100 zhu-ye: DllGetClassObject call#1   ← 第一轮
+[1792463917] pid=33100 zhu-ye: DllGetClassObject call#2   ← 第二轮
+[1792463917] pid=33100 zhu-ye: DllGetClassObject call#3   ← 切 profile 之后
+```
+
+**每次创建 text service 都会重新调用 `DllGetClassObject`，包括切换输入法
+profile 之后。** 真实宿主侧同样成立：msedge（PID 24300）映射固定名
+`zhu_ye_ime.dll` 并记录了 `call#1`。
+
+由此确定壳层方案的关键前提成立：**壳可以在每次被索取类工厂时，决定本次会话
+使用哪个版本的实现**。宿主不需要重开窗口——它切换输入法再切回，就会向壳索取
+新的类工厂，壳返回最新版本的实现。
+
+配套的进程内模块实验也确认了壳的换版本能力：不同路径的版本是独立模块
+（`LoadLibrary(v1)` 与 `LoadLibrary(v2)` 句柄不同），`FreeLibrary` 之后重新
+`LoadLibrary` 会拿到该路径的模块。
+
+### 壳层方案仍需解决的两点
+
+1. **COM 对象的生命周期**。宿主持有的是接口指针，壳不能在宿主仍持有旧实现
+   的接口指针时卸载它（否则调用即崩）。因此壳的正确策略是**按会话固定**：
+   本次 `DllGetClassObject` 返回的实现，在该 text service 存活期间不卸载；
+   换版本只在「新会话」时生效。代价是用过旧版本的宿主会多占一份 DLL 内存。
+2. **版本指针的读取**。壳必须**按进程**解析当前版本（不能固化在壳里），
+   否则多个宿主会看到不一致的版本。搜狗用注册表 `Software\SogouInput` 达到
+   同样目的。
+
 ## Alternatives considered
 
 - **保留版本化文件名，只补清理**：能解决目录膨胀，但解决不了指针漂移，用户
