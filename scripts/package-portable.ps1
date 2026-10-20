@@ -7,7 +7,8 @@
 发行包布局（可在无源码树与无 Rust 工具链的机器上直接安装）：
 
     zhu-ye-ime-<version>-test/
-      bin/zhu_ye_ime.dll             TSF 服务 DLL
+      bin/zhu-ye-ime.dll            TSF 稳定壳 DLL（宿主唯一加载目标，T-176）
+    bin/zhu-ye-impl.dll           TSF 版本化实现 DLL（壳运行时加载）
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
       bin/dictionary.zyct            基础词典（data/artifacts/base.zyct，随安装只读）
@@ -48,6 +49,7 @@ if (-not $Version) {
 
 $needed = @(
     (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll'),
+    (Join-Path $repoRoot 'target\release\zhu_ye_ime_shell.dll'),
     (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe'),
     (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'),
     (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe')
@@ -56,7 +58,7 @@ if (-not ($needed | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) 
     Write-Host '未找到 release 产物，先执行构建...'
     Push-Location $repoRoot
     try {
-        & cargo build --release -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater -p zhu-ye-tray
+        & cargo build --release -p zhu-ye-ime -p zhu-ye-ime-shell -p zhu-ye-settings -p zhu-ye-updater -p zhu-ye-tray
         if ($LASTEXITCODE -ne 0) {
             throw 'cargo build 失败，无法生成发行包。'
         }
