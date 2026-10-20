@@ -9,7 +9,7 @@
 //! `restart_ctfmon`（D-43：重注册后重启输入法进程使新注册生效，重启前由
 //! 父窗口弹确认）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HWND};
@@ -211,24 +211,46 @@ pub fn current_inproc_dll() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// 回退来源：安装目录（`exe 所在目录\tsf`）下最新的 `zhu-ye-ime*.dll`。
+/// 回退来源：安装目录（`exe 所在目录\tsf`）下的 TSF DLL。
 ///
-/// 安装使用版本化文件名（`zhu-ye-ime-<hash8>.dll`），不能假定固定名 `zhu-ye-ime.dll`。
+/// T-175 起宿主只加载**固定名壳** `zhu_ye_ime.dll`，注册表指针恒定指向它，
+/// 首选路径即该文件。旧布局（`zhu-ye-ime-<hash8>.dll` / `zhu_ye_ime_<hash8>.dll`）
+/// 仍需兼容：固定名不存在时回退到目录下最新的匹配 DLL。
 #[must_use]
 pub fn find_bundled_dll() -> Option<PathBuf> {
-    let dir = shell::exe_dir().join("tsf");
-    let entries = std::fs::read_dir(&dir).ok()?;
+    find_dll_in_dir(&shell::exe_dir().join("tsf"))
+}
+
+/// 在 `dir` 中挑选 TSF DLL：固定名壳优先，否则取匹配旧布局命名中最新者。
+///
+/// 抽成独立函数以便单测——`find_bundled_dll` 依赖当前进程路径，无法在测试中
+/// 构造目录。
+fn find_dll_in_dir(dir: &Path) -> Option<PathBuf> {
+    let stable = dir.join("zhu_ye_ime.dll");
+    if stable.is_file() {
+        return Some(stable);
+    }
+    let entries = std::fs::read_dir(dir).ok()?;
     entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension().and_then(|ext| ext.to_str()) == Some("dll")
-                && path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .is_some_and(|stem| stem == "zhu-ye-ime" || stem.starts_with("zhu-ye-ime-"))
-        })
+        .filter(|path| is_tsf_dll_name(path))
         .max_by_key(|path| path.metadata().and_then(|meta| meta.modified()).ok())
+}
+
+/// 判定文件名是否为 TSF DLL（固定名壳或旧布局版本化名）。
+fn is_tsf_dll_name(path: &Path) -> bool {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("dll") {
+        return false;
+    }
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| {
+            stem == "zhu-ye-ime"
+                || stem.starts_with("zhu-ye-ime-")
+                || stem == "zhu_ye_ime"
+                || stem.starts_with("zhu_ye_ime_")
+        })
 }
 
 /// 以 KEY_WOW64_64KEY 写权限创建注册键并返回句柄。
@@ -434,9 +456,10 @@ pub fn restart_ctfmon() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        category_key_path, clsid_key_path, guid_text, inproc_key_path, item_key_path,
-        profile_key_path, tip_key_path,
+        category_key_path, clsid_key_path, find_dll_in_dir, guid_text, inproc_key_path,
+        is_tsf_dll_name, item_key_path, profile_key_path, tip_key_path,
     };
+    use std::path::Path;
     use zhu_ye_core::identity::{CLSID_ZHU_YE_TIP, PROFILE_GUID_ZHU_YE, TFCAT_ZHU_YE_KEYBOARD};
 
     #[test]
@@ -481,5 +504,48 @@ mod tests {
             inproc_key_path(),
             r"SOFTWARE\Classes\CLSID\{E54D6682-8650-40E7-A9EE-6FD1137849AE}\InProcServer32"
         );
+    }
+
+    /// T-175：固定名壳 `zhu_ye_ime.dll` 优先被选中。
+    ///
+    /// 此前回退只认连字符命名（`zhu-ye-ime` / `zhu-ye-ime-`），而实际部署的
+    /// 文件名是下划线 `zhu_ye_ime.dll`——该回退在真实部署下从未命中。
+    #[test]
+    fn 固定名壳优先被选中() {
+        let dir = std::env::temp_dir().join("zy-registry-stable-shell");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("zhu_ye_ime.dll"), b"stable").unwrap();
+        std::fs::write(dir.join("zhu_ye_ime_9d8188ac.dll"), b"old").unwrap();
+
+        let found = find_dll_in_dir(&dir).expect("应找到固定名壳");
+        assert_eq!(found.file_name().unwrap(), "zhu_ye_ime.dll");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-175：无固定名壳时回退到旧布局版本化名（兼容升级前的部署）。
+    #[test]
+    fn 无固定名壳时回退旧布局命名() {
+        let dir = std::env::temp_dir().join("zy-registry-legacy-layout");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("zhu_ye_ime_9d8188ac.dll"), b"legacy").unwrap();
+
+        let found = find_dll_in_dir(&dir).expect("应回退到旧布局版本化名");
+        assert_eq!(found.file_name().unwrap(), "zhu_ye_ime_9d8188ac.dll");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-175：非 TSF 的 DLL 不应被误选。
+    #[test]
+    fn 非tsf的dll不被选中() {
+        assert!(is_tsf_dll_name(Path::new("zhu_ye_ime.dll")));
+        assert!(is_tsf_dll_name(Path::new("zhu_ye_ime_9d8188ac.dll")));
+        assert!(is_tsf_dll_name(Path::new("zhu-ye-ime-9d8188ac.dll")));
+        assert!(!is_tsf_dll_name(Path::new("dictionary.zyct")));
+        assert!(!is_tsf_dll_name(Path::new("zhu_ye_ime.dll.zy-del")));
+        assert!(!is_tsf_dll_name(Path::new("other.dll")));
     }
 }

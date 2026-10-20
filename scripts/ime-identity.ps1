@@ -25,6 +25,10 @@ $script:TsfIdentity = [ordered]@{
     DllName                = 'zhu-ye-ime.dll'
     DictionaryFileName     = 'dictionary.zyct'
     EnWordbookFileName     = 'en.zyen'
+    # T-175 固定名壳布局：宿主永远加载 <InstallDir>\zhu_ye_ime.dll，注册表指针
+    # 恒定指向它；各版本实现归档在 <InstallDir>\versions\<sha8>\ 下。
+    StableDllName          = 'zhu_ye_ime.dll'
+    VersionsDirName        = 'versions'
 }
 
 function Get-TsfInstallDir {
@@ -209,7 +213,13 @@ function Add-TsfDelayedCleanup {
         } catch {
             # 被进程占用，改走重启后迁移清理。
         }
-        $sweepTarget = "$path.zy-del"
+        # 已经带 .zy-del 后缀的（上一轮改名遗留）不再追加后缀，否则每轮清理
+        # 都会叠一层（实测出现过 .dll.zy-del.zy-del.zy-del.zy-del）。
+        if ($path -like '*.zy-del*') {
+            $sweepTarget = $path
+        } else {
+            $sweepTarget = "$path.zy-del"
+        }
         try {
             # 清扫上一次重启遗留的同名 .zy-del（目标不存在时重启改名才会成功）。
             Remove-Item -LiteralPath $sweepTarget -Force -ErrorAction Stop
@@ -222,4 +232,172 @@ function Add-TsfDelayedCleanup {
             Write-Warning "延迟清理标记失败（Win32 $errorCode）: $path"
         }
     }
+}
+
+# ---------------------------------------------------------------------------
+# T-175 固定名壳部署：宿主永远加载同一个 DLL 文件
+# ---------------------------------------------------------------------------
+#
+# 旧布局（版本化文件名 + 切注册表指针）的问题：注册表指针每次升级都变，
+# 已打开的宿主仍持旧版句柄，且部署目录会累积大量版本化 DLL（实测 49 个 /
+# 106 MB）。
+#
+# 新布局：
+#   <InstallDir>\zhu_ye_ime.dll          ← 固定名，宿主唯一加载入口，指针恒定
+#   <InstallDir>\versions\<sha8>\zhu_ye_ime.dll  ← 各版本实现归档
+#
+# 升级 = 用 ReplaceFileW 原子替换固定名文件。该 API 专为「替换正在被使用
+# 的文件」设计（保留被映射的旧句柄给已打开的宿主，同时让磁盘内容变为
+# 新版），因此：
+#   - 已打开的宿主继续用旧版，互不干扰；
+#   - 新打开的宿主立刻加载新版，注册表指针从此不再变化。
+
+if (-not ('ZhuYe.ReplaceFile' -as [type])) {
+    Add-Type -Namespace ZhuYe -Name ReplaceFile -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+[return: MarshalAs(UnmanagedType.Bool)]
+public static extern bool ReplaceFileW(string lpReplacedFileName, string lpReplacementFileName, string lpBackupFileName, uint dwReplaceFlags, IntPtr lpExclude, IntPtr lpReserved);
+'@
+}
+
+function Get-TsfStableDllPath {
+    <#
+    .SYNOPSIS
+    固定名壳 DLL 的完整路径（宿主唯一加载入口）。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$InstallDir
+    )
+    return (Join-Path $InstallDir $script:TsfIdentity['StableDllName'])
+}
+
+function Get-TsfVersionsDir {
+    <#
+    .SYNOPSIS
+    版本归档目录（各版本实现的历史留存）。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$InstallDir
+    )
+    return (Join-Path $InstallDir $script:TsfIdentity['VersionsDirName'])
+}
+
+function Install-TsfStableDll {
+    <#
+    .SYNOPSIS
+    以「固定名壳 + 版本归档」方式部署 TSF DLL（T-175）。
+
+    .DESCRIPTION
+    1. 把新实现复制到 versions\<sha8>\zhu_ye_ime.dll（版本归档）；
+    2. 用 ReplaceFileW 原子替换固定名 zhu_ye_ime.dll——该 API 在目标文件正被
+       宿主进程映射时依然成功（保留旧句柄给已打开的宿主，磁盘内容切为新版）；
+    3. 首次安装（固定名不存在）时直接复制。
+
+    注册表指针**恒定**指向固定名，升级过程无需改注册表。
+
+    .OUTPUTS
+    返回有序字典：InstalledPath / VersionId / Replaced / ArchivePath。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SourceDll,
+        [Parameter(Mandatory)][string]$InstallDir
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceDll -PathType Leaf)) {
+        throw "源 DLL 不存在: $SourceDll"
+    }
+    $null = New-Item -ItemType Directory -Path $InstallDir -Force
+    $stableDll = Get-TsfStableDllPath -InstallDir $InstallDir
+    $versionId = (Get-FileHash -LiteralPath $SourceDll -Algorithm SHA256).Hash.Substring(0, 8).ToLowerInvariant()
+
+    # 1. 版本归档：把该版本实现留存到 versions\<sha8>\。
+    $versionsDir = Get-TsfVersionsDir -InstallDir $InstallDir
+    $versionDir = Join-Path $versionsDir $versionId
+    $null = New-Item -ItemType Directory -Path $versionDir -Force
+    $archivePath = Join-Path $versionDir $script:TsfIdentity['StableDllName']
+    Copy-Item -LiteralPath $SourceDll -Destination $archivePath -Force
+
+    # 2. 替换固定名。
+    $replaced = $false
+    if (Test-Path -LiteralPath $stableDll -PathType Leaf) {
+        # ReplaceFileW 的替换源与被替换目标不可为同一路径，故用临时文件。
+        $staging = Join-Path $InstallDir (".{0}.staging" -f $script:TsfIdentity['StableDllName'])
+        Copy-Item -LiteralPath $SourceDll -Destination $staging -Force
+        # lpBackupFileName 必须给真实路径：实测本机传 NULL 或空串均返回
+        # ERROR_PATH_NOT_FOUND(3)，给真实路径才成功（与 MoveFileEx 延迟删除
+        # 的同类本机限制一致）。备份即被替换掉的旧版本实现，归档到 versions\。
+        $backup = Join-Path $versionDir (".{0}.replaced" -f $script:TsfIdentity['StableDllName'])
+        try {
+            $ok = [ZhuYe.ReplaceFile]::ReplaceFileW($stableDll, $staging, $backup, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+            if (-not $ok) {
+                $errorCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw "ReplaceFileW 失败（Win32 $errorCode）: $stableDll"
+            }
+            $replaced = $true
+        } finally {
+            Remove-Item -LiteralPath $staging -Force -ErrorAction SilentlyContinue
+        }
+    } else {
+        Copy-Item -LiteralPath $SourceDll -Destination $stableDll -Force
+    }
+
+    return [ordered]@{
+        InstalledPath = $stableDll
+        VersionId     = $versionId
+        Replaced      = $replaced
+        ArchivePath   = $archivePath
+    }
+}
+
+function Remove-TsfOldVersionDlls {
+    <#
+    .SYNOPSIS
+    清理 T-175 之前的版本化 DLL 残留与不再被引用的旧版本归档（T-175）。
+
+    .DESCRIPTION
+    清理两类文件：
+      1. 旧布局遗留的 zhu-ye-ime-<sha8>.dll / zhu_ye_ime_<sha8>.dll 等
+         版本化文件——固定名壳接管后它们永不再被加载；
+      2. versions\ 下除当前版本外的旧归档（保留最近若干个以供回滚）。
+
+    被进程占用的文件走 Add-TsfDelayedCleanup（改名 .zy-del + 重启后清理）。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$InstallDir,
+        [string]$KeepVersionId = '',
+        [int]$KeepArchiveCount = 3
+    )
+
+    $stableDll = Get-TsfStableDllPath -InstallDir $InstallDir
+    $stale = @()
+
+    # 1. 旧布局版本化残留（固定名与 .zy-del 之外的都清理）。
+    foreach ($f in @(Get-ChildItem -LiteralPath $InstallDir -File -ErrorAction SilentlyContinue)) {
+        if ($f.FullName -eq $stableDll) { continue }
+        if ($f.Name -like 'zhu_ye_ime_*.dll' -or $f.Name -like 'zhu-ye-ime-*.dll' -or
+            $f.Name -like 'zhu_ye_ime_*.dll.zy-del*' -or $f.Name -like 'zhu-ye-ime-*.dll.zy-del*') {
+            $stale += $f.FullName
+        }
+    }
+
+    # 2. 版本归档：只保留最近 $KeepArchiveCount 个（含当前版本）。
+    $versionsDir = Get-TsfVersionsDir -InstallDir $InstallDir
+    if (Test-Path -LiteralPath $versionsDir -PathType Container) {
+        $archives = @(Get-ChildItem -LiteralPath $versionsDir -Directory -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending)
+        $keep = 0
+        foreach ($dir in $archives) {
+            $keep++
+            if ($keep -le $KeepArchiveCount -or $dir.Name -eq $KeepVersionId) { continue }
+            $stale += (Join-Path $dir.FullName $script:TsfIdentity['StableDllName'])
+            # 空目录一并移除。
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($stale.Count -gt 0) {
+        Write-Host "清理旧版本 DLL（$($stale.Count) 个）："
+        Add-TsfDelayedCleanup -Paths $stale
+    }
+    return $stale
 }
