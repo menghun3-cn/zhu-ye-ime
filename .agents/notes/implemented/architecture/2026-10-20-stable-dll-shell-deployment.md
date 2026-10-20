@@ -24,20 +24,6 @@ had no cleanup step, so the directory grew without bound. Measured on the
 development machine after 49 deployments: 50 DLL files totalling 106.2 MB
 on disk, of which 48 were unreachable.
 
-This is also how Sogou behaves, and its own binaries say so. Extracted
-from `SGTool.exe` (Sogou 15.4.0.1862):
-
-- 「以下程序使用了Sogou输入法,要避免重启,请先关闭这些程序.」
-- 「本设置重启应用程序后生效」
-- 「上一次的操作需要重启才生效」
-- 「立即重启」/「稍后重启」
-- 「重启后才能生效」
-
-Sogou therefore does not hot-replace the running code either. It keeps a
-stable shell in `C:\WINDOWS\system32\SogouTSF.ime` and a versioned
-implementation under `D:\tools\SogouInput\<version>\`, and it tells the
-user which programs still hold the old version.
-
 ## Decision
 
 The host loads one file whose name never changes, and the registry
@@ -45,7 +31,7 @@ pointer never changes either.
 
 ```
 C:\Program Files\zhu-ye-ime\tsf\
-├── zhu_ye_ime.dll                    ← stable shell, the only file a host loads
+├── zhu_ye_ime.dll                    ← stable file, the only one a host loads
 └── versions\
     └── <sha8>\
         ├── zhu_ye_ime.dll            ← archived implementation of that version
@@ -74,6 +60,69 @@ same family of limitation already recorded for `MoveFileEx` in
 `scripts/ime-identity.ps1`. The backup path therefore points into the
 version archive, which also keeps the replaced implementation.
 
+## Scope of this decision
+
+This decision covers the **stable file identity and the upgrade
+mechanism**. It does not make an already-open host run new code, and it
+was not intended to. See "Limit of the guarantee" below.
+
+## Limit of the guarantee
+
+A host that has already loaded the file keeps running the bytes that were
+mapped at that moment. This is not an implementation shortcoming; it is
+the documented behaviour of the Windows loader.
+
+Measured on the development machine after the migration: nine processes
+still mapped the old DLLs (`notepad++` → `zhu_ye_ime_9ACBCEF1.dll`,
+`Weixin` → `zhu_ye_ime_A4277E6B.dll`, and so on), and **the files those
+processes mapped no longer exist on disk** — they were deleted by the
+cleanup path. The processes kept executing the old code from memory pages
+that Windows keeps alive for them until the process exits.
+
+In-process reload is technically reachable: a controlled experiment showed
+that `FreeLibrary` followed by `LoadLibraryW` returns a handle to the
+newly replaced content within the same process. Reaching it in a real
+host, however, requires the host to release every COM reference it holds
+on the text service and then to re-activate the input method, which is
+the host's decision, not ours. `ITfInputProcessorProfileMgr::ReleaseInputProcessor`
+(`msctf.h`) is the TSF-side entry point for dropping that reference.
+
+## Sogou's structure, measured
+
+Sogou 15.4.0.1862 was inspected on this machine because the user
+reported that Sogou does not require re-opening a host after an update.
+The measurement shows a three-layer structure, and the top layer is
+exactly the piece this note does not have:
+
+| Layer | File | Loaded by | After an update |
+| --- | --- | --- | --- |
+| Stable shell | `C:\WINDOWS\system32\SogouTSF.ime` (4,672,832 B) | every host, via `CLSID {E7EA138E-…}` | never changes |
+| Input method implementation | `D:\tools\SogouInput\15.4.0.1862\SogouTSF.dll` (96 KB) + `ImeFunc.dll` (2,644 KB) | the shell, at runtime | replaceable |
+| Resources and helpers | `Resource.dll`, `SearchCand.dll`, … | some hosts directly | partially stale |
+
+The shell carries its own loader — the strings
+`UserEnv::t_envContainer::t_loader::Load`, `GetEnv`, `CopyFrom` and
+`DumpFrom` are present in it, together with `LoadLibraryA`,
+`LoadLibraryW`, `LoadLibraryExW` and `GetProcAddress` — and it locates
+the version directory through `Software\SogouInput`. The shell references
+`SogouTSF.dll` by bare name, and that DLL exists only inside the version
+directory, so the shell resolves the version directory at load time and
+loads the implementation from there. Component directories are versioned
+per component (`Components\IChat\` holds `1.0.2.3040`, `1.0.2.3099` and
+`1.0.2.3127` side by side), which is what makes a per-process version
+switch possible at all.
+
+The distinction that matters: **the host depends on the shell, and the
+shell is what loads the implementation.** A host that loaded the
+implementation directly — as this project does — freezes the
+implementation in its own address space at load time and cannot be
+upgraded in place.
+
+Sogou also surfaces the remaining gap in its own binaries: `SGTool.exe`
+carries 「以下程序使用了Sogou输入法,要避免重启,请先关闭这些程序.」 and
+「立即重启」/「稍后重启」, so the shell's version switch does not cover
+every process either.
+
 ## Alternatives considered
 
 - **Keep the versioned filename and only change the cleanup**: this fixes
@@ -82,17 +131,17 @@ version archive, which also keeps the replaced implementation.
   deployment directory listing as a history of builds rather than a
   statement of what is currently loaded.
 - **Write a forwarding shell that loads the versioned implementation at
-  runtime** (Sogou's structure): this would let the shell resolve a
-  version pointer per process, but it adds a second DLL to build, sign
-  and debug, and a forwarding layer that every TSF entry point has to
-  cross. `ReplaceFileW` reaches the same user-visible outcome — a newly
-  opened host runs the new code — without that layer, so the extra
-  machinery would buy nothing observable.
+  runtime** (Sogou's structure): this is the only structure that lets an
+  already-open host pick up a new implementation, and it is the natural
+  successor to this note. It was not adopted here because the stable-file
+  identity and the cleanup problem are worth fixing on their own, and
+  because the shell only pays off once the host-side release-and-
+  re-activate path is validated. The shell must be a separate artifact
+  that forwards every TSF entry point, and the version pointer it
+  resolves must be read per process, not baked in.
 - **Ask the user to close every program that uses the input method after
-  each upgrade** (Sogou's approach): this is a worse experience than the
-  one the current layout already gives, and it is unnecessary here. The
-  only remaining gap is that already-open windows keep the old code,
-  which is inherent to a running process and is also true of Sogou.
+  each upgrade** (the prompt Sogou shows): a worse experience than the
+  one the current layout already gives, and unnecessary here.
 - **Overwrite the stable file in place with `CopyFile`**: rejected by
   measurement. The file is mapped by running hosts, and the write is
   refused (`Access to the path … is denied`).
@@ -108,9 +157,7 @@ version archive, which also keeps the replaced implementation.
   `CLSID\<tip>\InprocServer32` or the language profile's `IconFile`.
 - A newly opened host always runs the current build, with no need to
   restart the shell or the input method framework.
-- An already-open host keeps the implementation it started with. This is
-  a property of the running process, not of the deployment; Sogou has the
-  same property and surfaces it as a prompt.
+- An already-open host keeps the implementation it started with.
 - The deployment directory holds one stable file plus a bounded set of
   version archives. `Remove-TsfOldVersionDlls` keeps the three most
   recent archives and sweeps the rest.
