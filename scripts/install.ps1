@@ -276,6 +276,12 @@ Write-Host "已创建快捷方式: $startMenu"
 # 永不再被加载；versions\ 下超过保留份数的旧归档同样回收。
 Remove-TsfOldVersionDlls -InstallDir $InstallDir -KeepVersionId $dllInstall.VersionId | Out-Null
 
+# ---- 8. 重启 ctfmon 让输入法指示器图标重新加载（T-176）----
+# ctfmon 缓存语言档的 IconFile 路径与已加载的 TSF DLL。部署位文件名变更
+# （T-175 固定名壳统一为 zhu-ye-ime.dll）或 DLL 被替换后，缓存指向的旧路径
+# 已不存在，任务栏「竹」图标会取不到而显示空白。重启 ctfmon 让它重读注册表。
+Restart-TsfFramework | Out-Null
+
 Write-Host "安装完成: $targetDll"
 if ($previousDll -and $previousDll -ne $targetDll) {
     Write-Host "已从 $previousDll 升级为固定名壳；旧版本文件将在系统重启后自动清理。"
