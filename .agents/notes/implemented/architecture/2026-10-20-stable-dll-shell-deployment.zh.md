@@ -24,15 +24,15 @@ TSF 文本服务 DLL 原按内容指纹命名部署（`zhu_ye_ime_<sha8>.dll` /
 
 ```
 C:\Program Files\zhu-ye-ime\tsf\
-├── zhu_ye_ime.dll                    ← 稳定文件，宿主唯一加载的文件
+├── zhu-ye-ime.dll                    ← 稳定文件，宿主唯一加载的文件
 └── versions\
     └── <sha8>\
-        ├── zhu_ye_ime.dll            ← 该版本的实现归档
-        └── .zhu_ye_ime.dll.replaced  ← 本次升级被替换掉的实现
+        ├── zhu-ye-ime.dll            ← 该版本的实现归档
+        └── .zhu-ye-ime.dll.replaced  ← 本次升级被替换掉的实现
 ```
 
 升级把新构建复制进 `versions\<sha8>\`，然后用 `ReplaceFileW` 替换稳定文件。
-注册表**不动**——指针本来就是 `zhu_ye_ime.dll`，此后一直如此。
+注册表**不动**——指针本来就是 `zhu-ye-ime.dll`，此后一直如此。
 
 `ReplaceFileW` 正是为这件事设计的 Windows API——替换正在被使用的文件。它为
 已打开该文件的进程保留旧的段映射，同时把新内容放到磁盘上，供此后打开该
@@ -40,7 +40,7 @@ C:\Program Files\zhu-ye-ime\tsf\
 
 - 在 chrome 与 msedge 已映射 `zhu_ye_ime_937632A1.dll` 的情况下替换成功；
   两个进程保持旧映射，磁盘上文件变为新构建（SHA-256 `9D8188AC…`）。
-- 新进程加载稳定文件成功并映射 `zhu_ye_ime.dll`（句柄
+- 新进程加载稳定文件成功并映射 `zhu-ye-ime.dll`（句柄
   `140712931753984`，Win32 0）。
 
 有一处平台细节决定了实现方式：`ReplaceFileW` 的 `lpBackupFileName` 必须给
@@ -102,7 +102,7 @@ Sogou输入法,要避免重启,请先关闭这些程序.」与「立即重启」
 text service 的类工厂**。本机已用探针实测确认。
 
 做法是在 `DllGetClassObject` 里加一行调用计数日志，部署探针版 DLL
-（固定名 `zhu_ye_ime.dll`，SHA-256 `08BD6566…`），再用一个模拟 TSF 宿主的
+（固定名 `zhu-ye-ime.dll`，SHA-256 `08BD6566…`），再用一个模拟 TSF 宿主的
 程序走 `LoadLibrary → DllGetClassObject → CreateInstance → ActivateEx →
 Deactivate` 的完整链路，并在一轮之后调用
 `ITfInputProcessorProfileMgr::DeactivateProfile` 模拟切换输入法。
@@ -117,7 +117,7 @@ Deactivate` 的完整链路，并在一轮之后调用
 
 **每次创建 text service 都会重新调用 `DllGetClassObject`，包括切换输入法
 profile 之后。** 真实宿主侧同样成立：msedge（PID 24300）映射固定名
-`zhu_ye_ime.dll` 并记录了 `call#1`。
+`zhu-ye-ime.dll` 并记录了 `call#1`。
 
 由此确定壳层方案的关键前提成立：**壳可以在每次被索取类工厂时，决定本次会话
 使用哪个版本的实现**。宿主不需要重开窗口——它切换输入法再切回，就会向壳索取
@@ -175,15 +175,15 @@ profile 之后。** 真实宿主侧同样成立：msedge（PID 24300）映射固
 - 被映射文件上的 `ReplaceFileW`：给真实备份路径成功（`Win32=203`），传
   `NULL` 失败（`Win32=3`）。
 - 被映射文件的重命名：成功，且持有该文件的进程保持旧映射。
-- `install.ps1` 演练到临时目录：首次安装产出 `zhu_ye_ime.dll` 与
+- `install.ps1` 演练到临时目录：首次安装产出 `zhu-ye-ime.dll` 与
   `versions\9d8188ac\`；第二次用不同内容安装时替换了稳定文件并归档新版本。
 - 稳定文件被另一进程持有时的演练：替换仍然成功。
 - 替换后文件的 `verify-tsf-dll.ps1`：PE 头校验通过，三个导出
   （`DllGetClassObject`、`DllCanUnloadNow`、`dll_probe`）全部解析成功。
 - 迁移后的开发机：注册表指针为
-  `C:\Program Files\zhu-ye-ime\tsf\zhu_ye_ime.dll`，该文件 SHA-256 与 release
-  构建一致（`9D8188AC…`）；新进程映射 `zhu_ye_ime.dll`。
-- 开发机第二次升级（新构建 `2A2AC376…`）：指针仍为 `zhu_ye_ime.dll`，磁盘
+  `C:\Program Files\zhu-ye-ime\tsf\zhu-ye-ime.dll`，该文件 SHA-256 与 release
+  构建一致（`9D8188AC…`）；新进程映射 `zhu-ye-ime.dll`。
+- 开发机第二次升级（新构建 `2A2AC376…`）：指针仍为 `zhu-ye-ime.dll`，磁盘
   文件已换成新构建。
 - 进程内重载实验：持有该文件的进程执行 `FreeLibrary` + `LoadLibraryW` 后，
   观察到已被替换的新内容。

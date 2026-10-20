@@ -213,7 +213,7 @@ pub fn current_inproc_dll() -> Option<PathBuf> {
 
 /// 回退来源：安装目录（`exe 所在目录\tsf`）下的 TSF DLL。
 ///
-/// T-175 起宿主只加载**固定名壳** `zhu_ye_ime.dll`，注册表指针恒定指向它，
+/// T-175 起宿主只加载**固定名壳** `zhu-ye-ime.dll`，注册表指针恒定指向它，
 /// 首选路径即该文件。旧布局（`zhu-ye-ime-<hash8>.dll` / `zhu_ye_ime_<hash8>.dll`）
 /// 仍需兼容：固定名不存在时回退到目录下最新的匹配 DLL。
 #[must_use]
@@ -226,7 +226,7 @@ pub fn find_bundled_dll() -> Option<PathBuf> {
 /// 抽成独立函数以便单测——`find_bundled_dll` 依赖当前进程路径，无法在测试中
 /// 构造目录。
 fn find_dll_in_dir(dir: &Path) -> Option<PathBuf> {
-    let stable = dir.join("zhu_ye_ime.dll");
+    let stable = dir.join("zhu-ye-ime.dll");
     if stable.is_file() {
         return Some(stable);
     }
@@ -239,6 +239,10 @@ fn find_dll_in_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 /// 判定文件名是否为 TSF DLL（固定名壳或旧布局版本化名）。
+///
+/// 同时接受两种历史命名：连字符 `zhu-ye-ime` / `zhu-ye-ime-<hash>`（当前布局）
+/// 与下划线 `zhu_ye_ime` / `zhu_ye_ime_<hash>`（更早的历史布局，需能识别以便
+/// 清理残留）。
 fn is_tsf_dll_name(path: &Path) -> bool {
     if path.extension().and_then(|ext| ext.to_str()) != Some("dll") {
         return false;
@@ -506,20 +510,22 @@ mod tests {
         );
     }
 
-    /// T-175：固定名壳 `zhu_ye_ime.dll` 优先被选中。
+    /// T-175：固定名壳 `zhu-ye-ime.dll` 优先被选中。
     ///
-    /// 此前回退只认连字符命名（`zhu-ye-ime` / `zhu-ye-ime-`），而实际部署的
-    /// 文件名是下划线 `zhu_ye_ime.dll`——该回退在真实部署下从未命中。
+    /// 固定名与项目标识符一致（连字符）。旧布局有两种历史命名：连字符
+    /// `zhu-ye-ime-<hash>.dll`（T-026 起）与下划线 `zhu_ye_ime_<hash>.dll`
+    /// （更早），两者都应被识别为旧布局并让位给固定名。
     #[test]
     fn 固定名壳优先被选中() {
         let dir = std::env::temp_dir().join("zy-registry-stable-shell");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("zhu_ye_ime.dll"), b"stable").unwrap();
-        std::fs::write(dir.join("zhu_ye_ime_9d8188ac.dll"), b"old").unwrap();
+        std::fs::write(dir.join("zhu-ye-ime.dll"), b"stable").unwrap();
+        std::fs::write(dir.join("zhu-ye-ime-9d8188ac.dll"), b"old").unwrap();
+        std::fs::write(dir.join("zhu_ye_ime_9d8188ac.dll"), b"older").unwrap();
 
         let found = find_dll_in_dir(&dir).expect("应找到固定名壳");
-        assert_eq!(found.file_name().unwrap(), "zhu_ye_ime.dll");
+        assert_eq!(found.file_name().unwrap(), "zhu-ye-ime.dll");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

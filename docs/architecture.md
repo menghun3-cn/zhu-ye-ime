@@ -106,7 +106,7 @@ Tab 切换模式 -> Candidate.translation 集合
 - TIP CLSID 固定为 `{E54D6682-8650-40E7-A9EE-6FD1137849AE}`；zh-CN Profile 固定为 `{6315FE74-92C3-439B-8CDF-FDB6E43EDAF1}`
 - DLL 只导出 `DllGetClassObject`、`DllCanUnloadNow` 与开发探针 `dll_probe`
 - 注册表只由 `scripts/install.ps1` / `scripts/uninstall.ps1` 管理；使用 `InProcServer32` + `ThreadingModel=Apartment`
-- **固定名壳部署（T-175）**：宿主只加载 `tsf\zhu_ye_ime.dll`（文件名永不变），
+- **固定名壳部署（T-175）**：宿主只加载 `tsf\zhu-ye-ime.dll`（文件名永不变），
   `InProcServer32` 与语言档 `IconFile` **恒定**指向它，升级不再改注册表。各版本
   实现归档在 `tsf\versions\<sha8>\`；升级用 `ReplaceFileW` 原子替换固定名——目标
   正被宿主进程映射时同样成功（已打开的宿主保留旧句柄，新开的宿主立即用新版）。

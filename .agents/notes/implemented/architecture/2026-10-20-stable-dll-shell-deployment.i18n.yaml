@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-10-20-stable-dll-shell-deployment.md
 #   git hash-object 2026-10-20-stable-dll-shell-deployment.zh.md
-2026-10-20-stable-dll-shell-deployment.md: e00f935701a292a0efe0f1912926417fca892be7
-2026-10-20-stable-dll-shell-deployment.zh.md: 85cb1baf728b75778e1c857c9aec29db65b7ca68
+2026-10-20-stable-dll-shell-deployment.md: c59d2a676fd74aa69f3348572f73bda60fe3b614
+2026-10-20-stable-dll-shell-deployment.zh.md: 6a9524b0caf2da737c6bbc240f0d842d48157ed4

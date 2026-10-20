@@ -31,16 +31,16 @@ pointer never changes either.
 
 ```
 C:\Program Files\zhu-ye-ime\tsf\
-├── zhu_ye_ime.dll                    ← stable file, the only one a host loads
+├── zhu-ye-ime.dll                    ← stable file, the only one a host loads
 └── versions\
     └── <sha8>\
-        ├── zhu_ye_ime.dll            ← archived implementation of that version
-        └── .zhu_ye_ime.dll.replaced  ← the implementation the upgrade replaced
+        ├── zhu-ye-ime.dll            ← archived implementation of that version
+        └── .zhu-ye-ime.dll.replaced  ← the implementation the upgrade replaced
 ```
 
 An upgrade copies the new build into `versions\<sha8>\` and then replaces
 the stable file with `ReplaceFileW`. The registry is not touched: the
-pointer already says `zhu_ye_ime.dll`, and it will keep saying so.
+pointer already says `zhu-ye-ime.dll`, and it will keep saying so.
 
 `ReplaceFileW` is the Windows API for exactly this job — replacing a file
 that is in use. It preserves the old section mappings for the processes
@@ -51,7 +51,7 @@ every process that opens it afterwards. Measured on this machine:
   mapped succeeded; both processes kept their old mapping, and the file
   on disk became the new build (SHA-256 `9D8188AC…`).
 - Loading the stable file from a fresh process succeeded and mapped
-  `zhu_ye_ime.dll` (handle `140712931753984`, Win32 0).
+  `zhu-ye-ime.dll` (handle `140712931753984`, Win32 0).
 
 One platform detail shaped the implementation: `ReplaceFileW`'s
 `lpBackupFileName` must name a real path. Passing `NULL` or an empty
@@ -130,7 +130,7 @@ TSF for the text service class factory again when the input method is
 switched?** That was measured on this machine.
 
 A call counter was added to `DllGetClassObject` and the probe build was
-deployed under the stable name (`zhu_ye_ime.dll`, SHA-256 `08BD6566…`). A
+deployed under the stable name (`zhu-ye-ime.dll`, SHA-256 `08BD6566…`). A
 program that imitates a TSF host then walked the full chain —
 `LoadLibrary → DllGetClassObject → CreateInstance → ActivateEx →
 Deactivate` — and called
@@ -146,7 +146,7 @@ simulate an input method switch. The sentinel log
 
 **The class factory is requested again every time a text service is
 created, including after an input method profile switch.** The same holds
-for a real host: msedge (PID 24300) mapped the stable `zhu_ye_ime.dll` and
+for a real host: msedge (PID 24300) mapped the stable `zhu-ye-ime.dll` and
 recorded `call#1`.
 
 This establishes the premise the shell layer needs: **the shell can decide
@@ -227,7 +227,7 @@ change versions: implementations at different paths are independent modules
 - Rename of a mapped file: succeeded, and the holding processes kept
   their old mapping.
 - Dry run of `install.ps1` into a temporary directory: first install
-  produced `zhu_ye_ime.dll` plus `versions\9d8188ac\`; a second install
+  produced `zhu-ye-ime.dll` plus `versions\9d8188ac\`; a second install
   with different content replaced the stable file and archived the new
   version.
 - Dry run with the stable file held open by another process: the
@@ -236,9 +236,9 @@ change versions: implementations at different paths are independent modules
   all three exports (`DllGetClassObject`, `DllCanUnloadNow`,
   `dll_probe`) resolved.
 - Development machine after migration: the registry pointer reads
-  `C:\Program Files\zhu-ye-ime\tsf\zhu_ye_ime.dll` and the file's
+  `C:\Program Files\zhu-ye-ime\tsf\zhu-ye-ime.dll` and the file's
   SHA-256 matches the release build (`9D8188AC…`); a fresh process maps
-  `zhu_ye_ime.dll`.
+  `zhu-ye-ime.dll`.
 
 ## Related
 

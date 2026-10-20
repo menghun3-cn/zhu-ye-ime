@@ -79,8 +79,9 @@ $dllPaths = @()
 if ($activeDll -and (Test-Path -LiteralPath $activeDll -PathType Leaf)) {
     $dllPaths += $activeDll
 }
-# T-175 固定名壳：主入口是 zhu_ye_ime.dll（下划线），旧布局残留是
-# zhu-ye-ime-<sha8>.dll / zhu_ye_ime_<sha8>.dll；两种命名都要覆盖。
+# T-175 固定名壳：主入口是 zhu-ye-ime.dll（连字符，与项目标识符一致），
+# 旧布局残留是 zhu-ye-ime-<sha8>.dll / zhu_ye_ime_<sha8>.dll（后者更早），
+# 以及 T-175 期间用过的下划线固定名 zhu_ye_ime.dll；两种命名都要覆盖。
 $dllPaths += @(Get-ChildItem -LiteralPath $InstallDir -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like 'zhu-ye-ime*.dll*' -or $_.Name -like 'zhu_ye_ime*.dll*' } |
     ForEach-Object { $_.FullName })
