@@ -78,6 +78,7 @@ if (-not $SkipBuild) {
     }
 }
 foreach ($artifact in @($dictExe, (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll'),
+        (Join-Path $repoRoot 'target\release\zhu_ye_ime_shell.dll'),
         (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe'),
         (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'),
         (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe'))) {
@@ -152,7 +153,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zipRead = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zipDest))
 try {
     $zipNames = @($zipRead.Entries | ForEach-Object { $_.FullName })
-    foreach ($entry in @('bin/zhu-ye-tray.exe', 'bin/zhu-ye-settings.exe', 'bin/zhu-ye-updater.exe', 'bin/zhu_ye_ime.dll', 'bin/dictionary.zyct', 'bin/dictionary.zyct.tones')) {
+    foreach ($entry in @('bin/zhu-ye-tray.exe', 'bin/zhu-ye-settings.exe', 'bin/zhu-ye-updater.exe', 'bin/zhu-ye-ime.dll', 'bin/zhu-ye-impl.dll', 'bin/dictionary.zyct', 'bin/dictionary.zyct.tones')) {
         if ($zipNames -notcontains $entry) {
             throw "发布 zip 缺少组件 $entry —— 发行包组装有缺口，中止发布。"
         }

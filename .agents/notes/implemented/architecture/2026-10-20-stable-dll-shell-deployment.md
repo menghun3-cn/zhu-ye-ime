@@ -38,6 +38,25 @@ C:\Program Files\zhu-ye-ime\tsf\
         └── .zhu-ye-ime.dll.replaced  ← the implementation the upgrade replaced
 ```
 
+> **Updated by T-176.** The layout above is the T-175 form. Under the shell
+> architecture the stable file holds the **shell** rather than the
+> implementation, the archived file is named `zhu-ye-impl.dll`, and a
+> pointer file `versions\current.txt` selects the active version:
+>
+> ```
+> C:\Program Files\zhu-ye-ime\tsf\
+> ├── zhu-ye-ime.dll              ← the shell: the only file a host loads
+> └── versions\
+>     ├── current.txt             ← pointer: 8 hex digits of the active version
+>     └── <sha8>\
+>         └── zhu-ye-impl.dll     ← the implementation of that version
+> ```
+>
+> The mechanism described below — `ReplaceFileW` against the stable name,
+> the `versions\<sha8>\` archive, the delayed cleanup — is unchanged and
+> still in force. See
+> [Stable shell with runtime reload of versioned implementation](2026-10-20-stable-shell-runtime-reload.md).
+
 An upgrade copies the new build into `versions\<sha8>\` and then replaces
 the stable file with `ReplaceFileW`. The registry is not touched: the
 pointer already says `zhu-ye-ime.dll`, and it will keep saying so.
@@ -78,6 +97,16 @@ still mapped the old DLLs (`notepad++` → `zhu_ye_ime_9ACBCEF1.dll`,
 processes mapped no longer exist on disk** — they were deleted by the
 cleanup path. The processes kept executing the old code from memory pages
 that Windows keeps alive for them until the process exits.
+
+> **Updated by T-176.** This limit applies to the stable file as it was
+> under T-175, where the stable file *was* the implementation. Under the
+> shell architecture the stable file is a shell that loads the
+> implementation at runtime and swaps it on activation, so an already-open
+> host does pick up a new implementation without reopening anything. The
+> nine processes above still hold v1 implementations until they restart,
+> which is why the shared `user_words.json` conflict persists until the
+> planned system restart. See
+> [Stable shell with runtime reload of versioned implementation](2026-10-20-stable-shell-runtime-reload.md).
 
 In-process reload is technically reachable: a controlled experiment showed
 that `FreeLibrary` followed by `LoadLibraryW` returns a handle to the

@@ -22,9 +22,14 @@ Win11 任务栏指示器按 TIP 语言档注册的 `IconFile` 加载图标资源
 
 - **图标**：`crates/zhu-ye-ime/assets/zhu.ico`（32×32，品牌橙底
   `#E5881E` 白字"竹"，System.Drawing 生成，766B）经 `build.rs` 用
-  `winresource`（build-dependencies）嵌入 `zhu_ye_ime.dll`；语言档
+  `winresource`（build-dependencies）嵌入 DLL；语言档
   `IconFile` 指向 DLL、`IconIndex=0`。`ExtractIconEx` 验证：提取得
   非空 HICON。
+  > **更新（T-176）**：固定名 `zhu-ye-ime.dll` 现在是**稳定壳**
+  > （`zhu-ye-ime-shell` crate 的产物），而 `IconFile` 仍指向该固定名，
+  > 因此图标资源改为嵌入**壳**（`crates/zhu-ye-ime-shell/build.rs`，
+  > 图标文件一并复制到该 crate 的 `assets/`）。实现 DLL 位于
+  > `versions\<sha8>\zhu-ye-impl.dll`，不承载图标。
 - **名称**：`GetInfo` `szDescription` 与 LanguageProfile
   `Description`/`Display Description` 一律还原"竹叶输入法（中英切换）"；
   单字"竹"只存在于图标，不再占用名称字段。

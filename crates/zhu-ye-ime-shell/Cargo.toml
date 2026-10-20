@@ -1,0 +1,26 @@
+[package]
+name = "zhu-ye-ime-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "竹叶输入法 TSF 稳定壳：加载版本化实现并在其之上提供 COM 代理"
+
+[lib]
+# 仅 `cdylib` 供 TSF 宿主加载。壳不含输入法逻辑，只做「加载版本化实现 +
+# COM 代理转发」，从而让已打开的宿主在获得输入焦点时即可换用新版实现。
+crate-type = ["cdylib"]
+
+[build-dependencies]
+# T-112b：把"竹"字品牌图标注入壳 DLL 资源（任务栏指示器图标源）。
+winresource = "0.1"
+
+[dependencies]
+windows = { version = "0.61", features = [
+    "Foundation",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_TextServices",
+] }
+windows-core = { version = "0.61" }

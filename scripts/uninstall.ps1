@@ -129,6 +129,16 @@ foreach ($exeName in @('zhu-ye-settings.exe', 'zhu-ye-updater.exe', 'zhu-ye-tray
 }
 
 # ---- 空目录清理（tsf、bin、应用根），用户数据目录不动 ----
+# T-176：versions\current.txt（版本指针）不是 DLL，需单独删除，否则
+# versions\ 目录非空会导致安装目录残留。
+$pointerFile = Join-Path (Join-Path $InstallDir 'versions') 'current.txt'
+if (Test-Path -LiteralPath $pointerFile -PathType Leaf) {
+    try {
+        Remove-Item -LiteralPath $pointerFile -Force -ErrorAction Stop
+    } catch {
+        Add-TsfDelayedCleanup -Paths $pointerFile
+    }
+}
 foreach ($dir in @($InstallDir, $exeDir)) {
     if (Test-Path -LiteralPath $dir -PathType Container) {
         $remaining = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)

@@ -66,6 +66,13 @@ zhu-ye-ime
   ├── ui        候选窗 Win32 自绘、主题、DPI
   └── bridge    TSF 事件 <-> zhu-ye-core 调用映射
 
+zhu-ye-ime-shell（T-176 稳定壳）
+  ├── version   版本指针读写（versions/current.txt）
+  ├── loader    版本化实现的 LoadLibrary + DllGetClassObject
+  ├── proxy     代理 COM 对象：转发 24 个接口方法给当前实现
+  └── swap      版本比对与实现替换（Activate 时机）
+  # 宿主唯一加载目标；实现由它按指针在运行时加载
+
 zhu-ye-settings（第八期规划，尚未交付）
   ├── ui       设置窗口 Win32 自绘与消息循环
   ├── pages    三页视图模型（纯逻辑）
@@ -78,6 +85,7 @@ zhu-ye-settings（第八期规划，尚未交付）
 
 - `zhu-ye-core` 不得依赖 `windows` crate 或任何平台 API
 - `zhu-ye-ime` 只做适配，不承载算法
+- `zhu-ye-ime-shell` 不依赖 `zhu-ye-ime`（壳不链接实现，实现被壳在运行时加载）
 - `zhu-ye-dict` 只构建数据，不依赖运行时平台
 - `zhu-ye-cli` 可依赖全部 crate，仅用于开发调试
 - `zhu-ye-settings` 的配置读写、包清单扫描与修复决策不得依赖 Win32，以保持可单测
@@ -112,6 +120,23 @@ Tab 切换模式 -> Candidate.translation 集合
   正被宿主进程映射时同样成功（已打开的宿主保留旧句柄，新开的宿主立即用新版）。
   被占用文件走 `Add-TsfDelayedCleanup`（改名 `*.zy-del` + 重启后清理）。设计理由、
   备选方案与实测证据见 [Agent Note](../.agents/notes/implemented/architecture/2026-10-20-stable-dll-shell-deployment.md)
+- **壳层架构（T-176）**：固定名位放的是**壳**（`zhu-ye-ime-shell` crate 的产物，
+  不含输入法逻辑），真正含逻辑的实现放 `tsf\versions\<sha8>\zhu-ye-impl.dll`，
+  指针文件 `tsf\versions\current.txt`（8 位十六进制）指向当前版本。宿主加载壳后，
+  壳按指针加载实现并持有一个**代理 COM 对象**，把宿主的 24 个方法调用
+  （`ITfTextInputProcessorEx` / `ITfTextInputProcessor` / `ITfKeyEventSink` /
+  `ITfCompositionSink` / `ITfFunction` / `ITfFnConfigure`）转发给当前实现。
+  每次 `Activate`（获得输入焦点）检查指针——指针变了就换实现，此时旧实现已
+  `Deactivate`、无编辑会话，替换最安全；**已打开的宿主无需重开窗口**即用新版。
+  写 `current.txt` 即发布；新版本加载失败则保留旧实现继续工作（降级可用优于
+  不可用）。
+  - 为什么替换粒度必须下沉到 COM 对象内部：实测宿主失焦再聚焦**不会**重新取类
+    工厂（`pid=35348`：取类工厂 1 次 ↔ `ActivateEx` 3 次，含真实上屏），故
+    DLL 级壳无效；外部 TSF 档案 API（`DeactivateProfile` / `ActivateProfile` /
+    `ReleaseInputProcessor`）返回 `S_OK` 但无效果。
+  - 「竹」图标资源嵌在**壳**里（固定名位现在是壳，`IconFile` 指向它）。
+  - 详见 [Agent Note](../.agents/notes/implemented/architecture/2026-10-20-stable-shell-runtime-reload.md)
+    与 [方案设计 §17](方案设计.md)
 - **第八期规划（尚未交付）**：设置窗口的"修复输入法"需要在进程内重注册 TSF，本条"只由脚本管理"
   的口径将被**部分取代**（脚本仍负责安装/卸载，设置窗口只负责修复性重注册）。代价是标识常量
   双份维护，由 `scripts/verify-tsf-identity.ps1` 交叉比对兜底；理由与备选见
@@ -266,12 +291,34 @@ raw 数据（CC-CEDICT/FrequencyWords/GlobalVoices 等）
 ├── crates/
 │   ├── zhu-ye-core/
 │   ├── zhu-ye-ime/
+│   ├── zhu-ye-ime-shell/        # T-176 稳定壳（宿主唯一加载目标）
 │   ├── zhu-ye-settings/       # 第八期规划，尚未交付
 │   ├── zhu-ye-dict/
 │   └── zhu-ye-cli/
 ├── scripts/                   # 安装/卸载/数据抓取/文档门禁脚本
 └── data/                      # 数据清单与构建产物（大文件忽略）
 ```
+
+### 10.0 TSF 部署目录布局（T-176）
+
+```text
+C:\Program Files\zhu-ye-ime\tsf\
+├── zhu-ye-ime.dll            # 稳定壳（宿主唯一加载目标；注册表指针恒指此处）
+├── versions\
+│   ├── current.txt           # 版本指针：8 位十六进制版本 id（如 6fa6af97）
+│   ├── 6fa6af97\
+│   │   └── zhu-ye-impl.dll   # 版本化实现（壳在运行时加载）
+│   └── <sha8>\
+│       └── zhu-ye-impl.dll
+├── dictionary.zyct
+└── en.zyen
+```
+
+- **发布 = 写 `versions\current.txt`**（先写 `.staging` 再改名，原子替换）。
+  壳在每次 `Activate`（获得输入焦点）时读它；指针变了就换实现。
+- 固定名位放的是壳，因此「竹」图标资源必须嵌在壳里（`IconFile` 指向固定名）。
+- 实现侧 DLL 由 `zhu-ye-ime` crate 产出，壳侧由 `zhu-ye-ime-shell` crate 产出；
+  发行包内分别命名为 `zhu-ye-ime.dll`（壳）与 `zhu-ye-impl.dll`（实现）。
 
 ### 10.1 `config.json` 增量字段（T-091）
 

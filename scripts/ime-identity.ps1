@@ -31,6 +31,14 @@ $script:TsfIdentity = [ordered]@{
     # 下划线形式（zhu_ye_ime_*.dll）是更早期的历史布局，只在清理旧残留时识别。
     StableDllName          = 'zhu-ye-ime.dll'
     VersionsDirName        = 'versions'
+    # T-176 壳层架构：固定名位放的是**壳**（zhu-ye-ime-shell crate 的产物），
+    # 真正含输入法逻辑的实现放在 versions\<sha8>\zhu-ye-impl.dll。
+    # 壳在运行时按 versions\current.txt 加载对应版本的实现，并以 COM 代理
+    # 转发宿主的全部调用——因此换版本只需改指针，已打开的宿主在下次获得
+    # 输入焦点时自动换用新版实现。
+    ShellDllName           = 'zhu-ye-ime.dll'
+    ImplDllName            = 'zhu-ye-impl.dll'
+    VersionPointerName     = 'current.txt'
 }
 
 function Get-TsfInstallDir {
@@ -287,67 +295,96 @@ function Get-TsfVersionsDir {
 function Install-TsfStableDll {
     <#
     .SYNOPSIS
-    以「固定名壳 + 版本归档」方式部署 TSF DLL（T-175）。
+    以「稳定壳 + 版本化实现」方式部署 TSF DLL（T-175 / T-176）。
 
     .DESCRIPTION
-    1. 把新实现复制到 versions\<sha8>\zhu-ye-ime.dll（版本归档）；
-    2. 用 ReplaceFileW 原子替换固定名 zhu-ye-ime.dll——该 API 在目标文件正被
-       宿主进程映射时依然成功（保留旧句柄给已打开的宿主，磁盘内容切为新版）；
-    3. 首次安装（固定名不存在）时直接复制。
+    部署两个文件并写一个指针：
+      1. 把新**实现**复制到 versions\<sha8>\zhu-ye-impl.dll（版本归档）；
+      2. 用 ReplaceFileW 原子替换固定名 zhu-ye-ime.dll（**壳**）——该 API 在目标
+         文件正被宿主进程映射时依然成功（保留旧句柄给已打开的宿主，磁盘内容
+         切为新版）；
+      3. 写 versions\current.txt 指向新版本——**这一步即「发布」**：所有已打开
+         的宿主在下一次获得输入焦点时（`Activate`）会读到新指针并换用新版实现。
 
     注册表指针**恒定**指向固定名，升级过程无需改注册表。
 
+    .PARAMETER SourceImplDll
+    版本化实现的源 DLL（`zhu-ye-ime` crate 的产物）。
+
+    .PARAMETER SourceShellDll
+    稳定壳的源 DLL（`zhu-ye-ime-shell` crate 的产物）。为 $null 时跳过壳的
+    替换（仅更新实现与指针，适用于壳未变化的常规升级）。
+
     .OUTPUTS
-    返回有序字典：InstalledPath / VersionId / Replaced / ArchivePath。
+    返回有序字典：InstalledPath / VersionId / Replaced / ArchivePath /
+    PointerPath / ShellReplaced。
     #>
     param(
-        [Parameter(Mandatory)][string]$SourceDll,
-        [Parameter(Mandatory)][string]$InstallDir
+        [Parameter(Mandatory)][string]$SourceImplDll,
+        [Parameter(Mandatory)][string]$InstallDir,
+        [string]$SourceShellDll = ''
     )
 
-    if (-not (Test-Path -LiteralPath $SourceDll -PathType Leaf)) {
-        throw "源 DLL 不存在: $SourceDll"
+    if (-not (Test-Path -LiteralPath $SourceImplDll -PathType Leaf)) {
+        throw "源实现 DLL 不存在: $SourceImplDll"
     }
     $null = New-Item -ItemType Directory -Path $InstallDir -Force
     $stableDll = Get-TsfStableDllPath -InstallDir $InstallDir
-    $versionId = (Get-FileHash -LiteralPath $SourceDll -Algorithm SHA256).Hash.Substring(0, 8).ToLowerInvariant()
+    $versionId = (Get-FileHash -LiteralPath $SourceImplDll -Algorithm SHA256).Hash.Substring(0, 8).ToLowerInvariant()
 
     # 1. 版本归档：把该版本实现留存到 versions\<sha8>\。
     $versionsDir = Get-TsfVersionsDir -InstallDir $InstallDir
     $versionDir = Join-Path $versionsDir $versionId
     $null = New-Item -ItemType Directory -Path $versionDir -Force
-    $archivePath = Join-Path $versionDir $script:TsfIdentity['StableDllName']
-    Copy-Item -LiteralPath $SourceDll -Destination $archivePath -Force
+    $archivePath = Join-Path $versionDir $script:TsfIdentity['ImplDllName']
+    Copy-Item -LiteralPath $SourceImplDll -Destination $archivePath -Force
 
-    # 2. 替换固定名。
+    # 2. 替换固定名（壳）。仅当提供了壳源文件时才做。
     $replaced = $false
-    if (Test-Path -LiteralPath $stableDll -PathType Leaf) {
-        # ReplaceFileW 的替换源与被替换目标不可为同一路径，故用临时文件。
-        $staging = Join-Path $InstallDir (".{0}.staging" -f $script:TsfIdentity['StableDllName'])
-        Copy-Item -LiteralPath $SourceDll -Destination $staging -Force
-        # lpBackupFileName 必须给真实路径：实测本机传 NULL 或空串均返回
-        # ERROR_PATH_NOT_FOUND(3)，给真实路径才成功（与 MoveFileEx 延迟删除
-        # 的同类本机限制一致）。备份即被替换掉的旧版本实现，归档到 versions\。
-        $backup = Join-Path $versionDir (".{0}.replaced" -f $script:TsfIdentity['StableDllName'])
-        try {
-            $ok = [ZhuYe.ReplaceFile]::ReplaceFileW($stableDll, $staging, $backup, 0, [IntPtr]::Zero, [IntPtr]::Zero)
-            if (-not $ok) {
-                $errorCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-                throw "ReplaceFileW 失败（Win32 $errorCode）: $stableDll"
-            }
-            $replaced = $true
-        } finally {
-            Remove-Item -LiteralPath $staging -Force -ErrorAction SilentlyContinue
+    $shellReplaced = $false
+    if ($SourceShellDll) {
+        if (-not (Test-Path -LiteralPath $SourceShellDll -PathType Leaf)) {
+            throw "源壳 DLL 不存在: $SourceShellDll"
         }
-    } else {
-        Copy-Item -LiteralPath $SourceDll -Destination $stableDll -Force
+        if (Test-Path -LiteralPath $stableDll -PathType Leaf) {
+            # ReplaceFileW 的替换源与被替换目标不可为同一路径，故用临时文件。
+            $staging = Join-Path $InstallDir (".{0}.staging" -f $script:TsfIdentity['ShellDllName'])
+            Copy-Item -LiteralPath $SourceShellDll -Destination $staging -Force
+            # lpBackupFileName 必须给真实路径：实测本机传 NULL 或空串均返回
+            # ERROR_PATH_NOT_FOUND(3)，给真实路径才成功（与 MoveFileEx 延迟删除
+            # 的同类本机限制一致）。备份即被替换掉的旧壳，归档到 versions\。
+            $backup = Join-Path $versionDir (".{0}.replaced" -f $script:TsfIdentity['ShellDllName'])
+            try {
+                $ok = [ZhuYe.ReplaceFile]::ReplaceFileW($stableDll, $staging, $backup, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+                if (-not $ok) {
+                    $errorCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                    throw "ReplaceFileW 失败（Win32 $errorCode）: $stableDll"
+                }
+                $shellReplaced = $true
+                $replaced = $true
+            } finally {
+                Remove-Item -LiteralPath $staging -Force -ErrorAction SilentlyContinue
+            }
+        } else {
+            Copy-Item -LiteralPath $SourceShellDll -Destination $stableDll -Force
+            $replaced = $true
+        }
     }
+
+    # 3. 写版本指针——这一步即「发布」。
+    #    原子写：先写 .staging 再改名，避免宿主读到半截内容。
+    $pointerPath = Join-Path $versionsDir $script:TsfIdentity['VersionPointerName']
+    $pointerStaging = Join-Path $versionsDir ('.{0}.staging' -f $script:TsfIdentity['VersionPointerName'])
+    Set-Content -LiteralPath $pointerStaging -Value $versionId -Encoding ASCII -NoNewline
+    Move-Item -LiteralPath $pointerStaging -Destination $pointerPath -Force
 
     return [ordered]@{
         InstalledPath = $stableDll
         VersionId     = $versionId
         Replaced      = $replaced
         ArchivePath   = $archivePath
+        PointerPath   = $pointerPath
+        ShellReplaced = $shellReplaced
     }
 }
 
@@ -392,6 +429,9 @@ function Remove-TsfOldVersionDlls {
     }
 
     # 2. 版本归档：只保留最近 $KeepArchiveCount 个（含当前版本）。
+    #    T-176 起归档内的文件名是 zhu-ye-impl.dll（实现），固定名位是壳。
+    #    T-175 时期的归档里放的是 zhu_ye_ime.dll（实现旧名）——那种目录**整个**
+    #    过时，一律清理（含 ReplaceFileW 留下的 .*.replaced 备份）。
     $versionsDir = Get-TsfVersionsDir -InstallDir $InstallDir
     if (Test-Path -LiteralPath $versionsDir -PathType Container) {
         $archives = @(Get-ChildItem -LiteralPath $versionsDir -Directory -ErrorAction SilentlyContinue |
@@ -399,9 +439,21 @@ function Remove-TsfOldVersionDlls {
         $keep = 0
         foreach ($dir in $archives) {
             $keep++
-            if ($keep -le $KeepArchiveCount -or $dir.Name -eq $KeepVersionId) { continue }
-            $stale += (Join-Path $dir.FullName $script:TsfIdentity['StableDllName'])
-            # 空目录一并移除。
+            $isCurrent = ($dir.Name -eq $KeepVersionId)
+            if ($keep -le $KeepArchiveCount -or $isCurrent) {
+                # 保留的目录也可能是 T-175 旧布局（内含 zhu_ye_ime.dll 而非
+                # zhu-ye-impl.dll）——那种目录对 T-176 无用，照样清理。
+                $hasNewLayout = @(Get-ChildItem -LiteralPath $dir.FullName -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -eq $script:TsfIdentity['ImplDllName'] }).Count -gt 0
+                if ($hasNewLayout) { continue }
+                $stale += @(Get-ChildItem -LiteralPath $dir.FullName -File -Force -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.FullName })
+                Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                continue
+            }
+            # 超出保留数量：整个目录清理。
+            $stale += @(Get-ChildItem -LiteralPath $dir.FullName -File -Force -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.FullName })
             Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue
         }
     }

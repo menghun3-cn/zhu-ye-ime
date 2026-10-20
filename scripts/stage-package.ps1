@@ -7,7 +7,8 @@
 staging 布局（与便携 zip 完全一致，保证 zip/exe 同源同哈希）：
 
     <StagingDir>/
-      bin/zhu_ye_ime.dll             TSF 服务 DLL
+      bin/zhu-ye-ime.dll            TSF 稳定壳 DLL（宿主唯一加载目标，T-176）
+      bin/zhu-ye-impl.dll           TSF 版本化实现 DLL（壳运行时加载）
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
       bin/zhu-ye-tray.exe            托盘常驻进程（批六，中英状态图标）
@@ -36,13 +37,14 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 
 $needed = @(
     (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll'),
+    (Join-Path $repoRoot 'target\release\zhu_ye_ime_shell.dll'),
     (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe'),
     (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe'),
     (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe')
 )
 foreach ($artifact in $needed) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
-        throw "release 产物缺失：$artifact（先运行 cargo build --release -p zhu-ye-ime -p zhu-ye-settings -p zhu-ye-updater -p zhu-ye-tray）"
+        throw "release 产物缺失：$artifact（先运行 cargo build --release -p zhu-ye-ime -p zhu-ye-ime-shell -p zhu-ye-settings -p zhu-ye-updater -p zhu-ye-tray）"
     }
 }
 
@@ -87,7 +89,14 @@ foreach ($script in @(
 }
 
 # ---- bin：DLL、设置窗口、更新器、托盘、基础词典 ----
-Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll') -Destination $binDir
+# T-176 壳层架构：包内有两个 TSF DLL——
+#   zhu-ye-ime.dll   稳定壳（宿主唯一加载目标）
+#   zhu-ye-impl.dll  版本化实现（壳在运行时按 versions\current.txt 加载）
+# 角色分工见 docs/方案设计.md §17。
+Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu_ye_ime_shell.dll') `
+    -Destination (Join-Path $binDir 'zhu-ye-ime.dll')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu_ye_ime.dll') `
+    -Destination (Join-Path $binDir 'zhu-ye-impl.dll')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-settings.exe') -Destination $binDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-updater.exe') -Destination $binDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'target\release\zhu-ye-tray.exe') -Destination $binDir
@@ -118,7 +127,8 @@ $testGuide = @'
 
 ## 结构
 
-    bin/zhu_ye_ime.dll             TSF 服务 DLL
+    bin/zhu-ye-ime.dll            TSF 稳定壳 DLL（宿主唯一加载目标，T-176）
+    bin/zhu-ye-impl.dll           TSF 版本化实现 DLL（壳运行时加载）
     bin/zhu-ye-settings.exe        设置窗口
     bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
     bin/zhu-ye-tray.exe            托盘常驻进程（中英状态图标，批六）
@@ -145,7 +155,8 @@ $testGuide = @'
 
 ## 参考检查
 
-- DLL 导出由 `.\scripts\verify-tsf-dll.ps1 -DllPath .\bin\zhu_ye_ime.dll` 校验。
+- DLL 导出由 `.\scripts\verify-tsf-dll.ps1 -DllPath .\bin\zhu-ye-ime.dll`（壳）与
+  `.\scripts\verify-tsf-dll.ps1 -DllPath .\bin\zhu-ye-impl.dll`（实现）分别校验。
 - 标识常量由 `.\scripts\verify-tsf-identity.ps1` 交叉比对（7 项）。
 - 安装器会把 `bin\dictionary.zyct` 与 `bin\en.zyen` 复制到 DLL 同目录，并把三个领域包预置到
   `%APPDATA%\zhu-ye-ime\packs\`；卸载清理程序文件但保留用户数据目录。

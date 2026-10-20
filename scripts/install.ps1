@@ -112,7 +112,12 @@ Write-Host "发行包根目录: $PackageRoot"
 # ---- 1. 校验发行包内容 ----
 $binDir = Join-Path $PackageRoot 'bin'
 $packsDir = Join-Path $PackageRoot 'packs'
-$sourceDll = Join-Path $binDir 'zhu-ye-ime.dll'
+# T-176 壳层架构：发行包带两个 TSF DLL——
+#   zhu-ye-ime.dll       稳定壳（宿主唯一加载目标，含「竹」图标资源）
+#   zhu-ye-impl.dll      版本化实现（壳在运行时按 versions\current.txt 加载）
+# 二者的角色分工见 docs/方案设计.md §17。
+$sourceShellDll = Join-Path $binDir 'zhu-ye-ime.dll'
+$sourceImplDll = Join-Path $binDir 'zhu-ye-impl.dll'
 $settingsExe = Join-Path $binDir 'zhu-ye-settings.exe'
 $updaterExe = Join-Path $binDir 'zhu-ye-updater.exe'
 $trayExe = Join-Path $binDir 'zhu-ye-tray.exe'
@@ -122,8 +127,11 @@ foreach ($exe in $requireExe) {
         throw "发行包缺少可执行文件：$exe（请先用 package-portable.ps1 生成发行包，或检查 -PackageRoot）"
     }
 }
-if (-not (Test-Path -LiteralPath $sourceDll -PathType Leaf)) {
-    throw "发行包缺少 TSF DLL：$sourceDll"
+if (-not (Test-Path -LiteralPath $sourceShellDll -PathType Leaf)) {
+    throw "发行包缺少 TSF 壳 DLL：$sourceShellDll"
+}
+if (-not (Test-Path -LiteralPath $sourceImplDll -PathType Leaf)) {
+    throw "发行包缺少 TSF 实现 DLL：$sourceImplDll"
 }
 if (-not (Test-Path -LiteralPath $packsDir -PathType Container)) {
     throw "发行包缺少领域包目录：$packsDir"
@@ -134,10 +142,13 @@ foreach ($pack in @('it.zyct', 'med.zyct', 'slang.zyct')) {
     }
 }
 
-# ---- 2. 复制 TSF DLL（固定名壳 + 版本归档，T-175）与基础词典 ----
+# ---- 2. 复制 TSF DLL（稳定壳 + 版本化实现，T-175 / T-176）与基础词典 ----
 # T-175：宿主永远加载 <InstallDir>\zhu-ye-ime.dll（固定名），注册表指针恒定；
 # 升级用 ReplaceFileW 原子替换固定名（正在被映射时同样成功），各版本实现
 # 归档在 versions\<sha8>\ 下。
+# T-176：固定名位放的是**壳**（zhu-ye-ime-shell 产物），实现放
+# versions\<sha8>\zhu-ye-impl.dll；写 versions\current.txt 即发布——已打开的
+# 宿主在下次获得输入焦点时自动换用新版实现。
 $previousDll = Get-TsfInprocServerDefault
 if ($previousDll) {
     Write-Host "当前注册版本: $previousDll"
@@ -145,12 +156,14 @@ if ($previousDll) {
 
 $null = New-Item -ItemType Directory -Path $InstallDir -Force
 try {
-    $dllInstall = Install-TsfStableDll -SourceDll $sourceDll -InstallDir $InstallDir
+    $dllInstall = Install-TsfStableDll -SourceImplDll $sourceImplDll -SourceShellDll $sourceShellDll -InstallDir $InstallDir
 } catch {
     throw "TSF DLL 部署失败（注册表未改动）: $($_.Exception.Message)"
 }
 $targetDll = $dllInstall.InstalledPath
 Write-Host "已部署固定名壳 DLL: $targetDll（版本 $($dllInstall.VersionId)）"
+Write-Host "已归档版本化实现: $($dllInstall.ArchivePath)"
+Write-Host "已发布版本指针: $($dllInstall.PointerPath) → $($dllInstall.VersionId)"
 if ($dllInstall.Replaced) {
     Write-Host '已用 ReplaceFileW 原子替换固定名（已打开的宿主继续用旧版，新开的宿主立即用新版）。'
 }
