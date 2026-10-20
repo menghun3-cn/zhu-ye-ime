@@ -1,0 +1,150 @@
+# Agent Note: Stable shell with runtime reload of versioned implementation
+
+Status: implemented
+
+English | [中文](2026-10-20-stable-shell-runtime-reload.zh.md)
+
+## Problem
+
+T-175 的固定名部署让**文件名**与**注册表指针**恒定，但宿主加载进自己地址空间的
+仍然是**实现本身**。因此已经打开的宿主会一直持有它映射的那份实现，直到它被关闭。
+
+这个限制有实测代价。`user_words.json` 是所有宿主共享的单一文件，T-174 把它的格式
+升到 v2（增 `transitions` 段），但 9 个常驻进程仍持有 **v1** DLL，每次上屏都用全量
+覆盖写盘，把 `version` 写回 1 并整体丢弃 `transitions` 段——转移表因此永远无法积累。
+根因就是那些 v1 DLL，而**没有任何部署技巧能把它们从已运行的进程里移除**。
+
+要让改动送达已打开的宿主，必须替换宿主**内部**的实现，而不是宿主加载的那个文件。
+
+两条观察约束了设计，二者都取自 `C:\zhu-ye-test\tsf-debug.log`。
+
+**宿主失焦再聚焦时不会重新取类工厂。** `pid=35348` 的日志记录了 1 次取类工厂对应
+3 次 `ActivateEx`，跨越 3 个完整焦点周期，其中包含一次真实的 `nihao` →「你好」上屏。
+所以搜狗那种 **DLL 级壳**（宿主加载一个薄加载器，再由它加载版本化 DLL）在这里行不通：
+点走再点回不会触发任何重新解析。
+
+**外部 TSF 档案 API 无效。** `DeactivateProfile`、`ActivateProfile` 与带
+`TF_RIP_FLAG_FREEUNUSEDLIBRARIES` 的 `ReleaseInputProcessor` 全部返回 `S_OK` 且毫无
+变化：输入法仍处于 ACTIVE，同样的 9 个进程仍映射着旧 DLL。
+
+确实有一个 API 会重新取类工厂：**切换输入法档案**。`pid=33100` 的日志记录了
+`call#1`/`call#2`/`call#3`，第三次在 `DeactivateProfile` 之后。这是一个有效的重载
+触发点，但它需要**用户主动操作**——而这正是本方案要消除的东西。
+
+## Decision
+
+宿主加载的那个稳定文件里**不含任何输入法逻辑**。它是一个**壳**，壳持有一个代理
+COM 对象，代理内部的实现指针可替换。实现住在版本目录里，由一个指针文件选中。
+
+```
+C:\Program Files\zhu-ye-ime\tsf\
+├── zhu-ye-ime.dll              ← 壳：宿主唯一加载的文件
+└── versions\
+    ├── current.txt             ← 指针：当前版本的 8 位十六进制 id
+    └── 6fa6af97\
+        └── zhu-ye-impl.dll     ← 该版本的实现
+```
+
+COM 本身就是稳定的跨模块 ABI，所以代理**不需要自造 ABI**。它转发宿主所查询的
+那一组接口，共 24 个方法：`ITfTextInputProcessorEx`（8）、`ITfKeyEventSink`（6）、
+`ITfCompositionSink`（1）、`ITfFunction`（1）、`ITfFnConfigure`（1），外加
+`ITfTextInputProcessor` 的 `Activate` 与 `Deactivate`。
+
+**发布 = 写 `current.txt`。** 指针先写进 `.staging` 再改名，宿主因此绝不会读到半截
+内容。写指针就是发布；不涉及任何注册表写入——`InprocServer32` 与语言档的
+`IconFile` 永远指向那个固定名。
+
+**切换发生在 `Activate`。** 每次激活（即宿主每次获得输入焦点），壳读指针并与当前
+正在代理的实现比对。若不同，壳加载新实现、构造新的文本服务对象并换入，随后释放旧的
+。此时旧实现已经 `Deactivate`、不持有任何编辑会话，因此替换是安全的。指针未变时，
+这次检查只花一次很小的文件读取；按键热路径上**不做任何文件 I/O**。
+
+**失败降级而非失效。** 若新实现加载失败——文件缺失、导出不对、模块装不进来——壳
+**保留旧实现继续工作**并记录错误。保持可用优先于保持最新。
+
+**品牌图标在壳里。** 固定名正是 `IconFile` 解析到的目标，因此 `build.rs` 把「竹」
+图标资源注入到壳 crate 的产物中。
+
+现在有两个 crate：`zhu-ye-ime-shell` 产出壳，`zhu-ye-ime` 产出实现。`zhu-ye-ime`
+是无人依赖的叶子 `cdylib`，因此拆分是安全的——壳并不链接实现，而是运行时按路径加载它。
+
+## Alternatives considered
+
+**A DLL-level shell that loads the versioned implementation and re-exports
+it.** 这是搜狗的结构，也是最初的方案。它被 `pid=35348` 的证据推翻：宿主在焦点变化
+时不会重新请求类工厂，于是壳已加载的模块继续驻留，任何新版本都不会被查阅。之所以
+仍把它记为已否决的候选，是因为它是最显然的首选设计，而**正是实测把它排除掉的**。
+
+**Reloading via the external TSF profile APIs.** `DeactivateProfile`、
+`ActivateProfile`、`ReleaseInputProcessor` 全部返回 `S_OK` 且毫无作用。这是**实测**
+结论，不是假设。
+
+**Making the user switch the input method profile to trigger a reload.** 这确实会
+重新取类工厂（`pid=33100`），但需要用户动作，那正是要解决的问题本身。作为主要机制
+被否决；不过用户无论如何都会切档案，它仍是一条兜底路径。
+
+**Copying the new implementation over the stable name and hoping the host
+re-reads it.** 宿主已经映射了该文件；改磁盘内容不会改变已映射的内容。T-175 已实测：
+`ReplaceFileW` 成功、磁盘内容变新版，但已打开的宿主仍持有旧句柄。
+
+**A custom ABI between shell and implementation.** 没有必要：COM 已经是稳定的
+跨模块 ABI，而代理本来就要实现宿主自己的那组接口。自造 ABI 只会平白多出一层版本
+协商面。
+
+**Swapping the implementation on every keystroke instead of on `Activate`.**
+按键热路径不允许文件 I/O 与锁竞争。`Activate` 是宿主释放编辑会话的最早时刻，因此
+既廉价又安全。
+
+## Consequences
+
+**已打开的宿主无需重开任何窗口即用上新版。** 版本指针在每次激活时都被查阅，因此
+用户下一次点进输入框时，宿主就已经代理到新实现。部署不再需要请用户重启什么——
+这正是与搜狗的差别：搜狗自己的 `SGTool.exe` 里带着「立即重启」/「稍后重启」提示，
+正因为它的壳做不到这件事。
+
+**共享 `user_words.json` 的冲突不会仅凭本次改动消失。** 那 9 个进程里的 v1 DLL 在
+它们重启并加载壳之前，仍会继续写 v1。冲突只有在**所有宿主都跑起壳之后**才消失——
+那是计划中的系统重启，不是本任务的事。本任务移除的是让冲突**永久化**的机制；重启
+移除的是冲突的**实例**。
+
+**发行包从 1 个 DLL 变成 2 个。** 发行包含 `zhu-ye-ime.dll`（壳）与
+`zhu-ye-impl.dll`（实现）。部署脚本、包布局与载荷守卫都已相应更新。
+
+**壳是第二个可能出错的环节。** 畸形指针、缺失实现或损坏模块都不该让输入法瘫掉。
+集成测试显式覆盖了畸形指针与缺失实现两条路径，失败路径保留旧实现继续工作。
+
+**`install` 里的释放顺序有讲究。** 必须**先释放 COM 对象，再卸载它的模块**。若先
+赋值模块句柄，旧实现的代码会在其 COM 对象仍存活时被卸载，而该对象之后的 `Release`
+会落在未映射内存里——访问冲突（`0xC0000005`）。开发中复现过，现已修正并在调用点
+注明为何顺序不可反。
+
+## Testing
+
+- `cargo clippy -p zhu-ye-ime-shell --all-targets -- -D warnings` 全绿。
+- 壳 crate 的 6 个单测：指针缺失、指针往返、非法版本号被拒且不写盘、盘上垃圾被拒、
+  实现路径落在版本子目录下、壳目录可解析。
+- 4 个集成测试（`crates/zhu-ye-ime-shell/tests/shell_integration.rs`）：壳能加载
+  版本化实现并返回代理；代理能被查询出宿主使用的每一个接口；**在同一进程内换版本
+  指针即换实现**（断言旧模块已卸载、新模块已加载）；畸形指针不让壳崩溃；指向不存在
+  的实现不让壳崩溃。
+- 集成测试已对**部署位真实文件**复测并通过（`C:\Program Files\zhu-ye-ime\tsf\zhu-ye-ime.dll`
+  282,112 字节，`versions\6fa6af97\zhu-ye-impl.dll` 2,321,920 字节）。
+- 开发机上壳已被真实 TSF 宿主加载，宿主日志记下 `zhu-ye-shell: 已换用实现 6fa6af97`，
+  证明跨 DLL 链路在真实宿主里成立，而不只是在测试夹具里成立。
+
+## Deferred
+
+交互式验收——已打开的宿主在指针改变后**可见地**切到新实现——仍未完成：部署时会话
+处于锁定状态（`LockApp` 持前台），合成输入无法唤醒。该机制已由集成测试在进程层面
+验证，端到端 UI 检查是另一步。
+
+## Related
+
+- [Stable DLL shell deployment](2026-10-20-stable-dll-shell-deployment.md)
+  （T-175）——本方案所基于的恒定文件名与注册表指针。其 `ReplaceFileW` 替换、
+  `versions\<sha8>\` 归档与延迟清理机制继续有效；变化之处在于归档内容现在是实现，
+  而固定名现在是壳。
+- [Versioned DLL deployment and dictionary location](2026-09-23-versioned-dll-deployment-and-dictionary-location.md)
+  （T-026）——被 T-175 部分取代，其引入的文件命名在此再次被取代。
+- [Taskbar icon 「竹」](2026-10-06-taskbar-icon-zhu.md)——图标资源现在嵌在壳里，
+  因为固定名解析到的是壳。
