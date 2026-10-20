@@ -7,7 +7,7 @@
 发行包布局（由 package-portable.ps1 生成，见 docs/安装与使用.md）：
 
     zhu-ye-ime-<version>/
-      bin/zhu_ye_ime.dll             TSF 服务 DLL（版本化复制到安装目录）
+      bin/zhu-ye-ime.dll             TSF 服务 DLL（版本化复制到安装目录）
       bin/zhu-ye-settings.exe        设置窗口
       bin/zhu-ye-updater.exe         词典更新器（唯一联网组件）
       bin/zhu-ye-tray.exe            托盘常驻进程（批六，中英状态图标）
@@ -112,7 +112,7 @@ Write-Host "发行包根目录: $PackageRoot"
 # ---- 1. 校验发行包内容 ----
 $binDir = Join-Path $PackageRoot 'bin'
 $packsDir = Join-Path $PackageRoot 'packs'
-$sourceDll = Join-Path $binDir 'zhu_ye_ime.dll'
+$sourceDll = Join-Path $binDir 'zhu-ye-ime.dll'
 $settingsExe = Join-Path $binDir 'zhu-ye-settings.exe'
 $updaterExe = Join-Path $binDir 'zhu-ye-updater.exe'
 $trayExe = Join-Path $binDir 'zhu-ye-tray.exe'
@@ -135,7 +135,7 @@ foreach ($pack in @('it.zyct', 'med.zyct', 'slang.zyct')) {
 }
 
 # ---- 2. 复制 TSF DLL（固定名壳 + 版本归档，T-175）与基础词典 ----
-# T-175：宿主永远加载 <InstallDir>\zhu_ye_ime.dll（固定名），注册表指针恒定；
+# T-175：宿主永远加载 <InstallDir>\zhu-ye-ime.dll（固定名），注册表指针恒定；
 # 升级用 ReplaceFileW 原子替换固定名（正在被映射时同样成功），各版本实现
 # 归档在 versions\<sha8>\ 下。
 $previousDll = Get-TsfInprocServerDefault

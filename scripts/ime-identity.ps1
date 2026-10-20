@@ -25,9 +25,11 @@ $script:TsfIdentity = [ordered]@{
     DllName                = 'zhu-ye-ime.dll'
     DictionaryFileName     = 'dictionary.zyct'
     EnWordbookFileName     = 'en.zyen'
-    # T-175 固定名壳布局：宿主永远加载 <InstallDir>\zhu_ye_ime.dll，注册表指针
+    # T-175 固定名壳布局：宿主永远加载 <InstallDir>\zhu-ye-ime.dll，注册表指针
     # 恒定指向它；各版本实现归档在 <InstallDir>\versions\<sha8>\ 下。
-    StableDllName          = 'zhu_ye_ime.dll'
+    # 固定名与上面的 DllName 同名（连字符），与项目标识符 zhu-ye-ime 一致；
+    # 下划线形式（zhu_ye_ime_*.dll）是更早期的历史布局，只在清理旧残留时识别。
+    StableDllName          = 'zhu-ye-ime.dll'
     VersionsDirName        = 'versions'
 }
 
@@ -243,8 +245,8 @@ function Add-TsfDelayedCleanup {
 # 106 MB）。
 #
 # 新布局：
-#   <InstallDir>\zhu_ye_ime.dll          ← 固定名，宿主唯一加载入口，指针恒定
-#   <InstallDir>\versions\<sha8>\zhu_ye_ime.dll  ← 各版本实现归档
+#   <InstallDir>\zhu-ye-ime.dll          ← 固定名，宿主唯一加载入口，指针恒定
+#   <InstallDir>\versions\<sha8>\zhu-ye-ime.dll  ← 各版本实现归档
 #
 # 升级 = 用 ReplaceFileW 原子替换固定名文件。该 API 专为「替换正在被使用
 # 的文件」设计（保留被映射的旧句柄给已打开的宿主，同时让磁盘内容变为
@@ -288,8 +290,8 @@ function Install-TsfStableDll {
     以「固定名壳 + 版本归档」方式部署 TSF DLL（T-175）。
 
     .DESCRIPTION
-    1. 把新实现复制到 versions\<sha8>\zhu_ye_ime.dll（版本归档）；
-    2. 用 ReplaceFileW 原子替换固定名 zhu_ye_ime.dll——该 API 在目标文件正被
+    1. 把新实现复制到 versions\<sha8>\zhu-ye-ime.dll（版本归档）；
+    2. 用 ReplaceFileW 原子替换固定名 zhu-ye-ime.dll——该 API 在目标文件正被
        宿主进程映射时依然成功（保留旧句柄给已打开的宿主，磁盘内容切为新版）；
     3. 首次安装（固定名不存在）时直接复制。
 
@@ -372,8 +374,17 @@ function Remove-TsfOldVersionDlls {
     $stale = @()
 
     # 1. 旧布局版本化残留（固定名与 .zy-del 之外的都清理）。
+    #    需要同时识别两种历史命名：连字符 `zhu-ye-ime-<hash>.dll`（T-026 起）与
+    #    下划线 `zhu_ye_ime_<hash>.dll`（更早的 T-026 之前布局）。
+    #    T-175 期间用过的下划线**固定名** `zhu_ye_ime.dll` 同样属于旧布局，
+    #    改名后需一并清掉；新的连字符固定名 `zhu-ye-ime.dll` 必须保留。
+    $legacyStableNames = @('zhu_ye_ime.dll')
     foreach ($f in @(Get-ChildItem -LiteralPath $InstallDir -File -ErrorAction SilentlyContinue)) {
         if ($f.FullName -eq $stableDll) { continue }
+        if ($legacyStableNames -contains $f.Name) {
+            $stale += $f.FullName
+            continue
+        }
         if ($f.Name -like 'zhu_ye_ime_*.dll' -or $f.Name -like 'zhu-ye-ime-*.dll' -or
             $f.Name -like 'zhu_ye_ime_*.dll.zy-del*' -or $f.Name -like 'zhu-ye-ime-*.dll.zy-del*') {
             $stale += $f.FullName
