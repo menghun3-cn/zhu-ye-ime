@@ -6,10 +6,18 @@
 //!
 //! 失败策略：**降级可用优于不可用**。新版本加载失败时保留旧实现继续工作，
 //! 只记录错误；指针未变时不做任何额外工作（热路径零开销）。
+//!
+//! # 共享粒度：模块共享，实现对象不共享
+//!
+//! 本模块负责换的是**实现模块**（进程级共享），而不是实现对象。实现对象由
+//! 每个代理实例私有持有（见 [`crate::proxy`] 的说明）——TSF 的文本服务是每
+//! 实例独立状态的，共用对象会让实现侧单值状态（如 `AdviseKeyEventSink` 的
+//! `tid`）被覆盖，进而让 TSF 判定该 TIP 不可用并回退到别的输入法。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use crate::loader::LoadedImpl;
+use crate::loader::{ImplModule, SharedImplModule};
 use crate::proxy::{self, Shared};
 use crate::version::{impl_path, read_pointer};
 
@@ -66,36 +74,39 @@ fn versions_dir() -> Option<PathBuf> {
     shell_dir().map(|dir| dir.join("versions"))
 }
 
-/// 若版本指针已变，则加载新实现并换入代理。
+/// 读版本指针，得到当前应使用的版本 id。
 ///
-/// 无指针时不做任何事（保留当前实现）；指针与当前一致时直接返回。
-pub(crate) fn refresh_if_outdated(shared: &Shared) {
-    let Some(versions) = versions_dir() else {
-        return;
-    };
-    let Some(desired) = read_pointer(&versions) else {
-        return;
-    };
-    if proxy::current_version(shared).as_deref() == Some(desired.as_str()) {
-        return;
-    }
-    if let Err(error) = swap_to(shared, &versions, &desired) {
-        // 降级可用：保留旧实现继续工作。
-        crate::log_line(&format!("zhu-ye-shell: 切换实现失败，保留旧实现: {error}"));
-    }
+/// 指针不存在或非法时返回 `None`（调用方保留现状）。
+pub(crate) fn desired_version() -> Option<String> {
+    let versions = versions_dir()?;
+    read_pointer(&versions)
 }
 
-/// 加载指定版本并换入代理槽位。
-fn swap_to(shared: &Shared, versions: &Path, version: &str) -> Result<(), String> {
-    let path = impl_path(versions, version);
+/// 取（或加载）指定版本的实现模块。
+///
+/// 共享槽位里若已是该版本，直接复用——多个代理实例可能同时发现版本变了，
+/// 但模块只需加载一次。
+pub(crate) fn module_for(shared: &Shared, version: &str) -> Result<SharedImplModule, String> {
+    {
+        let guard = shared.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(current) = &guard.current {
+            if current.version() == version {
+                return Ok(Arc::clone(current));
+            }
+        }
+    }
+
+    let Some(versions) = versions_dir() else {
+        return Err("取不到 versions 目录".to_string());
+    };
+    let path = impl_path(&versions, version);
     if !path.is_file() {
         return Err(format!("实现文件不存在: {}", path.display()));
     }
-    let module = LoadedImpl::load(&path)?;
-    let service = module.create_text_service()?;
-    proxy::install(shared, module, service, version.to_string());
+    let module = Arc::new(ImplModule::load(&path, version)?);
+    proxy::install_module(shared, Arc::clone(&module));
     crate::log_line(&format!("zhu-ye-shell: 已换用实现 {version}"));
-    Ok(())
+    Ok(module)
 }
 
 /// 首次加载实现（`CreateInstance` 时用）。
@@ -107,14 +118,27 @@ pub(crate) fn ensure_loaded(shared: &Shared) {
         refresh_if_outdated(shared);
         return;
     }
-    let Some(versions) = versions_dir() else {
+    let Some(desired) = desired_version() else {
         return;
     };
-    let Some(desired) = read_pointer(&versions) else {
-        return;
-    };
-    if let Err(error) = swap_to(shared, &versions, &desired) {
+    if let Err(error) = module_for(shared, &desired) {
         crate::log_line(&format!("zhu-ye-shell: 首次加载实现失败: {error}"));
+    }
+}
+
+/// 若版本指针已变，则加载新实现模块并换入共享槽位。
+///
+/// 无指针时不做任何事（保留当前实现）；指针与当前一致时直接返回。
+pub(crate) fn refresh_if_outdated(shared: &Shared) {
+    let Some(desired) = desired_version() else {
+        return;
+    };
+    if proxy::current_version(shared).as_deref() == Some(desired.as_str()) {
+        return;
+    }
+    if let Err(error) = module_for(shared, &desired) {
+        // 降级可用：保留旧实现继续工作。
+        crate::log_line(&format!("zhu-ye-shell: 切换实现失败，保留旧实现: {error}"));
     }
 }
 

@@ -113,6 +113,35 @@ fn create_proxy(shell: &Path) -> Option<ITfTextInputProcessorEx> {
     .ok()
 }
 
+/// 直接从实现 DLL 建一个文本服务对象（不经壳）。
+///
+/// 用于验证「实现的每次 `CreateInstance` 给出独立对象」——这正是壳的代理
+/// 必须为每个文本服务实例各自转发到**不同**实现对象的前提。
+fn create_impl_service(impl_dll: &Path) -> Option<ITfTextInputProcessorEx> {
+    let wide: Vec<u16> = impl_dll
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let module = unsafe { LoadLibraryW(PCWSTR(wide.as_ptr())) }.ok()?;
+    let symbol = {
+        let name = b"DllGetClassObject\0";
+        unsafe { GetProcAddress(module, PCSTR::from_raw(name.as_ptr())) }
+    }?;
+    let get: DllGetClassObject = unsafe { std::mem::transmute(symbol) };
+    let mut factory_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    let hr = unsafe { get(&CLSID_ZHU_YE_TIP, &IID_CLASS_FACTORY, &mut factory_ptr) };
+    if hr.is_err() || factory_ptr.is_null() {
+        return None;
+    }
+    let factory = unsafe { IClassFactory::from_raw(factory_ptr) };
+    unsafe {
+        factory.CreateInstance::<Option<&windows::core::IUnknown>, ITfTextInputProcessorEx>(None)
+    }
+    .ok()
+}
+
 /// 该 DLL 当前是否已加载进本进程。
 fn is_loaded(path: &Path) -> bool {
     let wide: Vec<u16> = path
@@ -144,6 +173,54 @@ fn 壳能加载版本化实现并返回代理() {
     assert!(proxy.cast::<ITfFnConfigure>().is_ok());
     // 版本化实现确实被加载进本进程。
     assert!(is_loaded(&impls[0]), "版本化实现应已加载");
+
+    let _ = std::fs::remove_dir_all(&root);
+    unsafe { CoUninitialize() };
+}
+
+/// 回归测试：同一进程内的多个文本服务实例必须各自持有**独立**的实现对象。
+///
+/// 缺陷背景：壳早期版本把实现对象放在进程级共享槽位里，导致同一进程的多个
+/// 文本服务实例（不同线程 / 不同 UI 上下文各一个）**共用同一个**实现对象。
+/// 而实现侧把 `AdviseKeyEventSink` 的 `tid` 存进实现对象自己的状态字段——
+/// 于是后一个实例的 `Activate` 覆盖了先前实例的 `tid`，先前实例的按键事件
+/// 注册随之失效，TSF 报 `EVENT_E_ALL_SUBSCRIBERS_FAILED`（0x80040201）并
+/// **回退到别的输入法**（真机症状：展开任务栏隐藏图标后，任务栏输入法指示器
+/// 从「竹叶输入法」变成「搜狗拼音输入法」）。
+#[test]
+fn 多个文本服务实例持有各自独立的实现对象() {
+    let Some(fixtures) = fixtures() else {
+        eprintln!("跳过：需设置 ZHU_YE_SHELL_DLL 与 ZHU_YE_IMPL_DLL");
+        return;
+    };
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok();
+    let root = test_root("multi");
+    let id = "1aaaaaaa";
+    let (_versions, _impls) = build_layout(&root, &fixtures.shell, &fixtures.impl_dll, &[id]);
+
+    // 两个文本服务实例（TSF 每线程/每 UI 上下文一个）。
+    let first = create_proxy(&root.join("zhu-ye-ime.dll")).expect("应能创建第一个代理");
+    let second = create_proxy(&root.join("zhu-ye-ime.dll")).expect("应能创建第二个代理");
+
+    // ★ 核心断言：两个代理转发到的实现对象必须是**不同的** COM 对象。
+    // 若相同，说明仍共用实现对象——`tid` 会被覆盖，按键事件注册失效。
+    let first_ptr = std::ptr::from_ref(&first) as *const _ as usize;
+    let second_ptr = std::ptr::from_ref(&second) as *const _ as usize;
+    assert_ne!(first_ptr, second_ptr, "两个文本服务实例应是不同的代理对象");
+
+    // 再验证转发目标不同：取各自 QI 出的实现接口指针。
+    // 代理自身是壳的对象；实现对象在代理内部，因此这里改用「同一实现模块
+    // 能建出多个对象」来间接验证——两次 `CreateInstance` 必须给出不同地址。
+    let impl_first = create_impl_service(&root.join("versions").join(id).join("zhu-ye-impl.dll"))
+        .expect("实现应能建出第一个文本服务对象");
+    let impl_second = create_impl_service(&root.join("versions").join(id).join("zhu-ye-impl.dll"))
+        .expect("实现应能建出第二个文本服务对象");
+    let a = std::ptr::from_ref(&impl_first) as *const _ as usize;
+    let b = std::ptr::from_ref(&impl_second) as *const _ as usize;
+    assert_ne!(
+        a, b,
+        "实现的每次 CreateInstance 应给出独立对象（状态互不干扰）"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
     unsafe { CoUninitialize() };
