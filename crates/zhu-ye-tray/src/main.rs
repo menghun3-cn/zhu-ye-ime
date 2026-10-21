@@ -57,11 +57,11 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
     DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW, PostQuitMessage,
-    RegisterClassW, SetTimer, TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HICON, IMAGE_ICON,
-    LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON,
-    TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
-    WM_DESTROY, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSW,
+    RegisterClassW, RegisterWindowMessageW, SetTimer, TrackPopupMenu, TranslateMessage,
+    CW_USEDEFAULT, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
+    SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 
 use crate::task::PanelAction;
@@ -72,6 +72,26 @@ const ICON_EN: u16 = 102;
 
 /// 托盘标识与回调消息。
 const TRAY_ID: u32 = 1;
+/// explorer 重建任务栏后广播的注册消息 ID（`RegisterWindowMessageW`）。
+///
+/// explorer 崩溃或被重启后，通知区会被重建，此前用 `Shell_NotifyIcon` 注册的
+/// 图标**全部失效**。应用必须监听该消息并重新 `NIM_ADD`，否则图标永久消失
+/// ——真机实测：TSF 框架（MSCTF.dll）访问冲突导致 explorer 崩溃后，托盘图标
+/// 即不再出现。
+fn taskbar_created_message() -> u32 {
+    // 进程内缓存：RegisterWindowMessageW 对同一字符串返回同一个 ID。
+    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| unsafe {
+        let name: Vec<u16> = "TaskbarCreated\0".encode_utf16().collect();
+        RegisterWindowMessageW(PCWSTR(name.as_ptr()))
+    })
+}
+
+/// explorer 重建任务栏时广播的消息（运行时注册，ID 非固定值）。
+/// explorer 重建任务栏时广播的消息（运行时注册，ID 非固定值）。
+fn wm_taskbar_created() -> u32 {
+    taskbar_created_message()
+}
 const WM_TRAY: u32 = WM_APP + 1;
 /// 串行任务队列线程回报"一个面板任务已完成"（见 [`task`]）。
 const WM_TASK_DONE: u32 = WM_APP + 2;
@@ -102,6 +122,9 @@ struct TrayState {
     last_mtime: Option<SystemTime>,
     /// 工具箱面板当前是否打开（由任务线程回报维护，托盘线程只读，T-169）。
     panel_open: bool,
+    /// 图标当前是否已在通知区注册。
+    /// explorer 崩溃/重启后通知区被重建、注册失效，此时为 false。
+    icon_registered: bool,
 }
 
 static TRAY: Mutex<Option<TrayState>> = Mutex::new(None);
@@ -398,11 +421,40 @@ fn refresh_mode(window: HWND) {
     };
     if mode != state.icon_mode && set_tray_icon(window, &mode, true).is_ok() {
         state.icon_mode = mode;
+        state.icon_registered = true;
     }
 }
 
 /// 轮询状态文件：mtime 变化才读内容，模式变化才换图标（原子写保证内容完整）。
+/// 图标未在通知区注册时补注册。
+///
+/// 两种触发：启动时 explorer 尚未就绪（`Shell_NotifyIcon` 不可用），或
+/// explorer 崩溃/重启后通知区被重建、此前的注册失效。
+fn ensure_icon_registered() {
+    let mut guard = match TRAY.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let Some(state) = guard.as_mut() else {
+        return;
+    };
+    if state.icon_registered {
+        return;
+    }
+    let window = HWND(state.window as *mut c_void);
+    let mode = read_mode();
+    if set_tray_icon(window, &mode, false).is_ok() {
+        state.icon_registered = true;
+        state.icon_mode = mode;
+    }
+}
+
 fn poll() {
+    // 图标未注册（启动时 explorer 未就绪、或 explorer 崩溃重启后通知区被
+    // 重建）→ 补注册。此处刻意放在状态文件检查**之前**：状态文件尚未生成时
+    // 也必须能把图标挂上。
+    ensure_icon_registered();
+
     let Some(path) = state_path() else {
         return;
     };
@@ -417,6 +469,7 @@ fn poll() {
     let Some(state) = guard.as_mut() else {
         return;
     };
+
     if state.last_mtime == Some(mtime) {
         return;
     }
@@ -485,7 +538,10 @@ fn main() -> windows::core::Result<()> {
     }
 
     let mode = read_mode();
-    set_tray_icon(window, &mode, false)?;
+    // 启动时注册图标。**失败不退出进程**：explorer 尚未就绪时通知区不可用，
+    // 此时 NIM_ADD 会失败——若因此退出，托盘就再也起不来了。改为记录状态，
+    // 由 `TaskbarCreated` 消息或轮询补注册（见 `poll`）。
+    let icon_registered = set_tray_icon(window, &mode, false).is_ok();
     // 面板呼出热键（FR-070）：注册失败（占用/系统拒绝）不阻断托盘启动。
     register_panel_hotkey(window);
     let mut state = TrayState {
@@ -493,6 +549,7 @@ fn main() -> windows::core::Result<()> {
         icon_mode: mode,
         last_mtime: None,
         panel_open: false,
+        icon_registered,
     };
     // 启动即记一次 mtime，避免第一帧重复更新图标。
     if let Some(path) = state_path() {
@@ -527,6 +584,19 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
+        // explorer 重建任务栏：通知区被重建，此前注册的图标已失效，
+        // 必须重新 NIM_ADD，否则托盘图标永久消失。
+        msg if msg == wm_taskbar_created() => {
+            let mode = read_mode();
+            if set_tray_icon(window, &mode, false).is_ok() {
+                if let Ok(mut guard) = TRAY.lock() {
+                    if let Some(state) = guard.as_mut() {
+                        state.icon_mode = mode;
+                    }
+                }
+            }
+        }
+
         WM_TRAY => match lparam.0 as u32 {
             // 单击（左/右）= 菜单：状态行即点即刷新，动作在菜单收起后执行（T-169）。
             WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(window),
