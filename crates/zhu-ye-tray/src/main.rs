@@ -319,10 +319,12 @@ fn open_settings() {
     if !settings.exists() {
         return;
     }
-    let mut command_line = settings
-        .to_string_lossy()
-        .encode_utf16()
-        .collect::<Vec<u16>>();
+    // ★ 命令行必须**加引号**：安装路径含空格（`C:\Program Files\...`），
+    // 而 `CreateProcessW` 的 `lpCommandLine` 按空格切分参数——不引号时程序名被
+    // 截成 `C:\Program`，启动直接失败（Win32 123，路径语法错误）。
+    // 实测：修复前点「打开设置」没有任何窗口出现。
+    let quoted = format!("\"{}\"", settings.to_string_lossy());
+    let mut command_line = quoted.encode_utf16().collect::<Vec<u16>>();
     command_line.push(0);
     let startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
