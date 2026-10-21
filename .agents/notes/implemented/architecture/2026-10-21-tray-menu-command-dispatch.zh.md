@@ -69,6 +69,8 @@ git 历史给出完整对照：
 
 改法：`request_exit` 改为投递自定义消息 `WM_APP_EXIT`，由主消息循环在菜单完全收起后处理并 `PostQuitMessage(0)`。
 
+> **后续修正（2026-10-21）**：本笔记修的是「菜单命令**怎么取回**」；另有一处「菜单**拿不到输入焦点**」的独立缺陷（点外部不关闭菜单、点菜单项也点不动），根因是拥有者窗口不在前台，见 2026-10-21-tray-menu-outside-click-dismiss。
+
 ## Alternatives considered
 
 **恢复 `WM_COMMAND` 分支而不是加 `TPM_RETURNCMD`。** 否决：`WM_COMMAND` 会在模态菜单期间送达窗口过程，而面板窗口需要自己的消息循环（T-169 的 S-35 约束）。`TPM_RETURNCMD` 把命令**同步带回**调用点，语义更干净，也不依赖窗口过程是否在处理消息。

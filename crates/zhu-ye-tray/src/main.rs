@@ -56,12 +56,13 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW, PostMessageW,
-    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, TrackPopupMenu,
-    TranslateMessage, CW_USEDEFAULT, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR,
-    MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_ENDSESSION, WM_HOTKEY,
-    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, LoadImageW,
+    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
+    SetTimer, TrackPopupMenu, TranslateMessage, CW_USEDEFAULT, HICON, IMAGE_ICON, LR_DEFAULTCOLOR,
+    MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
+    WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    WS_POPUP,
 };
 
 use crate::task::PanelAction;
@@ -423,6 +424,8 @@ fn show_menu(window: HWND) {
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
         return;
     };
+    // 记录弹菜单前的前台窗口，菜单收起后还回去。
+    let previous_foreground = unsafe { GetForegroundWindow() };
     let mut point = POINT::default();
     unsafe {
         let _ = AppendMenuW(menu, MF_GRAYED, 0, status);
@@ -439,6 +442,19 @@ fn show_menu(window: HWND) {
     // ★ 必须带 `TPM_RETURNCMD`：否则 `TrackPopupMenu` 返回的是「成功与否」，
     //   菜单命令改由 `WM_COMMAND` 消息送出——而本窗口过程不处理 `WM_COMMAND`，
     //   于是**点任何一项都会被判成 `MENU_OPEN_PANEL`**，弹出符号大全面板（T-176）。
+    //
+    // ★ 弹菜单前必须把**拥有者窗口置于前台**（`TrackPopupMenu` 的标准前置条件）：
+    //   菜单的「点外部区域关闭」靠 `WM_CANCELMODE` 实现，而该消息只在拥有者
+    //   窗口**已在前台**时才会送到菜单窗口。
+    //
+    //   直接 `SetForegroundWindow` 会被 Windows 的**前台锁定**拒绝：只有当前
+    //   前台进程、或「最后输入接收者」进程才能设置前台。托盘进程在通知区图标
+    //   被点击时通常算「最后输入接收者」，但不保证；一旦失败菜单就拿不到输入
+    //   焦点 —— 点外部不关闭、点菜单项也无效。
+    //
+    //   ⇒ 用 `AttachThreadInput` 把托盘线程与前台线程「粘合」，再
+    //   `SetForegroundWindow`，即可**绕过前台锁定**稳定拿到焦点。
+    force_foreground(window);
     let command = unsafe {
         TrackPopupMenu(
             menu,
@@ -451,6 +467,11 @@ fn show_menu(window: HWND) {
         )
         .0
     };
+    // 菜单收起后把前台还给用户原来的窗口：托盘窗口是零尺寸的隐形窗口，
+    // 让它占着前台会打断用户正在做的��。
+    unsafe {
+        let _ = SetForegroundWindow(previous_foreground);
+    }
     let _ = unsafe { DestroyMenu(menu) };
     // 模态菜单已收起：这时才允许执行动作。
     #[allow(clippy::cast_sign_loss)]
@@ -459,6 +480,38 @@ fn show_menu(window: HWND) {
         open_settings();
     } else if picked == MENU_EXIT {
         request_exit(window);
+    }
+}
+
+/// 强制把托盘窗口置于前台（绕过 Windows 的前台锁定）。
+///
+/// `TrackPopupMenu` 要求拥有者窗口在前台，否则菜单拿不到输入焦点 ——
+/// 表现为「点菜单外区域不关闭」且「点菜单项无反应」。
+///
+/// 直接 `SetForegroundWindow` 常被拒绝：只有当前前台进程或「最后输入接收者」
+/// 进程才能设置前台。`AttachThreadInput` 把两个线程的输入状态「粘合」，
+/// 使本线程在系统看来与前台线程等价，从而可以合法地设置前台。
+fn force_foreground(window: HWND) {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    unsafe {
+        let current_thread = GetCurrentThreadId();
+        let foreground = GetForegroundWindow();
+        if foreground.is_invalid() {
+            let _ = SetForegroundWindow(window);
+            return;
+        }
+        let foreground_thread = GetWindowThreadProcessId(foreground, None);
+        if foreground_thread == 0 || foreground_thread == current_thread {
+            let _ = SetForegroundWindow(window);
+            return;
+        }
+        // 粘合两个线程的输入队列（前台线程必须先解除，否则失败）。
+        let attached = AttachThreadInput(current_thread, foreground_thread, true).as_bool();
+        let _ = SetForegroundWindow(window);
+        if attached {
+            let _ = AttachThreadInput(current_thread, foreground_thread, false);
+        }
     }
 }
 
@@ -598,7 +651,11 @@ fn main() -> windows::core::Result<()> {
             WINDOW_EX_STYLE(0),
             PCWSTR(class_name.as_ptr()),
             PCWSTR::null(),
-            WINDOW_STYLE(0),
+            // `WS_POPUP` 消息窗口：托盘程序用它接收通知区回调，且**能够获得前台**
+            // ——后者是弹出菜单能「点外部关闭」的前提（`WM_CANCELMODE` 只在拥有者
+            // 窗口已在前台时才送到菜单窗口）。零尺寸、无 WS_POPUP 的窗口不参与
+            // 前台切换，`SetForegroundWindow` 对它无效。
+            WS_POPUP,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             0,
