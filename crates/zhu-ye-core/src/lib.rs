@@ -45,6 +45,7 @@ pub mod user_dict;
 pub mod user_store;
 pub mod user_words_exchange;
 pub mod vcard;
+pub mod wide;
 
 pub use ai::{AiService, OfflineAiService};
 pub use app_meta::{

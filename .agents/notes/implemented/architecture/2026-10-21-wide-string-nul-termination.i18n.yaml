@@ -1,0 +1,8 @@
+# Bilingual-pair consistency record: the git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record with the project's
+# translation-pairing verifier:
+#   git hash-object 2026-10-21-wide-string-nul-termination.md
+#   git hash-object 2026-10-21-wide-string-nul-termination.zh.md
+2026-10-21-wide-string-nul-termination.md: 1fa81b3d93f3cb854c09c13bd18d0fac4187dbcf
+2026-10-21-wide-string-nul-termination.zh.md: 5799002d6b716f83bf5680d57d0cc8fb9543452a
