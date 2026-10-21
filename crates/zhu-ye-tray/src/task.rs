@@ -155,10 +155,17 @@ fn pump_panel_messages(panel: &mut Option<PanelWindow>) {
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
     };
+    // ★ 必须取**线程队列**的全部消息（hwnd=None），不能只取面板窗口的消息：
+    // `WM_TIMER` 由系统投递到线程消息队列、不绑定任何窗口，按窗口过滤会把它
+    // 丢掉——面板的定时器（Esc 窗口期、让位检查）因此从未触发（T-176）。
+    // 本线程只服务面板：投递到托盘主窗口的消息在**主线程**队列，不会到这里。
     let mut message = MSG::default();
-    while unsafe { PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE) }.as_bool() {
-        let _ = unsafe { TranslateMessage(&message) };
-        unsafe { DispatchMessageW(&message) };
+    while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+        // 只处理属于面板的窗口消息与线程级消息（hwnd 为空）。
+        if message.hwnd.0.is_null() || message.hwnd == window {
+            let _ = unsafe { TranslateMessage(&message) };
+            unsafe { DispatchMessageW(&message) };
+        }
     }
     // 面板自己关掉自己（Esc 窗口期内按 Esc）→ 句柄失效，丢弃持有。
     let alive =
