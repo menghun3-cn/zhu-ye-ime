@@ -184,14 +184,48 @@ assignment order is now fixed and commented at the call site.
 - On the development machine the shell was loaded by a real TSF host, which
   logged `zhu-ye-shell: 已换用实现 6fa6af97`, confirming that the
   cross-DLL chain works against a real host rather than only in a harness.
+- **Interactive acceptance, on real hosts, after a reboot.** The machine was
+  rebooted, which released all nine long-lived processes that still held a v1
+  DLL. With the pointer at `6fa6af97`, `explorer` was observed holding both
+  the shell and `versions\6fa6af97\zhu-ye-impl.dll`. A distinguishable new
+  implementation was then published (pointer moved to `73b86903`) **without
+  restarting or closing any process**. The shell log recorded
+  `zhu-ye-shell: 已换用实现 73b86903` as soon as a host regained focus, and
+  every process that had regained focus was then observed holding
+  `versions\73b86903\zhu-ye-impl.dll`:
 
-## Deferred
+  ```
+  explorer (PID 13528) → 73b86903
+  explorer (PID 33040) → 73b86903
+  msedgewebview2 (PID 25456) → 73b86903
+  ```
 
-The interactive acceptance — that an already-open host visibly switches to
-the new implementation after the pointer changes — is still outstanding: the
-session was locked during the deployment (`LockApp` held the foreground) and
-synthetic input cannot wake it. The mechanism is verified at process level
-by the integration tests; the end-to-end UI check is a separate step.
+  The older `explorer` instance initially kept `6fa6af97`; it swapped to
+  `73b86903` on its own next focus change, which is the per-process slot
+  behaving as designed.
+
+## Deployment defects found during this work
+
+**The cleanup filter missed files with a marker in the middle of the name.**
+The filter matched `-like 'zhu_ye_ime_*.dll'` and
+`-like 'zhu_ye_ime_*.dll.zy-del*'`, both anchored at the end of the name. A
+file that a rename probe had marked in the middle — measured on the
+development machine as
+`zhu_ye_ime_937632A1.dll.renamed.zy-del.zy-del.zy-del.zy-del` — matched
+none of the patterns, so every cleanup pass skipped it and it stayed on disk
+permanently. The predicate now tests the **prefix** (either historical
+versioned spelling) plus the presence of `.dll` **anywhere** in the name, so
+any marker stacked in the middle is covered. The fixed-name shell
+`zhu-ye-ime.dll`, the versioned implementation `zhu-ye-impl.dll` and the
+legacy underscore fixed name `zhu_ye_ime.dll` all still fail the predicate
+and are therefore never deleted by mistake.
+
+**A single-element return value made the cleanup report a failure.** The
+worker asked for `$stale.Count` on the result of the cleanup function. When
+that function returned exactly one path, PowerShell unwrapped the
+single-element array into a scalar, and `.Count` on the resulting `String`
+raised "property Count cannot be found" — so a cleanup that had *worked*
+reported an error. The worker now wraps the call in `@()`.
 
 ## Related
 
