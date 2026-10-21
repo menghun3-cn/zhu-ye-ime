@@ -269,6 +269,16 @@ still alive.
 A regression test (`多个文本服务实例持有各自独立的实现对象`) asserts that
 the implementation hands out a distinct object per `CreateInstance`.
 
+**The same defect also crashed explorer.** Windows Error Reporting recorded
+Explorer.EXE faulting in MSCTF.dll with  xc0000005 at 2026-10-21
+09:11:11 — during a reproduction of the reported symptom. The shared object
+made the implementation unadvise the wrong thread's key event registration,
+leaving TSF's own state inconsistent; the next callback into TSF faulted.
+This is why the symptom looked like an input-method switch: explorer
+crashed, the notification area was rebuilt, and the task bar re-selected an
+input method. After the fix the same explorer instance stayed up for the
+whole verification run with no new fault.
+
 **A separate, older failure mode.** The same log also contains
 `Activate key-sink FAILED Error { code: HRESULT(0x80070057), message:
 "参数错误。" }` from 2026-10-20 10:38 and 11:15 — before the shell
