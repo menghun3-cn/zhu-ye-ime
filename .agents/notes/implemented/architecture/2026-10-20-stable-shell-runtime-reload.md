@@ -66,6 +66,21 @@ ABI. It forwards the exact interface set the host queries: 24 methods across
 (1), `ITfFunction` (1), `ITfFnConfigure` (1), plus `Activate` and
 `Deactivate` from `ITfTextInputProcessor`.
 
+**Sharing granularity: the module is shared, the implementation object is
+not.** A TSF text service is a *per-instance* object with per-instance
+state: one process routinely hosts several of them (one per thread / UI
+context), each with its own composition session and its own thread id
+registered through `ITfKeystrokeMgr::AdviseKeyEventSink`. The shell
+therefore shares only the **implementation module** (a process-wide
+resource, so that a version switch loads the module once) and gives every
+proxy instance its **own** implementation object, created from that
+module. The old module is unloaded by `Arc` reference counting: it stays
+mapped until the last proxy instance that still holds an object from it
+has switched over.
+
+Sharing the *object* as well — the shell's first implementation, and a
+regression — is described under "The shared-object regression" below.
+
 **Publishing is writing `current.txt`.** The pointer is written to a
 `.staging` file and renamed, so a host never reads a half-written pointer.
 Writing the pointer is the release; no registry write is involved, because
@@ -129,6 +144,11 @@ version-negotiation surface with no benefit.
 The key hot path must not perform file I/O or lock contention. `Activate` is
 the earliest point at which the host has released its composition session,
 which makes it both cheap and safe.
+
+**Sharing one implementation object across every text service instance in
+the process.** This was the first implementation and it was wrong — see
+"Sharing granularity" below. The module is process-wide and is shared; the
+implementation *object* is per-instance and must not be.
 
 ## Consequences
 
@@ -203,6 +223,59 @@ assignment order is now fixed and commented at the call site.
   The older `explorer` instance initially kept `6fa6af97`; it swapped to
   `73b86903` on its own next focus change, which is the per-process slot
   behaving as designed.
+
+## The shared-object regression
+
+The shell's first implementation put the implementation **object** in a
+process-wide slot as well as the module, and every proxy instance in the
+process forwarded to that one object. That was wrong, and it produced a
+user-visible defect.
+
+**Symptom.** With the shell deployed, expanding the task bar's hidden-icons
+arrow made the task bar input indicator switch from 「竹叶输入法」 to
+「搜狗拼音输入法」.
+
+**Mechanism.** The implementation keeps the thread id it registered with
+`AdviseKeyEventSink` in its own state (`state.tid`, written in `Activate`
+and consumed in `Deactivate` to unadvise it). With several text service
+instances in one process sharing a single implementation object, the second
+instance's `Activate` overwrote the first instance's `tid`. The first
+instance's key event registration was then cancelled against the wrong
+thread, and TSF reported `EVENT_E_ALL_SUBSCRIBERS_FAILED`
+(`0x80040201`, 「事件无法调用任何订户」). TSF treats a text service that
+cannot deliver key events as unusable and **falls back to another input
+method** — which is why the indicator changed to Sogou.
+
+**Evidence.**
+
+- Implementation log: `Activate key-sink FAILED Error { code: HRESULT(0x80040201),
+  message: "事件无法调用任何订户" }` for `pid=17512 tid=28728`, on two
+  consecutive occurrences.
+- The same log shows the activation/deactivation imbalance the shared
+  object causes: thread `pid=33100 tid=37572` recorded **1 activation but
+  3 deactivations** — each instance deactivating the one shared object.
+- After the fix, the same operation produced `Activate tid=22 key-sink ok`,
+  and five consecutive rounds of expanding the hidden-icons arrow left the
+  indicator on 「竹叶输入法」 with zero `key-sink FAILED` records.
+
+**Fix.** The module is shared through `Arc`; each proxy instance holds its
+own implementation object plus an `Arc` reference to the module that
+created it. On a version change, the shared slot is repointed at the new
+module and each proxy rebuilds *its own* object on its next activation.
+`Mine::drop` releases the COM object before dropping the module
+reference, so the module is never unloaded while an object from it is
+still alive.
+
+A regression test (`多个文本服务实例持有各自独立的实现对象`) asserts that
+the implementation hands out a distinct object per `CreateInstance`.
+
+**A separate, older failure mode.** The same log also contains
+`Activate key-sink FAILED Error { code: HRESULT(0x80070057), message:
+"参数错误。" }` from 2026-10-20 10:38 and 11:15 — before the shell
+existed. That one is a different condition (`ActivateEx` arrives with
+`tid=0`, and `AdviseKeyEventSink(0, …)` rejects the argument). It is not
+this regression and was not touched here; it is recorded so the two are
+not confused when reading the log.
 
 ## Deployment defects found during this work
 

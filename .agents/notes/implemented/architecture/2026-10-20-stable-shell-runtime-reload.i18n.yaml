@@ -4,5 +4,5 @@
 # translation-pairing verifier:
 #   git hash-object 2026-10-20-stable-shell-runtime-reload.md
 #   git hash-object 2026-10-20-stable-shell-runtime-reload.zh.md
-2026-10-20-stable-shell-runtime-reload.md: afb39da1d8e8c885e94158a71892998e5c897f6c
-2026-10-20-stable-shell-runtime-reload.zh.md: 2f5f8ec9fe9517cefb2312ef2763f3b907431e4f
+2026-10-20-stable-shell-runtime-reload.md: 488e59b60b54ee0aadf802ec7a47d5f420bbdf49
+2026-10-20-stable-shell-runtime-reload.zh.md: da2b6f6b9615b159a2cd0fc1e91e7d66bc55c1ac

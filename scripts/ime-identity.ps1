@@ -357,14 +357,11 @@ function Install-TsfStableDll {
     $stableDll = Get-TsfStableDllPath -InstallDir $InstallDir
     $versionId = (Get-FileHash -LiteralPath $SourceImplDll -Algorithm SHA256).Hash.Substring(0, 8).ToLowerInvariant()
 
-    # 1. 版本归档：把该版本实现留存到 versions\<sha8>\。
-    $versionsDir = Get-TsfVersionsDir -InstallDir $InstallDir
-    $versionDir = Join-Path $versionsDir $versionId
-    $null = New-Item -ItemType Directory -Path $versionDir -Force
-    $archivePath = Join-Path $versionDir $script:TsfIdentity['ImplDllName']
-    Copy-Item -LiteralPath $SourceImplDll -Destination $archivePath -Force
-
-    # 2. 替换固定名（壳）。仅当提供了壳源文件时才做。
+    # 1. 替换固定名（壳）。仅当提供了壳源文件时才做。
+    #
+    #    顺序说明：**先换壳、后归档实现**。壳用 `ReplaceFileW` 替换，即使目标
+    #    正被宿主进程映射也成功；而版本归档的 `Copy-Item` 在目标实现被占用时
+    #    会失败。先换壳可让「壳升级」不被「实现被占用」阻塞。
     $replaced = $false
     $shellReplaced = $false
     if ($SourceShellDll) {
@@ -378,6 +375,9 @@ function Install-TsfStableDll {
             # lpBackupFileName 必须给真实路径：实测本机传 NULL 或空串均返回
             # ERROR_PATH_NOT_FOUND(3)，给真实路径才成功（与 MoveFileEx 延迟删除
             # 的同类本机限制一致）。备份即被替换掉的旧壳，归档到 versions\。
+            $versionsDir = Get-TsfVersionsDir -InstallDir $InstallDir
+            $versionDir = Join-Path $versionsDir $versionId
+            $null = New-Item -ItemType Directory -Path $versionDir -Force
             $backup = Join-Path $versionDir (".{0}.replaced" -f $script:TsfIdentity['ShellDllName'])
             try {
                 $ok = [ZhuYe.ReplaceFile]::ReplaceFileW($stableDll, $staging, $backup, 0, [IntPtr]::Zero, [IntPtr]::Zero)
@@ -396,6 +396,23 @@ function Install-TsfStableDll {
         }
     }
 
+    # 2. 版本归档：把该版本实现留存到 versions\<sha8>\。
+    #
+    #    容错：目标实现若正被某个宿主进程映射（同一内容重复部署时会发生），
+    #    `Copy-Item` 会失败。这**不阻断**部署——壳已经换好，指针照常写向该
+    #    版本；壳加载时若该实现不可用会降级保留旧实现（可用性优先）。
+    $versionsDir = Get-TsfVersionsDir -InstallDir $InstallDir
+    $versionDir = Join-Path $versionsDir $versionId
+    $null = New-Item -ItemType Directory -Path $versionDir -Force
+    $archivePath = Join-Path $versionDir $script:TsfIdentity['ImplDllName']
+    $archiveOk = $true
+    try {
+        Copy-Item -LiteralPath $SourceImplDll -Destination $archivePath -Force
+    } catch {
+        $archiveOk = $false
+        Write-Warning "版本实现归档失败（可能被占用，部署继续）: $archivePath — $($_.Exception.Message)"
+    }
+
     # 3. 写版本指针——这一步即「发布」。
     #    原子写：先写 .staging 再改名，避免宿主读到半截内容。
     $pointerPath = Join-Path $versionsDir $script:TsfIdentity['VersionPointerName']
@@ -410,6 +427,7 @@ function Install-TsfStableDll {
         ArchivePath   = $archivePath
         PointerPath   = $pointerPath
         ShellReplaced = $shellReplaced
+        ArchiveOk     = $archiveOk
     }
 }
 
