@@ -56,12 +56,12 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW, PostQuitMessage,
-    RegisterClassW, RegisterWindowMessageW, SetTimer, TrackPopupMenu, TranslateMessage,
-    CW_USEDEFAULT, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
-    SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadImageW, PostMessageW,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, TrackPopupMenu,
+    TranslateMessage, CW_USEDEFAULT, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, MF_GRAYED, MF_SEPARATOR,
+    MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_ENDSESSION, WM_HOTKEY,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 
 use crate::task::PanelAction;
@@ -96,8 +96,23 @@ const WM_TRAY: u32 = WM_APP + 1;
 /// 串行任务队列线程回报"一个面板任务已完成"（见 [`task`]）。
 const WM_TASK_DONE: u32 = WM_APP + 2;
 
+/// 托盘退出请求（菜单收起后由主消息循环处理，见 `request_exit`）。
+const WM_APP_EXIT: u32 = WM_APP + 3;
+
 /// 状态轮询周期。
 const POLL_MS: u32 = 500;
+
+/// 符号大全面板（emoji/符号）是否对托盘开放（T-176）。
+///
+/// 真机症状：托盘菜单的「工具箱」「打开设置」「退出」三项点哪个都弹出
+/// 符号大全面板。根因是 `TrackPopupMenu` 缺 `TPM_RETURNCMD`（返回值只是
+/// 成功与否），菜单命令改走 `WM_COMMAND` 而窗口过程不处理它，于是**任何**
+/// 菜单选择都被判成第一项。`TPM_RETURNCMD` 已补，但按用户要求（2026-10-21）
+/// **先禁用符号大全、保留原设置功能**，故此处关闭托盘侧的全部面板入口：
+/// 菜单「工具箱」项与 `Ctrl+Alt+E` 热键。
+///
+/// 设为 `true` 即恢复符号大全；恢复时还需同步放回菜单项与热键注册。
+const PANEL_ENABLED: bool = false;
 
 /// 从托盘菜单「工具箱」呼出面板后，Esc 关闭的窗口期（T-169，毫秒）：面板小胜前台
 /// 并接管键盘这么久，鼠标进入面板或到点即交还，回落"点格即上屏、面板不抢焦"。
@@ -412,16 +427,22 @@ fn show_menu(window: HWND) {
     unsafe {
         let _ = AppendMenuW(menu, MF_GRAYED, 0, status);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN_PANEL, w!("工具箱(&T)…"));
+        // 「工具箱」项：符号大全面板当前已禁用（T-176，见 `PANEL_ENABLED`）。
+        if PANEL_ENABLED {
+            let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN_PANEL, w!("工具箱(&T)…"));
+        }
         let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN_SETTINGS, w!("打开设置(&S)…"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("退出(&X)"));
         let _ = GetCursorPos(&mut point);
     }
+    // ★ 必须带 `TPM_RETURNCMD`：否则 `TrackPopupMenu` 返回的是「成功与否」，
+    //   菜单命令改由 `WM_COMMAND` 消息送出——而本窗口过程不处理 `WM_COMMAND`，
+    //   于是**点任何一项都会被判成 `MENU_OPEN_PANEL`**，弹出符号大全面板（T-176）。
     let command = unsafe {
         TrackPopupMenu(
             menu,
-            TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+            TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD,
             point.x,
             point.y,
             None,
@@ -431,12 +452,10 @@ fn show_menu(window: HWND) {
         .0
     };
     let _ = unsafe { DestroyMenu(menu) };
-    // 模态菜单已收起：这时才允许创建面板。
+    // 模态菜单已收起：这时才允许执行动作。
     #[allow(clippy::cast_sign_loss)]
     let picked = command as usize;
-    if picked == MENU_OPEN_PANEL {
-        request_panel_toggle();
-    } else if picked == MENU_OPEN_SETTINGS {
+    if picked == MENU_OPEN_SETTINGS {
         open_settings();
     } else if picked == MENU_EXIT {
         request_exit(window);
@@ -450,7 +469,19 @@ fn request_exit(window: HWND) {
         let _ = UnregisterHotKey(Some(window), PANEL_HOTKEY_ID);
     }
     task::request_shutdown();
-    unsafe { PostQuitMessage(0) };
+    // ★ 不能在这里直接 `PostQuitMessage`：`show_menu` 是在 `TrackPopupMenu` 的
+    //   **模态循环**内执行的，模态循环自己的 `GetMessage` 会取走 `WM_QUIT` 并
+    //   直接结束循环——该消息就此消失，主消息循环再也等不到它，托盘退不出去
+    //   （真机症状：点「退出」后图标消失但进程常驻）。
+    //   改为投递一条自定义消息，等菜单完全收起后由主循环处理再退出。
+    unsafe {
+        let _ = PostMessageW(
+            Some(window),
+            WM_APP_EXIT,
+            windows::Win32::Foundation::WPARAM(0),
+            windows::Win32::Foundation::LPARAM(0),
+        );
+    }
 }
 
 /// 同步刷新模式与图标：读状态文件，模式变化才 `NIM_MODIFY`（单击/轮询共用）。
@@ -588,7 +619,10 @@ fn main() -> windows::core::Result<()> {
     // 由 `TaskbarCreated` 消息或轮询补注册（见 `poll`）。
     let icon_registered = set_tray_icon(window, &mode, false).is_ok();
     // 面板呼出热键（FR-070）：注册失败（占用/系统拒绝）不阻断托盘启动。
-    register_panel_hotkey(window);
+    // 符号大全面板禁用期间不注册热键（T-176，见 `PANEL_ENABLED`）。
+    if PANEL_ENABLED {
+        register_panel_hotkey(window);
+    }
     let mut state = TrayState {
         window: window.0 as isize,
         icon_mode: mode,
@@ -658,7 +692,14 @@ unsafe extern "system" fn window_proc(
                 }
             }
         }
-        WM_HOTKEY => request_panel_toggle(),
+        // 面板呼出热键：符号大全面板禁用期间不响应（T-176，见 `PANEL_ENABLED`）。
+        WM_HOTKEY => {
+            if PANEL_ENABLED {
+                request_panel_toggle();
+            }
+        }
+        // 退出：菜单已收起，此处 `PostQuitMessage` 不会被模态循环吃掉。
+        WM_APP_EXIT => unsafe { PostQuitMessage(0) },
         WM_TIMER => poll(),
         // 登录注销/关机：尽量移除图标，避免通知区残留幽灵图标。
         WM_ENDSESSION => {
@@ -731,21 +772,58 @@ mod tests {
             .expect("必须调用 TrackPopupMenu");
         let tail = &production[track..];
         let dispatch = tail
-            .find("if picked == MENU_OPEN_PANEL")
+            .find("if picked == MENU_OPEN_SETTINGS")
             .expect("分发代码存在");
         let between = &tail[..dispatch];
         assert!(
             between.contains("DestroyMenu"),
             "TrackPopupMenu 与分发之间应先收起菜单"
         );
-        for action in [
-            "request_panel_toggle()",
-            "open_settings()",
-            "request_exit(window)",
-        ] {
-            let index = tail.find(action).expect("三个菜单动作都要分发");
+        for action in ["open_settings()", "request_exit(window)"] {
+            let index = tail.find(action).expect("菜单动作都要分发");
             assert!(index > dispatch, "菜单动作 {action} 必须在菜单收起后执行");
         }
+    }
+
+    /// 菜单命令必须用 `TPM_RETURNCMD` 取回（T-176 真机缺陷的根因）。
+    ///
+    /// `TrackPopupMenu` 在**没有** `TPM_RETURNCMD` 时返回的是「成功与否」，
+    /// 菜单命令改由 `WM_COMMAND` 消息送出。本窗口过程不处理 `WM_COMMAND`，
+    /// 于是**点任何一项菜单**都会被判成第一个菜单项 —— 真机症状是托盘菜单
+    /// 「工具箱」「打开设置」「退出」点哪个都弹出符号大全面板。
+    #[test]
+    fn 菜单命令用返回命令取回() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().expect("源码可分段");
+        let track = production
+            .find("TrackPopupMenu(")
+            .expect("必须调用 TrackPopupMenu");
+        let call = &production[track..track + 400];
+        assert!(
+            call.contains("TPM_RETURNCMD"),
+            "TrackPopupMenu 必须带 TPM_RETURNCMD，否则返回值不是菜单命令 ID"
+        );
+        // 菜单命令 ID 不得与「成功」的 0/1 混淆：第一个菜单项不能是 1。
+        assert_ne!(
+            MENU_OPEN_SETTINGS, 1,
+            "菜单项 ID 不得等于 TrackPopupMenu 的成功返回值 1"
+        );
+    }
+
+    /// 符号大全面板禁用期间，托盘侧不得有任何面板入口（T-176）。
+    #[test]
+    fn 符号大全禁用时托盘无面板入口() {
+        // 用 `std::hint::black_box` 避免常量断言被优化掉（clippy 会拒绝
+        // `assert!` 直接作用于常量值）。
+        let enabled = std::hint::black_box(PANEL_ENABLED);
+        assert!(!enabled, "本测试假定符号大全处于禁用状态");
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().expect("源码可分段");
+        // 菜单项与热键注册都必须受 `PANEL_ENABLED` 保护。
+        assert!(
+            production.contains("if PANEL_ENABLED {"),
+            "面板入口必须受 PANEL_ENABLED 开关保护"
+        );
     }
 
     /// 面板创建不经托盘主线程：`PanelWindow::open` 只允许出现在 task 模块里。

@@ -62,6 +62,8 @@ Status: implemented
 
 无死锁风险：面板的 `WM_DESTROY` 只向宿主发**异步** `PostMessageW(WM_PANEL_CLOSED)`，不会回等托盘主线程。
 
+> **后续修正（2026-10-21）**：本笔记修的是**旁支缺陷**，不是用户报告现象的根因。根因是 T-169 把托盘菜单命令的取回方式从 WM_COMMAND 改成了 TrackPopupMenu 的返回值，却漏加 TPM_RETURNCMD（返回值只是「成功与否」）⇒ 点任何菜单项都被判成第一个菜单项「工具箱」⇒ 弹出符号大全面板。见 2026-10-21-tray-menu-command-dispatch。
+
 ## Alternatives considered
 
 **只修 `close_panel_window` 一处。** 否决：另外三处是同一根因，且各自有独立危害（类名乱码、单实例失效、面板互斥失效）。修一处留三处，等于下一次再踩。
