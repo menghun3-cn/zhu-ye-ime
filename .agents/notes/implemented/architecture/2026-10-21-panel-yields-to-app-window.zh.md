@@ -43,6 +43,8 @@ Status: implemented
 
 此外还有一处：托盘的 `pump_panel_messages` 用 `PeekMessageW(hwnd = Some(panel))` 取消息，只取**投递到该窗口**的消息；而 `WM_TIMER` 由系统投递到**线程消息队列**、不绑定窗口 ⇒ 被过滤掉。改为 `hwnd = None`（取线程队列全部消息）并只处理属于面板或线程级的消息。
 
+> **后续修正（2026-10-21）**：本笔记的「第二道防线」（托盘 open_settings() 先关面板）**从未生效** —— FindWindowW 的类名参数没有 NUL 终止，根本找不到面板。已由 2026-10-21-wide-string-nul-termination 修复（新增 WideString 类型，4 处参数改为带终止符）。本笔记的「让位机制」部分仍然有效。
+
 ## Alternatives considered
 
 **让面板在任何应用级窗口出现时自动关闭。** 否决：面板是用户主动呼出的浮层，用户可能正想在设置窗口旁边查符号；自动关闭会打断操作。让位（降层级）比关闭更贴合「瞬态浮层」的定位。

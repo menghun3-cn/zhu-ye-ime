@@ -196,7 +196,8 @@ fn open_panel() -> Option<PanelWindow> {
 
 /// 面板窗口类是否已被创建（任意进程；S-31 全局单面板）。
 fn panel_exists() -> bool {
-    let class: Vec<u16> = PANEL_CLASS_NAME.encode_utf16().collect();
+    // 于是「面板已在别处打开」的互斥判断失效，可能重复创建面板。
+    let class = zhu_ye_core::wide::WideString::new(PANEL_CLASS_NAME);
     match unsafe {
         windows::Win32::UI::WindowsAndMessaging::FindWindowW(
             windows::core::PCWSTR(class.as_ptr()),

@@ -308,25 +308,36 @@ fn request_panel(action: PanelAction) {
 /// 面板窗口类全局唯一（`ZhuYeSettingsPanel`），可能由托盘或设置窗口创建；
 /// 用 `FindWindowW` 按类名查找即可跨进程命中。找不到是正常情况（面板没开）。
 fn close_panel_window() {
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOSE};
-    let class = zhu_ye_settings::panel_window::PANEL_CLASS_NAME
-        .encode_utf16()
-        .collect::<Vec<u16>>();
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsWindow, SendMessageW, WM_CLOSE};
+    // ★ 类名必须 NUL 终止：`FindWindowW` 会一直读到下一个 0 为止。不带终止符时
+    //   它根本找不到面板（本缺陷的真凶——「打开设置」的第二道防线因此完全失效）。
+    let class = zhu_ye_core::wide::WideString::new(zhu_ye_settings::panel_window::PANEL_CLASS_NAME);
     let Ok(existing) = (unsafe { FindWindowW(windows::core::PCWSTR(class.as_ptr()), None) }) else {
         return;
     };
     if existing.is_invalid() {
         return;
     }
-    // 请求关闭（面板自己的 WM_CLOSE 走 DestroyWindow，会写回位置记忆）。
+    // 同步请求关闭：面板的 `WM_CLOSE` 直接 `DestroyWindow`（会写回位置记忆）。
+    // 用 `SendMessageW` 而非 `PostMessageW`——后者是异步的，本函数返回后设置
+    // 程序可能已经起来，而面板尚未销毁，用户仍会先看到面板。
+    // 面板的 `WM_DESTROY` 只向宿主发**异步** `PostMessageW`，不会回等托盘主
+    // 线程，故此处同步等待不会死锁。
     let _ = unsafe {
-        PostMessageW(
-            Some(existing),
+        SendMessageW(
+            existing,
             WM_CLOSE,
-            windows::Win32::Foundation::WPARAM(0),
-            windows::Win32::Foundation::LPARAM(0),
+            Some(windows::Win32::Foundation::WPARAM(0)),
+            Some(windows::Win32::Foundation::LPARAM(0)),
         )
     };
+    // 等待窗口真正消失（`DestroyWindow` 在面板线程执行，跨线程可能略有延迟）。
+    for _ in 0..50 {
+        if !unsafe { IsWindow(Some(existing)) }.as_bool() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 fn open_settings() {
@@ -527,7 +538,7 @@ fn main() -> windows::core::Result<()> {
     // 在第一个进程里已被销毁，第二个进程会新建同名对象（GetLastError≠183）并照常
     // 运行——用户实测托盘出现两个图标。HANDLE 无 Drop，`_mutex` 绑定在 main 作用域
     // 内一直保活，句柄只随进程退出由系统回收。
-    let mutex_name: Vec<u16> = MUTEX_NAME.encode_utf16().collect();
+    let mutex_name = zhu_ye_core::wide::WideString::new(MUTEX_NAME);
     unsafe {
         let _mutex = CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr()))?;
         let already = GetLastError().0 == 183; // ERROR_ALREADY_EXISTS
@@ -537,7 +548,8 @@ fn main() -> windows::core::Result<()> {
     }
 
     let hinstance = unsafe { GetModuleHandleW(None)? };
-    let class_name: Vec<u16> = CLASS_NAME.encode_utf16().collect();
+    // 表现为 `ZhuYeTrayHostWindow` 后跟一串乱码。
+    let class_name = zhu_ye_core::wide::WideString::new(CLASS_NAME);
     unsafe {
         let class_def = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
@@ -668,6 +680,23 @@ unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 传给 Win32 的**名称类**参数必须 NUL 终止（T-176 真机缺陷）。
+    ///
+    /// 漏掉终止符时 Win32 会一直读到下一个 0：`FindWindowW` 找不到窗口、
+    /// `RegisterClassW` 注册出带内存垃圾的类名（表现为 `ZhuYeTrayHostWindow`
+    /// 后跟一串乱码）。这类缺陷「能编译、能测试、真机却不工作」——
+    /// 单元测试测不到传给 Win32 的字符串是否终止，故在此固定。
+    #[test]
+    fn 名称类参数均以空字符结尾() {
+        let class = zhu_ye_core::wide::WideString::new(CLASS_NAME);
+        assert_eq!(class.units().last(), Some(&0), "窗口类名必须 NUL 终止");
+        let mutex = zhu_ye_core::wide::WideString::new(MUTEX_NAME);
+        assert_eq!(mutex.units().last(), Some(&0), "互斥体名必须 NUL 终止");
+        let panel =
+            zhu_ye_core::wide::WideString::new(zhu_ye_settings::panel_window::PANEL_CLASS_NAME);
+        assert_eq!(panel.units().last(), Some(&0), "面板类名必须 NUL 终止");
+    }
 
     /// 菜单序列（T-169）：状态 → 分隔 → 面板 → 设置 → 分隔 → 退出。
     #[test]
