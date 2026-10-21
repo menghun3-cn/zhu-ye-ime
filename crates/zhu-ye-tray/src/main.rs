@@ -303,7 +303,38 @@ fn request_panel(action: PanelAction) {
 }
 
 /// 打开设置窗口：与托盘同目录的 `zhu-ye-settings.exe`（worker copy-exe 部署位）。
+/// 按窗口类名找到工具箱面板并请求关闭（跨进程有效）。
+///
+/// 面板窗口类全局唯一（`ZhuYeSettingsPanel`），可能由托盘或设置窗口创建；
+/// 用 `FindWindowW` 按类名查找即可跨进程命中。找不到是正常情况（面板没开）。
+fn close_panel_window() {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOSE};
+    let class = zhu_ye_settings::panel_window::PANEL_CLASS_NAME
+        .encode_utf16()
+        .collect::<Vec<u16>>();
+    let Ok(existing) = (unsafe { FindWindowW(windows::core::PCWSTR(class.as_ptr()), None) }) else {
+        return;
+    };
+    if existing.is_invalid() {
+        return;
+    }
+    // 请求关闭（面板自己的 WM_CLOSE 走 DestroyWindow，会写回位置记忆）。
+    let _ = unsafe {
+        PostMessageW(
+            Some(existing),
+            WM_CLOSE,
+            windows::Win32::Foundation::WPARAM(0),
+            windows::Win32::Foundation::LPARAM(0),
+        )
+    };
+}
+
 fn open_settings() {
+    // 打开设置窗口前先关掉工具箱面板：面板是 TOPMOST 浮层，压在设置窗口之上时
+    // 用户只会看到面板，误以为「打开设置」变成了 emoji 面板（T-176 真机症状）。
+    // 面板可能由设置窗口自己创建（跨进程），故用 FindWindow 按类名找到并关闭。
+    close_panel_window();
+
     let Ok(module) = (unsafe { GetModuleHandleW(None) }) else {
         return;
     };

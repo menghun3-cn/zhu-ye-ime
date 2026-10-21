@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use windows::core::BOOL;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -162,7 +163,10 @@ impl PanelWindow {
             let state = panel_state_mut(self.hwnd);
             if state.is_some() {
                 let _ = SetForegroundWindow(self.hwnd);
-                let _ = SetTimer(Some(self.hwnd), ESCAPE_WINDOW_TIMER, milliseconds, None);
+                let timer = SetTimer(Some(self.hwnd), ESCAPE_WINDOW_TIMER, milliseconds, None);
+                if let Some(state) = panel_state_mut(self.hwnd) {
+                    state.escape_timer_id = timer;
+                }
             }
         }
     }
@@ -270,6 +274,159 @@ unsafe fn work_area() -> Option<RECT> {
 
 /// 把面板放到目标位置（S-33）：有记忆读出并钳制到工作区，无记忆贴鼠标光标右下，
 /// 无论如何都保证完整可见；截图模式固定居中。
+/// 应用级窗口是否需要面板让位（T-176）。
+///
+/// 面板是**瞬态浮层**（`WS_EX_TOPMOST`），本就该浮在用户正在打字的宿主应用之上。
+/// 但设置窗口是**应用级窗口**——它比浮层「更重」，面板压在它上面会让用户
+/// 以为设置没打开（真机症状：点托盘「打开设置」，屏幕上只剩 emoji 面板）。
+///
+/// 判据：存在**可见**的设置窗口，且其矩形与面板矩形有重叠。
+/// `EnumWindows` 回调是 `fn` 指针，不能捕获环境 —— 判据经线程局部静态传递。
+struct OverlapProbe {
+    class: Vec<u16>,
+    panel: RECT,
+    found: bool,
+}
+
+/// 目标是否应当置顶：需要让位（`should_yield`）时**不**置顶。
+///
+/// 纯函数，便于单测——层级映射的取反关系容易写反（T-176 真机缺陷之一）。
+fn target_topmost(should_yield: bool) -> bool {
+    !should_yield
+}
+
+/// 两个矩形是否相交（边界相接不算重叠）。
+fn rects_overlap(a: &RECT, b: &RECT) -> bool {
+    a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom
+}
+
+/// 类名是否匹配（`GetClassNameW` 的长度不含 NUL，`to_utf16` 的长度含 NUL）。
+///
+/// 这是纯函数，便于单测——长度差异是本判据的真实陷阱：
+/// `to_utf16("ZhuYeSettingsWindow")` 长度 17（16 字符 + NUL），
+/// 而 `GetClassNameW` 返回 16。直接比长度会**永远**不相等。
+fn class_name_matches(expected_nul_terminated: &[u16], actual: &[u16], actual_len: usize) -> bool {
+    if actual_len == 0 || actual_len > actual.len() {
+        return false;
+    }
+    expected_nul_terminated.len() == actual_len + 1
+        && expected_nul_terminated[actual_len] == 0
+        && expected_nul_terminated[..actual_len] == actual[..actual_len]
+}
+
+impl OverlapProbe {
+    /// 该窗口是否是「与面板重叠的设置窗口」。
+    unsafe fn hits(&self, hwnd: HWND) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetClassNameW, GetWindowRect, IsWindowVisible,
+        };
+        if !IsWindowVisible(hwnd).as_bool() {
+            return false;
+        }
+        let mut class = [0u16; 128];
+        let len = GetClassNameW(hwnd, &mut class);
+        // `to_utf16` 产出的是**带尾部 NUL** 的序列（"ZhuYeSettingsWindow" 长度 17），
+        // 而 `GetClassNameW` 返回的 `len` 不含 NUL（长度 16）——直接比长度会
+        // 永远不相等。故按「前 len 个单元」比较。
+        let name_matches = class_name_matches(&self.class, &class, len as usize);
+        if !name_matches {
+            return false;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return false;
+        }
+        rects_overlap(&rect, &self.panel)
+    }
+}
+
+thread_local! {
+    static OVERLAP_PROBE: std::cell::RefCell<Option<OverlapProbe>> = const { std::cell::RefCell::new(None) };
+}
+
+unsafe extern "system" fn overlap_probe(hwnd: HWND, _lparam: LPARAM) -> BOOL {
+    let hit = OVERLAP_PROBE.with(|slot| {
+        let borrowed = slot.borrow();
+        let Some(probe) = borrowed.as_ref() else {
+            return false;
+        };
+        unsafe { probe.hits(hwnd) }
+    });
+    if hit {
+        OVERLAP_PROBE.with(|slot| {
+            if let Some(probe) = slot.borrow_mut().as_mut() {
+                probe.found = true;
+            }
+        });
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+/// 应用级窗口是否需要面板让位（T-176）。
+///
+/// 面板是**瞬态浮层**（`WS_EX_TOPMOST`），本就该浮在用户正在打字的宿主应用之上。
+/// 但设置窗口是**应用级窗口**——它比浮层「更重」，面板压在它上面会让用户
+/// 以为设置没打开（真机症状：点托盘「打开设置」，屏幕上只剩 emoji 面板）。
+///
+/// 判据：存在**可见**的设置窗口，且其矩形与面板矩形有重叠。
+fn app_window_overlaps_panel(panel: RECT) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+    OVERLAP_PROBE.with(|slot| {
+        *slot.borrow_mut() = Some(OverlapProbe {
+            class: crate::wide::to_utf16(crate::window::WINDOW_CLASS_NAME),
+            panel,
+            found: false,
+        });
+    });
+    unsafe {
+        let _ = EnumWindows(Some(overlap_probe), LPARAM(0));
+    }
+    OVERLAP_PROBE.with(|slot| {
+        let borrowed = slot.borrow();
+        let found = borrowed.as_ref().is_some_and(|probe| probe.found);
+        drop(borrowed);
+        *slot.borrow_mut() = None;
+        found
+    })
+}
+
+/// 面板让位 / 复位顶层：与设置窗口重叠时降为普通顶层窗口，让设置窗口可见；
+/// 设置窗口消失后恢复置顶（面板本就该浮在宿主应用之上）。
+unsafe fn sync_topmost(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, WS_EX_TOPMOST};
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return;
+    }
+    let should_yield = app_window_overlaps_panel(rect);
+    let ex = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    let is_topmost = (ex & WS_EX_TOPMOST.0 as isize) != 0;
+    // 目标层级：`should_yield` ⇒ NOTOPMOST（给应用级窗口让位），否则 TOPMOST。
+    // 当前层级：`is_topmost` ⇒ TOPMOST，否则 NOTOPMOST。
+    // 两者是「相反」的映射，故目标 == 当前 ⟺ `should_yield != is_topmost`。
+    let want_topmost = target_topmost(should_yield);
+    if want_topmost == is_topmost {
+        return;
+    }
+    let after = if want_topmost {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(after),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
 unsafe fn position_panel(hwnd: HWND, width: i32, height: i32, use_memory: bool) {
     unsafe {
         let work = work_area();
@@ -344,6 +501,13 @@ struct PanelState {
     /// 浏览态 Esc 关闭窗口期（T-169，毫秒）：托盘双击呼出后临时接管键盘，
     /// 计时到点或鼠标进入面板即交还；`0` = 不接管（默认）。
     escape_for_milliseconds: u32,
+    /// `SetTimer` 返回的定时器 ID（让位检查）。
+    ///
+    /// `SetTimer` 在 `hwnd` 非空时**自行分配** ID，收到 `WM_TIMER` 的 `wparam`
+    /// 就是这个返回值，而非传入的 `nIDEvent`——必须存下来比对。
+    yield_timer_id: usize,
+    /// `SetTimer` 返回的定时器 ID（浏览态 Esc 关闭窗口期）；`0` = 未开启。
+    escape_timer_id: usize,
 }
 
 impl PanelState {
@@ -370,6 +534,8 @@ impl PanelState {
             target_hwnd: HWND::default(),
             quit_on_close,
             escape_for_milliseconds: 0,
+            yield_timer_id: 0,
+            escape_timer_id: 0,
         }
     }
 
@@ -435,6 +601,12 @@ unsafe extern "system" fn panel_proc(
             if !create.is_null() {
                 let state = unsafe { (*create).lpCreateParams } as *mut PanelState;
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize) };
+                // 让位检查定时器：面板可见期间周期检查是否需给应用级窗口让位。
+                // ID 用 `SetTimer` 的返回值（系统自行分配，见 `PanelState` 字段说明）。
+                let timer = unsafe { SetTimer(Some(hwnd), YIELD_TIMER, YIELD_INTERVAL_MS, None) };
+                if let Some(state) = unsafe { panel_state_mut(hwnd) } {
+                    state.yield_timer_id = timer;
+                }
             }
             LRESULT(1)
         }
@@ -607,11 +779,33 @@ unsafe extern "system" fn panel_proc(
             LRESULT(0)
         }
         // T-169：浏览态 Esc 窗口期到点即交还键盘，回到"点击即上屏、面板不抢焦"。
-        message if message == WM_TIMER && wparam.0 == ESCAPE_WINDOW_TIMER => {
-            unsafe {
-                end_escape_window(hwnd);
+        // 让位检查：设置窗口（应用级窗口）显示时把面板降为普通顶层，
+        // 避免面板压住设置窗口——真机症状「点打开设置却只看到 emoji 面板」。
+        message if message == WM_TIMER => {
+            // `wParam` 是 `SetTimer` 的**返回值**（系统自行分配的 ID），不是传入的常量。
+            let timer_id = wparam.0;
+            let mut handled = false;
+            if let Some(state) = unsafe { panel_state_mut(hwnd) } {
+                if state.yield_timer_id != 0 && timer_id == state.yield_timer_id {
+                    // 让位检查：设置窗口（应用级窗口）显示时把面板降为普通顶层，
+                    // 避免面板压住设置窗口——真机症状「点打开设置却只看到 emoji 面板」。
+                    unsafe {
+                        sync_topmost(hwnd);
+                    }
+                    handled = true;
+                } else if state.escape_timer_id != 0 && timer_id == state.escape_timer_id {
+                    // T-169：浏览态 Esc 窗口期到点即交还键盘，回到"点击即上屏、面板不抢焦"。
+                    unsafe {
+                        end_escape_window(hwnd);
+                    }
+                    handled = true;
+                }
             }
-            LRESULT(0)
+            if handled {
+                LRESULT(0)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
         }
         WM_THEMECHANGED | WM_SETTINGCHANGE => {
             unsafe {
@@ -782,6 +976,12 @@ unsafe fn leave_search(hwnd: HWND, state: &mut PanelState, clear: bool) {
     unsafe { invalidate(hwnd) };
 }
 
+/// 让位检查定时器：面板周期检查「是否有应用级窗口需要置顶」。
+const YIELD_TIMER: usize = 0x5A7A;
+
+/// 让位检查周期（毫秒）。
+const YIELD_INTERVAL_MS: u32 = 500;
+
 /// 浏览态 Esc 关闭窗口期的定时器 ID（面板独立循环，与托盘 `WM_TIMER` 无关）。
 const ESCAPE_WINDOW_TIMER: usize = 0x5A79;
 
@@ -799,15 +999,24 @@ unsafe fn begin_escape_window(hwnd: HWND) {
     if milliseconds == 0 {
         return;
     }
-    let _ = unsafe { SetTimer(Some(hwnd), ESCAPE_WINDOW_TIMER, milliseconds, None) };
+    let timer = unsafe { SetTimer(Some(hwnd), ESCAPE_WINDOW_TIMER, milliseconds, None) };
+    if let Some(state) = unsafe { panel_state_mut(hwnd) } {
+        state.escape_timer_id = timer;
+    }
 }
 
 /// 结束浏览态 Esc 窗口期：交还 NOACTIVATE（点格即上屏），撤掉定时器。
 unsafe fn end_escape_window(hwnd: HWND) {
+    let timer_id = (unsafe { panel_state_mut(hwnd) }).map(|state| state.escape_timer_id);
     if let Some(state) = unsafe { panel_state_mut(hwnd) } {
         state.escape_for_milliseconds = 0;
+        state.escape_timer_id = 0;
     }
-    let _ = unsafe { KillTimer(Some(hwnd), ESCAPE_WINDOW_TIMER) };
+    if let Some(timer_id) = timer_id {
+        if timer_id != 0 {
+            let _ = unsafe { KillTimer(Some(hwnd), timer_id) };
+        }
+    }
     unsafe { set_no_activate(hwnd, true) };
 }
 
@@ -1217,4 +1426,61 @@ fn register_panel_class(instance: HINSTANCE) -> Result<(), String> {
     }
     REGISTERED_ATOM.store(atom, Ordering::Relaxed);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 类名比较的长度陷阱（真实缺陷的根因）：`to_utf16` 带尾部 NUL，
+    /// `GetClassNameW` 的长度不含 NUL——直接比长度会永远不相等。
+    #[test]
+    fn 类名比较容忍尾部空字符() {
+        let expected = crate::wide::to_utf16(crate::window::WINDOW_CLASS_NAME);
+        let units: Vec<u16> = crate::window::WINDOW_CLASS_NAME.encode_utf16().collect();
+        assert_eq!(
+            expected.len(),
+            units.len() + 1,
+            "to_utf16 应比字符数多一个 NUL"
+        );
+        assert!(class_name_matches(&expected, &units, units.len()));
+        // 长度不同（少一个 NUL）时必须不匹配。
+        assert!(!class_name_matches(&units, &units, units.len()));
+        // 名字不同必须不匹配。
+        let other: Vec<u16> = "ZhuYeSettingsPanel".encode_utf16().collect();
+        assert!(!class_name_matches(&expected, &other, other.len()));
+    }
+
+    /// 矩形重叠判定：仅在两个矩形真正相交时为真。
+    #[test]
+    fn 矩形重叠判定() {
+        let panel = RECT {
+            left: 522,
+            top: 148,
+            right: 1397,
+            bottom: 872,
+        };
+        let overlapping = RECT {
+            left: 179,
+            top: 126,
+            right: 1073,
+            bottom: 864,
+        };
+        let separate = RECT {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        assert!(rects_overlap(&panel, &overlapping));
+        assert!(!rects_overlap(&panel, &separate));
+    }
+
+    /// 层级映射：需要让位 ⇒ 不置顶；不需要让位 ⇒ 置顶。
+    /// （取反关系写反会让面板永远压住设置窗口——真机症状的直接成因。）
+    #[test]
+    fn 让位时目标不是置顶() {
+        assert!(!target_topmost(true), "需要让位时不应置顶");
+        assert!(target_topmost(false), "不需要让位时应置顶");
+    }
 }
