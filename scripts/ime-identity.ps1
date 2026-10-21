@@ -281,6 +281,31 @@ function Get-TsfStableDllPath {
     return (Join-Path $InstallDir $script:TsfIdentity['StableDllName'])
 }
 
+# 判定一个文件名是否属于「旧版式版本化 DLL」残留。
+#
+# 历史上出现过多种命名与标记叠加：
+#   zhu_ye_ime_<hash>.dll              （T-026 之前的下划线版本化名）
+#   zhu-ye-ime-<hash>.dll              （T-026 起的连字符版本化名）
+#   <上述>.zy-del[.zy-del...]          （占用文件改名后的延迟清理残留）
+#   <上述>.renamed.zy-del[...]         （改名探针在中间插入标记后再叠加 .zy-del）
+#
+# 旧写法用 `-like 'zhu_ye_ime_*.dll'` 之类的模式**锚定在文件名结尾**，
+# 于是中间被插入 `.renamed` 之类标记的文件永远匹配不上——实测开发机遗留的
+# `zhu_ye_ime_937632A1.dll.renamed.zy-del.zy-del.zy-del.zy-del` 就因此
+# 每轮清理都被漏掉、永久残留在部署目录里。
+#
+# 正确判定：**前缀**（版本化命名的两种历史写法）+ **文件名中含 `.dll`**，
+# 而不是结尾匹配；这样任何叠加在中间的标记都能覆盖。
+function Test-TsfLegacyVersionedDllName {
+    param(
+        [Parameter(Mandatory)][string]$Name
+    )
+    $isVersioned = ($Name -like 'zhu_ye_ime_*' -or $Name -like 'zhu-ye-ime-*')
+    if (-not $isVersioned) { return $false }
+    # 含 `.dll` 即可（`zhu-ye-ime-<hash>.dll.zy-del` 这类也含）。
+    return ($Name -like '*.dll*')
+}
+
 function Get-TsfVersionsDir {
     <#
     .SYNOPSIS
@@ -422,8 +447,7 @@ function Remove-TsfOldVersionDlls {
             $stale += $f.FullName
             continue
         }
-        if ($f.Name -like 'zhu_ye_ime_*.dll' -or $f.Name -like 'zhu-ye-ime-*.dll' -or
-            $f.Name -like 'zhu_ye_ime_*.dll.zy-del*' -or $f.Name -like 'zhu-ye-ime-*.dll.zy-del*') {
+        if (Test-TsfLegacyVersionedDllName -Name $f.Name) {
             $stale += $f.FullName
         }
     }
