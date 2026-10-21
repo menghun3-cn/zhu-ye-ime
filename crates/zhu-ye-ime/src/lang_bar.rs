@@ -37,7 +37,6 @@ use windows::Win32::Graphics::Gdi::{
     DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, HBITMAP, HFONT, LOGFONTW, OUT_DEFAULT_PRECIS,
     TRANSPARENT,
 };
-use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::TextServices::{
     ITfLangBarItem, ITfLangBarItemButton, ITfLangBarItemButton_Impl, ITfLangBarItemMgr,
@@ -67,27 +66,100 @@ const SETTINGS_MENU_ID: u32 = 1;
 
 /// 查找设置窗口可执行文件：优先 DLL 同目录，其次上级 bin\ 子目录（发行包布局）。
 /// 纯函数便于单测（DLL 路径由调用方注入）。
+/// 查找设置窗口可执行文件。
+///
+/// 候选顺序覆盖两种部署形态：
+/// - 实现 DLL 与设置程序同目录（T-176 之前）；
+/// - 实现 DLL 在 `tsf\versions\<id>\`、设置程序在 `tsf\..\bin\`（T-176 壳架构）。
+///
+/// 纯函数便于单测（DLL 目录由调用方注入）。
+/// 查找设置窗口可执行文件。
+///
+/// 候选顺序覆盖两种部署形态：
+/// - 实现 DLL 与设置程序同目录，或同目录下的 `bin\`（T-176 之前的布局）；
+/// - 实现 DLL 在 `tsf\versions\<id>\`、设置程序在 `tsf\..\bin\`（T-176 壳架构）。
+///
+/// 第二种形态只在 DLL 目录名**不是** `versions` 时才尝试——否则「上级目录\bin」
+/// 这条候选会命中与本 DLL 无关的目录（例如宿主目录下的同名程序），把设置窗口
+/// 启动成别的东西。
+///
+/// 纯函数便于单测（DLL 目录由调用方注入）。
 fn find_settings_exe(dll_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let candidates = [
+    let mut candidates = vec![
         dll_dir.join("zhu-ye-settings.exe"),
         dll_dir.join("bin").join("zhu-ye-settings.exe"),
     ];
+    // 实现 DLL 位于 `versions\<id>\` → 祖父目录名是 `versions`。
+    let in_versions = dll_dir
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .is_some_and(|name| name.eq_ignore_ascii_case("versions"));
+    if in_versions {
+        // 布局：实现 DLL 在 `<root>\tsf\versions\<id>\`，设置程序在 `<root>\bin\`。
+        // 从 `versions\<id>\` 往上逐级试，直到找到 bin\ 或同级的设置程序。
+        let mut ancestor = dll_dir.parent();
+        for _ in 0..4 {
+            let Some(dir) = ancestor else { break };
+            candidates.push(dir.join("zhu-ye-settings.exe"));
+            candidates.push(dir.join("bin").join("zhu-ye-settings.exe"));
+            ancestor = dir.parent();
+        }
+    }
     candidates.into_iter().find(|p| p.is_file())
 }
 
 /// 打开竹叶输入法设置窗口（D-26 已规划的 ITfFnConfigure 拉起逻辑，T-114）。
 /// 定位不到设置程序时只记日志，不做 UI 报错（DLL 热路径禁止打扰输入）。
-pub(crate) fn launch_settings() {
-    let mut buf = [0u16; 1024];
-    let len = unsafe { GetModuleFileNameW(None, &mut buf) };
-    if len == 0 {
-        return;
+/// 定位不到设置程序时只记日志，不做 UI 报错（DLL 热路径禁止打扰输入）。
+/// 本模块内的锚点函数：取其地址经 `GetModuleHandleExW(FROM_ADDRESS)`
+/// 反查**本 DLL** 所在目录。
+///
+/// 为什么不能用 `GetModuleFileNameW(None)`：它返回的是**宿主进程主模块**
+/// （如 `C:\Windows\explorer.exe`），不是本 DLL——实测那样会到 `C:\Windows\`
+/// 去找设置程序、永远找不到。壳架构（T-176）下实现 DLL 位于
+/// `versions\<id>\`，更需要按 DLL 自身定位。
+fn lang_bar_module_anchor() {}
+
+/// 反查本 DLL 所在目录。
+fn module_directory() -> Option<std::path::PathBuf> {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::LibraryLoader::{
+        GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    };
+    let mut module = HMODULE::default();
+    let address = (lang_bar_module_anchor as fn()) as usize;
+    let ok = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            windows::core::PCWSTR(address as *const u16),
+            &mut module,
+        )
+    };
+    if ok.is_err() {
+        return None;
     }
-    let dll_path = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]));
-    let Some(dll_dir) = dll_path.parent() else {
+    let mut buffer = [0u16; 4096];
+    let length = unsafe { GetModuleFileNameW(Some(module), &mut buffer) };
+    if length == 0 {
+        return None;
+    }
+    let module_path = String::from_utf16_lossy(&buffer[..length as usize]);
+    let mut directory = std::path::PathBuf::from(module_path);
+    directory.pop();
+    Some(directory)
+}
+
+/// 打开竹叶输入法设置窗口（D-26 已规划的 ITfFnConfigure 拉起逻辑，T-114）。
+/// 定位不到设置程序时只记日志，不做 UI 报错（DLL 热路径禁止打扰输入）。
+pub(crate) fn launch_settings() {
+    let Some(dll_dir) = module_directory() else {
+        crate::tsf::debug_log("zhu-ye: settings module dir not found");
         return;
     };
-    let Some(exe) = find_settings_exe(dll_dir) else {
+    // 部署布局：实现 DLL 在 `tsf\versions\<id>\`，设置程序在 `tsf\..\bin\`。
+    // 故候选顺序为：本目录 → 本目录\bin → 上级目录 → 上级目录\bin。
+    let Some(exe) = find_settings_exe(&dll_dir) else {
         crate::tsf::debug_log("zhu-ye: settings exe not found beside dll");
         return;
     };
@@ -660,6 +732,25 @@ mod tests {
         // 均缺失 → None。
         assert!(find_settings_exe(&base.join("missing")).is_none());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// T-176 壳架构布局：实现 DLL 在 `<root>\tsf\versions\<id>\`，设置程序在 `<root>\bin\`。
+    #[test]
+    fn find设置可执行文件路径_版本目录布局() {
+        let root = std::env::temp_dir().join("zhu-ye-langbar-versions-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let version_dir = root.join("tsf").join("versions").join("6fa6af97");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin").join("zhu-ye-settings.exe"), b"x").unwrap();
+        // versions\<id>\ 下找不到 → 向上找到 <root>\bin\。
+        let found = find_settings_exe(&version_dir).unwrap();
+        assert_eq!(found, root.join("bin").join("zhu-ye-settings.exe"));
+        // 同目录优先。
+        std::fs::write(version_dir.join("zhu-ye-settings.exe"), b"x").unwrap();
+        let found = find_settings_exe(&version_dir).unwrap();
+        assert_eq!(found, version_dir.join("zhu-ye-settings.exe"));
+        let _ = std::fs::remove_dir_all(&root);
     }
     /// 桩 sink：记录收到的 OnUpdate 标志位。
     #[implement(ITfLangBarItemSink)]
